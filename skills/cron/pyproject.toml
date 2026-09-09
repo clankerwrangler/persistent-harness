@@ -1,0 +1,13 @@
+[project]
+name = "persistent-harness-cron"
+version = "1.0.0"
+description = "Durable scheduled agent jobs owned by the persistent harness"
+requires-python = ">=3.11"
+dependencies = []
+
+[tool.persistent-harness]
+id = "cron"
+import-name = "harness_cron"
+alias = "cron"
+entry-point = "run"
+host-requests = ["cron.manage"]

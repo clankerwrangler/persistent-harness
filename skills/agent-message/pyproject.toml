@@ -1,0 +1,11 @@
+[project]
+name = "persistent-harness-agent-message"
+version = "1.0.0"
+requires-python = ">=3.11"
+dependencies = []
+
+[tool.persistent-harness]
+id = "agent-message"
+import-name = "harness_agent_message"
+alias = "agent_message"
+host-requests = ["agent_message.list_agents", "agent_message.send"]

@@ -1,0 +1,13 @@
+[project]
+name = "persistent-harness-background"
+version = "1.0.0"
+description = "Detached OS process launch and tracking"
+requires-python = ">=3.11"
+dependencies = []
+
+[tool.persistent-harness]
+id = "background"
+import-name = "harness_background"
+alias = "background"
+entry-point = "run"
+host-requests = []
