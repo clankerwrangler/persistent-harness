@@ -4,11 +4,19 @@ import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
-import test from "node:test";
+import test, { after } from "node:test";
+import { execFileSync } from "node:child_process";
 import {
   CANONICAL_CONTEXT_LIMITS, CanonicalContextError, THINKING_SIGNATURE_CUSTOM_TYPE,
   THINKING_SIGNATURE_VERSION, projectCanonicalContext, projectCanonicalBranch, planUnknownRecovery,
 } from "../src/canonical-context.mjs";
+
+const originalBudget = process.env.PI_HARNESS_CONTEXT_STRING_CODE_UNITS;
+delete process.env.PI_HARNESS_CONTEXT_STRING_CODE_UNITS;
+after(() => {
+  if (originalBudget === undefined) delete process.env.PI_HARNESS_CONTEXT_STRING_CODE_UNITS;
+  else process.env.PI_HARNESS_CONTEXT_STRING_CODE_UNITS = originalBudget;
+});
 
 const sdkEntry = process.env.PI_HARNESS_PI_MODULE;
 assert(sdkEntry && path.isAbsolute(sdkEntry), "Set PI_HARNESS_PI_MODULE to the exact STOCK dist/index.js");
@@ -560,4 +568,221 @@ test("shared canonical branch export validates, overlays, detaches and does not 
   assert.equal(JSON.stringify(entries), original);
   assert.throws(() => projectCanonicalBranch({ entries: [...entries,
     messageEntry("duplicate", "compact", result("call_target"))], leafId: "duplicate" }), { code: "ERR_CONTEXT_DUPLICATE_RESULT_ID" });
+});
+
+
+function archiveFixture() {
+  const target = thinkingEntry();
+  target.message.content.push(call("known"));
+  const entries = [target, amendment(target), messageEntry("known-result", "metadata", result("known"))];
+  const payload = "archive".repeat(Math.ceil(4 * 1024 * 1024 / 7));
+  for (let i = 0; i < 17; i++) entries.push({ type: "custom", customType: "fixture-archive", id: `opaque-${i}`,
+    parentId: entries.at(-1).id, timestamp, data: { payload, nested: { preserved: true } } });
+  entries.push(messageEntry("kept", entries.at(-1).id, user("kept")));
+  entries.push({ type: "compaction", id: "compact", parentId: "kept", timestamp,
+    summary: "small effective context", firstKeptEntryId: "kept", tokensBefore: 1 });
+  return entries;
+}
+
+test("archive lifetime strings do not cap the detached branch or small effective context", () => {
+  const entries = archiveFixture();
+  const branch = projectCanonicalBranch({ entries, leafId: "compact" });
+  assert.equal(branch.entries.length, entries.length);
+  assert.deepEqual(branch.entries.slice(3), entries.slice(3));
+  assert.notEqual(branch.entries[3].data, entries[3].data);
+  branch.entries[3].data.nested.preserved = false;
+  assert.equal(entries[3].data.nested.preserved, true);
+  for (const mode of ["native", "ordinary"]) {
+    let helperCalls = 0;
+    const projection = projectCanonicalContext({ ...input(entries, mode), buildSessionContext: (copied, leaf) => {
+      helperCalls++;
+      assert.notEqual(copied[3].data, entries[3].data);
+      copied[3].data.nested.preserved = false;
+      return buildSessionContext(copied, leaf);
+    } });
+    assert.equal(helperCalls, 1, "the second archive copy must not restore the lifetime limit");
+    assert.deepEqual(projection.messages, buildSessionContext(entries, "compact").messages);
+    assert.deepEqual(projection.outstanding.map(c => [c.toolCallId, c.retainedInContext]), [["call_target", false]]);
+    assert.deepEqual(planUnknownRecovery({ ...input(entries, mode), timestamp: 1 }).map(r => r.toolCallId), ["call_target"]);
+    assert.equal(entries[3].data.nested.preserved, true);
+    assert(!entries[0].message.content[0].thinkingSignature.includes("fixture-encryption"));
+  }
+});
+
+test("large archives still validate pruned signatures and duplicate call/result identities", () => {
+  const entries = archiveFixture();
+  entries[1].data.itemId = "wrong";
+  rejects(entries, "ERR_SIGNATURE_ITEM");
+  entries[1].data.itemId = "rs";
+  entries[0].message.content.push(call("known"));
+  rejects(entries, "ERR_CONTEXT_DUPLICATE_CALL_ID");
+  entries[0].message.content.pop();
+  entries.splice(3, 0, messageEntry("duplicate-result", "known-result", result("known")));
+  entries[4].parentId = "duplicate-result";
+  rejects(entries, "ERR_CONTEXT_DUPLICATE_RESULT_ID");
+});
+
+test("archive record strings and keys remain bounded and structure budgets remain shared", () => {
+  const large = "x".repeat(CANONICAL_CONTEXT_LIMITS.stringCodeUnits);
+  for (const data of [{ value: large }, { [large]: true }]) {
+    assert.throws(() => projectCanonicalBranch({ entries: [{ type: "custom", id: "one", parentId: null, data }], leafId: "one" }),
+      { code: "ERR_CONTEXT_DATA_LIMIT" });
+  }
+  const values = Array(700_000).fill(0);
+  const entries = Array.from({ length: 3 }, (_, i) => ({ type: "custom", id: `e${i}`, parentId: i ? `e${i - 1}` : null,
+    data: { values } }));
+  assert.throws(() => projectCanonicalBranch({ entries, leafId: "e2" }), { code: "ERR_CONTEXT_DATA_LIMIT" });
+  let getters = 0;
+  const corrupt = [{ type: "custom", id: "first", parentId: null }, { type: "custom", id: "last", parentId: "first" }];
+  Object.defineProperty(corrupt[1], "data", { enumerable: true, get() { getters++; } });
+  assert.throws(() => projectCanonicalBranch({ entries: corrupt, leafId: "last" }), { code: "ERR_CONTEXT_DATA_TYPE" });
+  assert.equal(getters, 0);
+  delete corrupt[1];
+  assert.throws(() => projectCanonicalBranch({ entries: corrupt, leafId: "first" }), { code: "ERR_CONTEXT_DATA_TYPE" });
+});
+
+test("signature overlays cannot concentrate separately bounded records into an oversized pruned target", () => {
+  const target = thinkingEntry();
+  target.message.content = Array.from({ length: 17 }, (_, i) => ({ type: "thinking", thinking: "fixture",
+    thinkingSignature: JSON.stringify({ type: "reasoning", id: `rs-${i}`, summary: [] }) }));
+  const encryptedContent = "x".repeat(CANONICAL_CONTEXT_LIMITS.signatureCodeUnits);
+  const entries = [target];
+  for (let i = 0; i < target.message.content.length; i++) entries.push(amendment(target, `metadata-${i}`, entries.at(-1).id,
+    { contentIndex: i, itemId: `rs-${i}`, encryptedContent }));
+  entries.push(messageEntry("kept", entries.at(-1).id, user("kept")));
+  entries.push({ type: "compaction", id: "compact", parentId: "kept", timestamp, summary: "small", firstKeptEntryId: "kept", tokensBefore: 1 });
+  assert.throws(() => projectCanonicalBranch({ entries, leafId: "compact" }), { code: "ERR_CONTEXT_DATA_LIMIT" });
+  rejects(entries, "ERR_CONTEXT_DATA_LIMIT");
+  assert(target.message.content.every(block => !block.thinkingSignature.includes("encrypted_content")));
+});
+
+test("final materialized view retains aggregate string bounds including summary metadata", () => {
+  const payload = "x".repeat(4 * 1024 * 1024);
+  const messages = chain(Array.from({ length: 17 }, () => user(payload)));
+  rejects(messages, "ERR_CONTEXT_DATA_LIMIT");
+  const entries = Array.from({ length: 17 }, (_, i) => ({ type: "branch_summary", id: `summary-${i}`,
+    parentId: i ? `summary-${i - 1}` : null, timestamp, fromId: "fixture", summary: "small", details: { payload } }));
+  let helperCalls = 0;
+  assert.throws(() => projectCanonicalContext({ ...input(entries), buildSessionContext: (copied, leaf) => {
+    helperCalls++;
+    const context = buildSessionContext(copied, leaf);
+    assert(context.messages.every(message => !message.details));
+    return context;
+  } }), { code: "ERR_CONTEXT_DATA_LIMIT" });
+  assert.equal(helperCalls, 1, "failure must include metadata added after the stock helper");
+});
+
+test("final materialized view jointly bounds pruned outstanding and diagnostic identifiers", () => {
+  const entries = [], suffix = "x".repeat(CANONICAL_CONTEXT_LIMITS.idCodeUnits - 8);
+  for (let i = 0; i < 8500; i++) {
+    const pending = `c${String(i).padStart(7, "0")}${suffix}`;
+    const orphan = `r${String(i).padStart(7, "0")}${suffix}`;
+    // Each returned array is below 64 Mi units; their combined view exceeds it.
+    entries.push(messageEntry(`call-${i}`, entries.at(-1)?.id ?? null, assistant(`a-${i}`, [call(pending)])));
+    entries.push(messageEntry(`result-${i}`, entries.at(-1).id, result(orphan)));
+  }
+  entries.push(messageEntry("kept", entries.at(-1).id, user("small")));
+  entries.push({ type: "compaction", id: "compact", parentId: "kept", timestamp, summary: "small", firstKeptEntryId: "kept", tokensBefore: 1 });
+  let helperCalls = 0;
+  assert.throws(() => projectCanonicalContext({ ...input(entries), buildSessionContext: (copied, leaf) => {
+    helperCalls++;
+    return buildSessionContext(copied, leaf);
+  } }), { code: "ERR_CONTEXT_DATA_LIMIT" });
+  assert.equal(helperCalls, 1, "tiny messages must not hide archive-sized diagnostic/unknown-call identifiers");
+});
+
+
+function budgetProcess(body) {
+  const code = `import assert from "node:assert/strict";
+    const { projectCanonicalContext, projectCanonicalBranch, getCanonicalContextStringCodeUnits, CANONICAL_CONTEXT_LIMITS } = await import(${JSON.stringify(new URL("../src/canonical-context.mjs", import.meta.url).href)});
+    const { buildSessionContext } = await import(${JSON.stringify(pathToFileURL(sdkEntry).href)});
+    const key = "PI_HARNESS_CONTEXT_STRING_CODE_UNITS";
+    const stamp = "2026-01-01T00:00:00Z";
+    const project = (entries, helper = buildSessionContext, mode = "native") => projectCanonicalContext({ entries, leafId: entries.at(-1)?.id ?? null, buildSessionContext: helper, mode });
+    ${body}
+    console.log(JSON.stringify({ passed: true }));`;
+  const env = { ...process.env };
+  delete env.PI_HARNESS_CONTEXT_STRING_CODE_UNITS;
+  assert.deepEqual(JSON.parse(execFileSync(process.execPath, ["--input-type=module", "-e", code],
+    { env, encoding: "utf8", timeout: 30000, maxBuffer: 64 * 1024 })), { passed: true });
+}
+
+test("materialized budget getter defaults only when absent and rejects invalid configuration without its value", () => {
+  budgetProcess(`
+    assert.equal(getCanonicalContextStringCodeUnits.length, 0);
+    assert.equal(getCanonicalContextStringCodeUnits(), 67108864);
+    for (const value of ["67108864", "201326592", "268435456"]) {
+      process.env[key] = value;
+      assert.equal(getCanonicalContextStringCodeUnits(), Number(value));
+    }
+    for (const value of ["", " ", "0", "1", "67108863", "268435457", "-67108864", "+67108864",
+      "067108864", "67108864.0", "1e8", "0x4000000", "NaN", "Infinity", "9007199254740992", "private-invalid-marker"]) {
+      process.env[key] = value;
+      const check = error => error.code === "ERR_CONTEXT_BUDGET_CONFIG"
+        && error.message === "Canonical context rejected: ERR_CONTEXT_BUDGET_CONFIG";
+      assert.throws(() => getCanonicalContextStringCodeUnits(), check);
+      let helpers = 0;
+      assert.throws(() => project([], () => { helpers++; return { messages: [] }; }), check);
+      assert.equal(helpers, 0);
+    }
+    delete process.env[key];
+    assert.equal(getCanonicalContextStringCodeUnits(), 67108864);
+    assert.equal(CANONICAL_CONTEXT_LIMITS.stringCodeUnits, 67108864);
+    assert(Object.isFrozen(CANONICAL_CONTEXT_LIMITS));
+  `);
+});
+
+test("configured materialized copies preserve large content and details in both modes with one captured budget", () => {
+  budgetProcess(`
+    const payload = "x".repeat(4 * 1024 * 1024);
+    const entries = Array.from({ length: 19 }, (_, i) => ({ type: "message", id: "e" + i,
+      parentId: i ? "e" + (i - 1) : null, timestamp: stamp,
+      message: { role: "user", content: payload, details: { payload, kept: true }, timestamp: i } }));
+    assert.throws(() => project(entries), { code: "ERR_CONTEXT_DATA_LIMIT" });
+    for (const mode of ["native", "ordinary"]) {
+      process.env[key] = "201326592";
+      const result = project(entries, (copied, leaf) => {
+        process.env[key] = "67108864";
+        return buildSessionContext(copied, leaf);
+      }, mode);
+      assert.deepEqual(result.messages, entries.map(entry => entry.message));
+      assert.deepEqual(result.outstanding, []);
+      assert.deepEqual(result.diagnostics, []);
+      result.messages[0].details.kept = false;
+      assert.equal(entries[0].message.details.kept, true);
+      assert.equal(getCanonicalContextStringCodeUnits(), 67108864);
+    }
+    process.env[key] = "201326592";
+    assert.equal(project(entries, (copied, leaf) => {
+      process.env[key] = "invalid-after-capture";
+      return buildSessionContext(copied, leaf);
+    }).messages.length, 19);
+    assert.throws(() => getCanonicalContextStringCodeUnits(), { code: "ERR_CONTEXT_BUDGET_CONFIG" });
+  `);
+});
+
+test("configured final view still bounds metadata and cannot borrow a later setting or raise archive/signature limits", () => {
+  budgetProcess(`
+    const payload = "x".repeat(4 * 1024 * 1024);
+    const summaries = Array.from({ length: 33 }, (_, i) => ({ type: "branch_summary", id: "s" + i,
+      parentId: i ? "s" + (i - 1) : null, timestamp: stamp, fromId: "fixture", summary: "small", details: { payload } }));
+    process.env[key] = "134217728";
+    let helpers = 0;
+    assert.throws(() => project(summaries, (copied, leaf) => {
+      helpers++;
+      process.env[key] = "268435456";
+      return buildSessionContext(copied, leaf);
+    }), { code: "ERR_CONTEXT_DATA_LIMIT" });
+    assert.equal(helpers, 1);
+    assert.equal(project(summaries).messages.length, 33);
+    const oversized = [{ type: "custom", id: "too-large", parentId: null, data: "x".repeat(67108864) }];
+    assert.throws(() => project(oversized), { code: "ERR_CONTEXT_DATA_LIMIT" });
+    const target = { type: "message", id: "target", parentId: null, timestamp: stamp, message: { role: "assistant", id: "assistant",
+      content: [{ type: "thinking", thinking: "fixture", thinkingSignature: JSON.stringify({ type: "reasoning", id: "rs", summary: [] }) }] } };
+    const update = { type: "custom", customType: "persistent-harness:assistant-thinking-signature:v1", id: "update", parentId: "target",
+      timestamp: stamp, data: { version: 1, messageEntryId: "target", messageId: "assistant", itemId: "rs", contentIndex: 0,
+        encryptedContent: "x".repeat(CANONICAL_CONTEXT_LIMITS.signatureCodeUnits + 1) } };
+    assert.throws(() => project([target, update]), { code: "ERR_SIGNATURE_DATA" });
+    assert.equal(CANONICAL_CONTEXT_LIMITS.stringCodeUnits, 67108864);
+  `);
 });

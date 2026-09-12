@@ -38,6 +38,16 @@ Installation writes thin wrappers under the selected agent directory (`PI_CODING
 
 Use the same environment for the supervisor and its workers. Configure credentials through Pi, never in source, examples, or committed environment files. Both Node and the external files must remain accessible after restarting your terminal or service.
 
+`PI_HARNESS_CONTEXT_STRING_CODE_UNITS` optionally selects the aggregate materialized-view string/key budget. Unset means `67108864` (64 Mi UTF-16 code units). Acceptable values are plain decimal integers from `67108864` through `268435456`, without signs, whitespace, leading zeros, fractions, or exponents. Empty or invalid values fail with the value-free `ERR_CONTEXT_BUDGET_CONFIG`; they are not clamped or replaced by the default. For example:
+
+```sh
+export PI_HARNESS_CONTEXT_STRING_CODE_UNITS=134217728
+```
+
+The setting applies to helper-output messages and the complete returned projection, including summary metadata, outstanding calls, and diagnostics. Archive-record, signature, node, and depth limits remain unchanged; see [Canonical history](ARCHITECTURE.md#canonical-history). This is an admission ceiling, not a heap reservation, wire-byte bound, token allowance, or concurrent-actor capacity guarantee. Select it using retained-context and host-resource measurements.
+
+The zero-argument `getCanonicalContextStringCodeUnits()` export in `src/canonical-context.mjs` reports the effective process value. Configure the process environment, not only an in-process SDK loader's `env` object. Offline validators must receive the same explicit value; containers do not inherit it automatically. Seal that selection with the source/configuration receipt. Existing workers retain their environment until recreated through the [controlled update workflow](OPERATIONS.md#develop-and-promote-one-source-revision).
+
 ## External extensions and clients
 
 `PI_HARNESS_ACTOR_EXTENSIONS` selects additional extension entry paths as a JSON array or a platform-delimited list. For example:

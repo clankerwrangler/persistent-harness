@@ -746,3 +746,72 @@ test("external compaction hook receives canonical projections and composed names
   } finally { await worker.close(); }
   assert.throws(() => worker.lifecycle.projectContext({ entries: [], leafId: null, mode: "ordinary" }), /unavailable/);
 });
+
+
+test("worker recovery, context reads, and compaction preserve large opaque archives with small live context", async () => {
+  const { worker } = await fixture({ argv: ["--mode", "rpc", "--no-session", "--provider", "worker-fixture", "--model", "fixture",
+    "--no-extensions", "--no-skills", "--no-context-files"] });
+  try {
+    const manager = worker.session.sessionManager;
+    const payload = "x".repeat(4 * 1024 * 1024);
+    for (let i = 0; i < 17; i++) manager.appendCustomEntry("fixture-archive", { payload, nested: { kept: true } });
+    for (let i = 0; i < 3; i++) manager.appendMessage({ role: "user", content: `question ${i} `.repeat(80), timestamp: i });
+    const entries = manager.getEntries(), leafId = manager.getLeafId();
+    const plain = external.sdk.buildSessionContext(entries, leafId).messages;
+    assert.equal(plain.length, 3);
+    assert.deepEqual(worker.getMessages(), plain);
+    assert.deepEqual(worker.coordinator.projectedMessages(), plain);
+    await worker.coordinator.recover();
+    assert.deepEqual(manager.getEntries(), entries, "no unknown result or history repair is needed");
+    const { prepareActorCompaction } = await import("../src/actor-compaction.mjs");
+    const prepared = prepareActorCompaction({ sdk: external.sdk, core: external.core, entries, leafId,
+      settings: { enabled: true, reserveTokens: 256, keepRecentTokens: 20 } });
+    assert(prepared.preparation);
+    assert.deepEqual(prepared.branchEntries, entries);
+    assert.equal(prepared.outstanding.length, 0);
+    const copied = prepared.branchEntries.find(entry => entry.customType === "fixture-archive");
+    copied.data.nested.kept = false;
+    assert.equal(manager.getEntries().find(entry => entry.customType === "fixture-archive").data.nested.kept, true);
+  } finally { await worker.close(); }
+});
+
+
+test("configured process budget reaches worker reads, recovery, compaction and the canonical extension service", async () => {
+  const previous = process.env.PI_HARNESS_CONTEXT_STRING_CODE_UNITS;
+  process.env.PI_HARNESS_CONTEXT_STRING_CODE_UNITS = "201326592";
+  let emitProjection, worker;
+  try {
+    const { default: harnessExtension } = await import("../src/extension.mjs");
+    ({ worker } = await fixture({ argv: ["--mode", "rpc", "--no-session", "--provider", "worker-fixture", "--model", "fixture",
+      "--no-extensions", "--no-skills", "--no-context-files"], extensionFactory(pi, lifecycle) {
+        fixtureExtension(pi); harnessExtension(pi, lifecycle);
+        emitProjection = request => pi.events.emit("persistent-harness:project-canonical-context:v1", request);
+      } }));
+    const manager = worker.session.sessionManager, payload = "x".repeat(4 * 1024 * 1024);
+    for (let i = 0; i < 19; i++) manager.appendMessage({ role: "user", content: payload, details: { payload, kept: true }, timestamp: i });
+    const entries = manager.getEntries(), leafId = manager.getLeafId();
+    const plain = external.sdk.buildSessionContext(entries, leafId).messages;
+    assert.deepEqual(worker.getMessages(), plain);
+    assert.deepEqual(worker.coordinator.projectedMessages(), plain);
+    await worker.coordinator.recover();
+    assert.deepEqual(manager.getEntries(), entries);
+    const { prepareActorCompaction } = await import("../src/actor-compaction.mjs");
+    assert(prepareActorCompaction({ sdk: external.sdk, core: external.core, entries, leafId,
+      settings: { enabled: true, reserveTokens: 256, keepRecentTokens: 20 } }).preparation);
+    for (const mode of ["native", "ordinary"]) {
+      const request = { entries: manager.getBranch(), leafId, mode };
+      emitProjection(request);
+      assert.equal(request.error, undefined);
+      assert.deepEqual(request.result.messages, plain);
+    }
+    process.env.PI_HARNESS_CONTEXT_STRING_CODE_UNITS = "67108864";
+    const request = { entries: manager.getBranch(), leafId, mode: "native", stringCodeUnits: 268435456 };
+    emitProjection(request);
+    assert.deepEqual(request.error, { code: "canonical_context_unavailable" });
+    assert.equal(request.result, undefined, "an extension request cannot select its own budget");
+  } finally {
+    if (worker) await worker.close();
+    if (previous === undefined) delete process.env.PI_HARNESS_CONTEXT_STRING_CODE_UNITS;
+    else process.env.PI_HARNESS_CONTEXT_STRING_CODE_UNITS = previous;
+  }
+});

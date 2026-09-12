@@ -25,6 +25,17 @@ function requireThat(condition, code) {
   if (!condition) throw new CanonicalContextError(code);
 }
 
+/** Effective process-wide materialized-view budget; no per-request override. */
+export function getCanonicalContextStringCodeUnits() {
+  const value = process.env.PI_HARNESS_CONTEXT_STRING_CODE_UNITS;
+  if (value === undefined) return CANONICAL_CONTEXT_LIMITS.stringCodeUnits;
+  requireThat(/^[1-9][0-9]{0,8}$/.test(value), "ERR_CONTEXT_BUDGET_CONFIG");
+  const units = Number(value);
+  requireThat(Number.isSafeInteger(units) && units >= CANONICAL_CONTEXT_LIMITS.stringCodeUnits
+    && units <= 256 * 1024 * 1024, "ERR_CONTEXT_BUDGET_CONFIG");
+  return units;
+}
+
 function isRecord(value) {
   return value !== null && typeof value === "object" && !Array.isArray(value);
 }
@@ -36,7 +47,7 @@ function identifier(value) {
 
 // Accept plain SDK data, including optional undefined object fields. Do not invoke
 // getters, toJSON(), or custom clone hooks. Returned data never aliases the input.
-function copyData(value) {
+function copyData(value, { archiveRecordUnits, stringCodeUnits = CANONICAL_CONTEXT_LIMITS.stringCodeUnits } = {}) {
   let nodes = 0, codeUnits = 0;
   const ancestors = new Set();
   function copy(item, depth) {
@@ -44,7 +55,7 @@ function copyData(value) {
       "ERR_CONTEXT_DATA_LIMIT");
     if (typeof item === "string") {
       codeUnits += item.length;
-      requireThat(codeUnits <= CANONICAL_CONTEXT_LIMITS.stringCodeUnits, "ERR_CONTEXT_DATA_LIMIT");
+      requireThat(codeUnits <= stringCodeUnits, "ERR_CONTEXT_DATA_LIMIT");
       return item;
     }
     if (item === null || item === undefined || typeof item === "boolean") return item;
@@ -70,10 +81,17 @@ function copyData(value) {
       requireThat(descriptor.enumerable && Object.hasOwn(descriptor, "value"), "ERR_CONTEXT_DATA_TYPE");
       if (array) requireThat(/^(0|[1-9]\d*)$/.test(key) && Number(key) < item.length,
         "ERR_CONTEXT_DATA_TYPE");
+      // Archive records share the node/depth/cycle budget, not a lifetime string sum.
+      // Include the top-level array slot key in that record's string accounting.
+      if (archiveRecordUnits && depth === 0) codeUnits = 0;
       codeUnits += key.length;
-      requireThat(codeUnits <= CANONICAL_CONTEXT_LIMITS.stringCodeUnits, "ERR_CONTEXT_DATA_LIMIT");
+      requireThat(codeUnits <= stringCodeUnits, "ERR_CONTEXT_DATA_LIMIT");
+      const copied = copy(descriptor.value, depth + 1);
+      if (archiveRecordUnits && depth === 0 && copied !== null && typeof copied === "object") {
+        archiveRecordUnits.set(copied, codeUnits);
+      }
       Object.defineProperty(result, key, {
-        value: copy(descriptor.value, depth + 1), enumerable: true, writable: true, configurable: true,
+        value: copied, enumerable: true, writable: true, configurable: true,
       });
     }
     if (array) requireThat(result.length === item.length && keys.length === item.length + 1,
@@ -82,6 +100,15 @@ function copyData(value) {
     return result;
   }
   return copy(value, 0);
+}
+
+// This policy is private to archive snapshots. The returned view and other data
+// copies retain aggregate string limits. All records and opaque fields survive.
+function copyArchive(entries) {
+  requireThat(Array.isArray(entries) && entries.length <= CANONICAL_CONTEXT_LIMITS.entries,
+    "ERR_CONTEXT_ENTRIES");
+  const recordUnits = new WeakMap();
+  return { entries: copyData(entries, { archiveRecordUnits: recordUnits }), recordUnits };
 }
 
 function selectBranch(entries, leafId) {
@@ -134,7 +161,7 @@ function parseSignature(signature) {
   return parsed;
 }
 
-function overlaySignatures(selected, diagnostics) {
+function overlaySignatures(selected, diagnostics, recordUnits) {
   const prior = new Map();
   for (const entry of selected) {
     let data;
@@ -162,7 +189,12 @@ function overlaySignatures(selected, diagnostics) {
         || item.encrypted_content === "" || item.encrypted_content === data.encryptedContent,
       "ERR_SIGNATURE_ENCRYPTION_CONFLICT");
       if (item.encrypted_content !== data.encryptedContent) {
-        block.thinkingSignature = JSON.stringify({ ...item, encrypted_content: data.encryptedContent });
+        const signature = JSON.stringify({ ...item, encrypted_content: data.encryptedContent });
+        const units = recordUnits.get(target) - block.thinkingSignature.length + signature.length;
+        requireThat(units <= CANONICAL_CONTEXT_LIMITS.stringCodeUnits, "ERR_CONTEXT_DATA_LIMIT");
+        // Separately bounded amendments must not concentrate an oversized target.
+        recordUnits.set(target, units);
+        block.thinkingSignature = signature;
       }
       diagnostics.push({ code: "SIGNATURE_OVERLAY", severity: "info", entryId: entry.id,
         messageEntryId: data.messageEntryId, contentIndex: data.contentIndex });
@@ -302,10 +334,11 @@ function ordinaryDiagnostics(messages, diagnostics) {
 
 /** Detached selected entries, validated and signature-overlaid without compaction pruning. */
 export function projectCanonicalBranch({ entries, leafId } = {}) {
-  const selected = selectBranch(copyData(entries), leafId);
+  const archive = copyArchive(entries);
+  const selected = selectBranch(archive.entries, leafId);
   const diagnostics = [];
   validateCompactions(selected);
-  overlaySignatures(selected, diagnostics);
+  overlaySignatures(selected, diagnostics, archive.recordUnits);
   indexMessages(selected.filter(entry => entry.type === "message")
     .map(entry => ({ message: entry.message, entryId: entry.id })));
   return { entries: selected, diagnostics };
@@ -325,16 +358,17 @@ export function projectCanonicalBranch({ entries, leafId } = {}) {
  * must gate ordinary handback on outstanding and all blocking diagnostics.
  */
 export function projectCanonicalContext({ entries, leafId, buildSessionContext, mode } = {}) {
+  const stringCodeUnits = getCanonicalContextStringCodeUnits();
   requireThat(mode === "native" || mode === "ordinary", "ERR_CONTEXT_MODE");
   requireThat(typeof buildSessionContext === "function", "ERR_CONTEXT_HELPER");
   const { entries: selected, diagnostics } = projectCanonicalBranch({ entries, leafId });
   const canonical = indexMessages(selected.filter(entry => entry.type === "message")
     .map(entry => ({ message: entry.message, entryId: entry.id })));
   let context;
-  try { context = buildSessionContext(copyData(selected), leafId); }
+  try { context = buildSessionContext(copyArchive(selected).entries, leafId); }
   catch { throw new CanonicalContextError("ERR_CONTEXT_HELPER_FAILED"); }
   requireThat(isRecord(context) && Array.isArray(context.messages), "ERR_CONTEXT_HELPER_RESULT");
-  let messages = copyData(context.messages);
+  let messages = copyData(context.messages, { stringCodeUnits });
   const retained = indexMessages(messages.map(message => ({ message })));
   for (const [id, record] of retained.calls) {
     requireThat(canonical.calls.has(id) && isDeepStrictEqual(record.message, canonical.calls.get(id).message),
@@ -375,7 +409,8 @@ export function projectCanonicalContext({ entries, leafId, buildSessionContext, 
     messages = projected;
     ordinaryDiagnostics(messages, diagnostics);
   }
-  return { messages, outstanding, diagnostics };
+  // Measure the whole returned view from its root, after metadata and reordering.
+  return copyData({ messages, outstanding, diagnostics }, { stringCodeUnits });
 }
 
 /** Return standard results for the canonical owner to append after interruption.
