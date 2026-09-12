@@ -343,7 +343,7 @@ export class HarnessSupervisor {
   #startingActors = new Set();
   #activeStarts = 0;
   #drainingStarts = false;
-  #launchPromises = new Set();
+  #launchPromises = new Map();
   #passivationTimers = new Map();
   #messageBuckets = new Map();
   #ownedSocketPath;
@@ -621,6 +621,7 @@ export class HarnessSupervisor {
     }
     if (state.role === "actor" && ["get_actor_input", "accept_actor_input", "record_input_delivery"].includes(type)) {
       this.#requireActor(state);
+      if (type !== "record_input_delivery") this.store.assertSessionAvailable(state.sessionId);
       const actor = this.#actors.get(state.sessionId);
       if (!actor || actor.generation !== state.generation) throw new Error("actor generation is stale");
       const input = this.store.getActorInput(params.inputId, state.sessionId);
@@ -704,6 +705,7 @@ export class HarnessSupervisor {
 
   async #dispatchActor(state, type, params) {
     this.#requireActor(state);
+    if (["spawn_child", "send_message", "revive_child"].includes(type)) this.store.assertSessionAvailable(state.sessionId);
     if (type === "set_session_name") { const session = this.store.setSessionName(state.sessionId, params.name); this.#broadcastNavigator("name_changed"); return { session }; }
     if (type === "update_activity") { const session = this.store.setActorActivity(state.sessionId, state.generation, params.streaming); this.#syncPassivationTimers(); this.#broadcastNavigator("activity_changed"); return { session }; }
     if (type === "update_progress_heading") return this.#updateProgressHeading(state, params);
@@ -763,7 +765,7 @@ export class HarnessSupervisor {
     if (type === "list_children") return { children: this.store.listChildren(state.sessionId) };
     if (type === "stop_child") { const child = this.store.resolveDirectChild(state.sessionId, params.selector); return this.#withSessionMutation(child.sessionId, async () => { await this.#stopActor(child.sessionId, "stopped"); return { child: this.store.getSession(child.sessionId) }; }); }
     if (type === "revive_child") { const child = this.store.resolveDirectChild(state.sessionId, params.selector); return this.#withSessionMutation(child.sessionId, async () => { this.#requestActorStart(child.sessionId, true); return { child: this.store.getSession(child.sessionId) }; }); }
-    if (type === "delete_child") { const child = this.store.resolveDirectChild(state.sessionId, params.selector); return this.#withSessionMutation(child.sessionId, async () => { await this.#stopActor(child.sessionId, "stopped"); return { child: this.store.deleteChild(state.sessionId, params.selector) }; }); }
+    if (type === "delete_child") { const child = this.store.resolveDirectChild(state.sessionId, params.selector); const result = await this.#deleteSessionTree(child.sessionId); return { child: result.session, deletedSessionIds: result.deletedSessionIds }; }
     if (type === "get_status") return this.status();
     throw new Error(`request ${type} is not available to actors`);
   }
@@ -878,13 +880,54 @@ export class HarnessSupervisor {
     if (type === "abort_session") return this.#withSessionMutation(params.sessionId, async () => { const actor = await this.#ensureActorReady(params.sessionId); await actor.worker.request("abort"); return { aborted: true }; });
     if (type === "stop_session") return this.#withSessionMutation(params.sessionId, async () => { await this.#stopActor(params.sessionId, "stopped"); return { session: this.store.getSession(params.sessionId) }; });
     if (type === "revive_session") return this.#withSessionMutation(params.sessionId, async () => { this.#requestActorStart(params.sessionId, true); return { session: this.store.getSession(params.sessionId) }; });
-    if (type === "delete_session") return this.#withSessionMutation(params.sessionId, async () => { await this.#stopActor(params.sessionId, "stopped"); if (!this.store.deleteSession) throw new Error("session deletion is unavailable"); const session = this.store.deleteSession(params.sessionId); if (session?.sessionFile) this.transcriptReader.clear(session.sessionFile); return { session }; });
+    if (type === "delete_session") return this.#deleteSessionTree(params.sessionId);
     throw new Error(`request ${type} is not available to clients`);
+  }
+
+  async #deleteSessionTree(sessionId) {
+    // Fence before the first await, including legacy tombstoned intermediates.
+    const sessions = this.store.beginSessionDeletion(sessionId);
+    const ids = sessions.map((session) => session.sessionId);
+    const pending = ids.flatMap((id) => [this.#sessionMutationTails.get(id), this.#launchPromises.get(id)]).filter(Boolean);
+    const failures = [];
+    try {
+      for (const id of ids) {
+        try { await this.#stopActor(id, "stopped"); } catch (error) { failures.push(error); }
+      }
+      // Old requests can finish shutdown, but cannot admit work across the fence.
+      await Promise.allSettled(pending);
+      for (const id of ids) {
+        const record = this.#actors.get(id);
+        if (record?.worker.isRunning) {
+          try { await this.#stopActor(id, "stopped"); } catch (error) { failures.push(error); }
+        }
+        if (this.#actors.get(id)?.worker.isRunning) failures.push(new Error("session actor is still running"));
+      }
+      if (failures.length) throw new AggregateError(failures, "session subtree could not be stopped; deletion was not committed");
+      const session = this.store.deleteSession(sessionId);
+      for (const item of sessions) {
+        if (item.sessionFile) this.transcriptReader.clear(item.sessionFile);
+        this.#clearSessionRouting(item.sessionId);
+      }
+      for (const client of this.#clientConnections) this.#write(client, event("sessions_deleted", { sessionIds: ids }));
+      this.#broadcastNavigator("sessions_deleted");
+      return { session, deletedSessionIds: ids };
+    } finally { this.store.endSessionDeletion(sessions); }
+  }
+
+  #clearSessionRouting(sessionId) {
+    this.#messageBuckets.delete(sessionId);
+    const state = this.#actorConnections.get(sessionId);
+    if (state) state.socket.end();
+    for (const client of this.#clientConnections) client.subscriptions.delete(sessionId);
   }
 
   #withSessionMutation(sessionId, operation) {
     const previous = this.#sessionMutationTails.get(sessionId) ?? Promise.resolve();
-    const current = previous.then(operation);
+    const current = previous.then(() => {
+      if (this.store.isSessionDeleting(sessionId)) this.store.assertSessionAvailable(sessionId);
+      return operation();
+    });
     const tail = current.catch(() => {});
     this.#sessionMutationTails.set(sessionId, tail);
     void tail.finally(() => { if (this.#sessionMutationTails.get(sessionId) === tail) this.#sessionMutationTails.delete(sessionId); });
@@ -1265,6 +1308,7 @@ export class HarnessSupervisor {
   }
 
   async #spawnChild(parentId, params) {
+    this.store.assertSessionAvailable(parentId);
     const parent = this.store.getSession(parentId); if (!parent) throw new Error("parent session does not exist");
     const parentGrant = this.store.getSessionSkillGrant(parentId); if (!parentGrant) throw new Error("parent skill manifest has not been registered");
     const policy = resolveChildLaunchPolicy({ request: { ...params, skillCatalog: parentGrant.skills }, parent, configuredModel: this.configuredChildModel, configuredThinkingLevel: this.configuredChildThinkingLevel, maxDepth: this.maxDepth });
@@ -1437,6 +1481,7 @@ export class HarnessSupervisor {
   }
 
   #requestActorStart(sessionId, revive) {
+    this.store.assertSessionAvailable(sessionId);
     let session = this.store.getSession(sessionId); if (!session || session.lifecycle === "deleted") throw new Error("session does not exist");
     if (this.#actors.has(sessionId) || this.#startingActors.has(sessionId) || this.#startQueue.includes(sessionId)) return session;
     if (revive && session.lifecycle !== "starting") session = this.store.prepareActorRevival(sessionId, randomUUID());
@@ -1456,7 +1501,9 @@ export class HarnessSupervisor {
   }
 
   async #ensureActorReadyOnce(sessionId) {
+    this.store.assertSessionAvailable(sessionId);
     const desired = await this.#reconcileSkillGrant(sessionId);
+    this.store.assertSessionAvailable(sessionId);
     let session = this.store.getSession(sessionId);
     if (!session || session.lifecycle === "deleted") throw new Error("session does not exist");
     const resident = this.#actors.get(sessionId);
@@ -1472,6 +1519,7 @@ export class HarnessSupervisor {
     this.#requestActorStart(sessionId, session.lifecycle !== "starting");
     const deadline = Date.now() + this.actorStartupTimeoutMs;
     while (Date.now() < deadline) {
+      this.store.assertSessionAvailable(sessionId);
       const record = this.#actors.get(sessionId);
       if (record?.worker.isRunning && this.store.getSession(sessionId)?.lifecycle === "resident") return record;
       const currentSession = this.store.getSession(sessionId);
@@ -1485,11 +1533,12 @@ export class HarnessSupervisor {
     try {
       while (this.#startQueue.length && this.#activeStarts < this.maxConcurrentStarts && !this.#stoppingPromise) {
         const nextId = this.#startQueue[0];
+        if (this.store.isSessionDeleting(nextId)) { this.#startQueue.shift(); continue; }
         if (new Set([...this.#actors.keys(), ...this.#startingActors]).size >= this.maxResidentActors) { const victim = this.store.findIdleResidentActor(nextId); if (!victim) break; await this.#stopActor(victim.sessionId, "passivated"); continue; }
         this.#startQueue.shift(); const session = this.store.getSession(nextId); if (!session || session.lifecycle !== "starting") continue;
         this.#startingActors.add(nextId); this.#activeStarts += 1;
-        const launchPromise = this.#launchActor(nextId).catch((error) => this.logger.error?.(`actor ${nextId} launch failed: ${error instanceof Error ? error.message : String(error)}`)).finally(() => { this.#launchPromises.delete(launchPromise); this.#startingActors.delete(nextId); this.#activeStarts -= 1; setImmediate(() => this.#drainActorStarts()); });
-        this.#launchPromises.add(launchPromise);
+        const launchPromise = this.#launchActor(nextId).catch((error) => this.logger.error?.(`actor ${nextId} launch failed: ${error instanceof Error ? error.message : String(error)}`)).finally(() => { this.#launchPromises.delete(nextId); this.#startingActors.delete(nextId); this.#activeStarts -= 1; setImmediate(() => this.#drainActorStarts()); });
+        this.#launchPromises.set(nextId, launchPromise);
       }
     } finally { this.#drainingStarts = false; }
   }
@@ -1520,7 +1569,7 @@ export class HarnessSupervisor {
       this.#broadcastNavigator("actor_error");
       throw error;
     }
-    const session = this.store.getActorLaunch(sessionId); if (!session || session.lifecycle !== "starting") return;
+    const session = this.store.getActorLaunch(sessionId); if (!session || session.lifecycle !== "starting" || this.store.isSessionDeleting(sessionId)) return;
     const worker = this.actorFactory({ command: process.execPath, args: [STOCK_ACTOR_WORKER, ...this.#actorArgs(session)], cwd: session.cwd, env: { ...this.#actorEnv(session), PI_HARNESS_PI_COMMAND: this.piCommand }, requestTimeoutMs: this.actorStartupTimeoutMs, promptPreflightTimeoutMs: this.actorPromptPreflightTimeoutMs,
       shutdownTimeoutMs: this.actorShutdownTimeoutMs, session });
     const record = { worker, generation: session.actorGeneration, rootOutputSession: Object.freeze({ sessionId: session.sessionId, kind: session.kind, depth: session.depth }), expectedLifecycle: null, exitError: null, eventSeq: 0, eventRing: [], eventRingBytes: 0, progressSummary: undefined, progressTurnId: null,
@@ -1540,6 +1589,7 @@ export class HarnessSupervisor {
         this.store.recordResolvedSessionInference(sessionId, session.actorGeneration,
           { provider: state.model.provider, model: state.model.id, thinkingLevel: state.thinkingLevel });
       }
+      this.store.assertSessionAvailable(sessionId);
       const processIdentity = await this.processIdentityFactory(worker.pid, session.actorToken);
       this.store.markActorStarted(sessionId, session.actorGeneration, { pid: worker.pid, sessionFile: state.sessionFile, processIdentity });
       await this.#deliverActorInputs(sessionId, record);
@@ -1549,7 +1599,7 @@ export class HarnessSupervisor {
       await this.#submitInitialTask(sessionId, record);
     } catch (error) {
       const expected = record.expectedLifecycle; const message = error instanceof Error ? error.message : String(error); record.expectedLifecycle ??= "error"; record.exitError = message;
-      await worker.close().catch(() => {}); if (this.#actors.get(sessionId) === record) this.#actors.delete(sessionId);
+      await worker.close().catch(() => {}); if (!worker.isRunning && this.#actors.get(sessionId) === record) this.#actors.delete(sessionId);
       if (!expected || expected === "error") { const current = this.store.getSession(sessionId); if (current?.lifecycle !== "error") this.store.markActorLifecycle(sessionId, session.actorGeneration, "error", message); this.store.completeSubmittedChildTask?.(sessionId, message); this.#broadcastNavigator("actor_error"); }
       throw error;
     }
@@ -1610,11 +1660,12 @@ export class HarnessSupervisor {
           await this.#log("actor_input_unresolved", { sessionId, inputId: input.inputId });
         }
       }
-      while (this.#actors.get(sessionId) === record) {
+      while (this.#actors.get(sessionId) === record && !record.expectedLifecycle && !this.store.isSessionDeleting(sessionId)) {
         const pendingInputs = this.store.listPendingActorInputs(sessionId);
         if (pendingInputs.length === 0) return;
         let progressed = false;
         for (const input of pendingInputs) {
+          if (record.expectedLifecycle || this.store.isSessionDeleting(sessionId)) return;
           // Ambiguous historical incorporation is not permission to submit again.
           if (associations[input.inputId] === "unresolved") continue;
           if (recordedInputIds.has(input.inputId)) {
@@ -1632,6 +1683,7 @@ export class HarnessSupervisor {
               || path.resolve(command.sourceInfo.path) !== path.resolve(this.actorExtensionPath)) {
               throw new Error("the paired internal-input extension command is unavailable");
             }
+            if (record.expectedLifecycle || this.store.isSessionDeleting(sessionId)) return;
             await record.worker.request("prompt", { message: actorInputPrompt(input.inputId) }, this.actorPromptPreflightTimeoutMs);
             const admitted = this.store.getActorInput(input.inputId, sessionId);
             if (admitted?.state !== "completed" && !(admitted?.state === "accepted" && admitted.acceptedGeneration === record.generation)) {
@@ -1669,6 +1721,7 @@ export class HarnessSupervisor {
   }
 
   async #submitInitialTask(sessionId, record) {
+    if (this.store.isSessionDeleting(sessionId) || record.expectedLifecycle) return;
     const task = this.store.nextQueuedChildTask(sessionId); if (!task) return; const child = this.store.getSession(sessionId); const parent = this.store.getSession(child.parentSessionId);
     const prompt = [`You are the retained child agent ${child.name}. Complete only the delegated task below.`, task.prompt, "When useful results are ready, send them explicitly to your parent with agent_message.send(); spawning never returns your answer automatically.", `Your parent is ${parent?.name ?? child.parentSessionId} (${parent?.shortId ?? child.parentSessionId}).`].join("\n\n");
     this.store.markChildTaskSubmitted(task.taskId); try { await record.worker.submit(prompt, "auto"); } catch (error) { this.store.completeSubmittedChildTask(sessionId, error instanceof Error ? error.message : String(error)); throw error; }
@@ -1881,6 +1934,7 @@ export class HarnessSupervisor {
   }
   #deliverPending(state) { if (state.role !== "actor") return; for (const message of this.store.listPendingMessages(state.sessionId)) this.#deliverMessage(state, message); }
   #deliverMessage(state, message) {
+    if (this.store.isSessionDeleting(state.sessionId)) return;
     const session = this.store.getSession(state.sessionId); const record = this.#actors.get(state.sessionId);
     if (this.#actorConnections.get(state.sessionId) !== state || state.deliveryInFlight.has(message.messageId)
       || session?.lifecycle !== "resident" || session.actorGeneration !== state.generation
@@ -2128,7 +2182,7 @@ export class HarnessSupervisor {
       for (const timer of this.#passivationTimers.values()) clearTimeout(timer); this.#passivationTimers.clear(); this.#startQueue = [];
       await this.#backgroundCompletionMonitor?.stop(); this.#backgroundCompletionMonitor = undefined;
       await this.#cronScheduler?.stop(); this.#cronScheduler = undefined;
-      await Promise.all([...this.#actors.keys()].map((id) => this.#stopActor(id, "passivated"))); await Promise.all([...this.#launchPromises]);
+      await Promise.all([...this.#actors.keys()].map((id) => this.#stopActor(id, "passivated"))); await Promise.all([...this.#launchPromises.values()]);
       for (const state of this.#sockets) state.socket.destroy();
       if (this.#server) await new Promise((resolve) => this.#server.close(resolve)); this.#server = undefined;
       if (this.#ownedSocketPath) try { await unlink(this.#ownedSocketPath); } catch {}

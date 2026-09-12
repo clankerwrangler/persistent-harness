@@ -273,6 +273,7 @@ const CURRENT_SCHEMA = `
 
 export class HarnessStore {
   #db;
+  #deletingSessions = new Set();
 
   constructor(databasePath, { readOnly = false } = {}) {
     this.#db = new DatabaseSync(databasePath, { readOnly });
@@ -468,6 +469,7 @@ export class HarnessStore {
   }
 
   createChild(parentId, { sessionId, sessionFile, policy, actorToken, now = Date.now() }) {
+    this.assertSessionAvailable(parentId);
     this.#db.exec("BEGIN IMMEDIATE");
     try {
       const parent = this.#sessionRow(parentId);
@@ -497,6 +499,7 @@ export class HarnessStore {
   registerActor(params, now = Date.now()) {
     const sessionId = params.sessionId ?? params.actorId;
     const generation = params.generation ?? params.actorGeneration;
+    this.assertSessionAvailable(sessionId);
     const row = this.#sessionRow(sessionId);
     if (!row) throw new Error("actor admission does not exist");
     if (row.lifecycle === "deleted") throw new Error("actor was deleted");
@@ -510,6 +513,7 @@ export class HarnessStore {
   }
 
   prepareActorRevival(sessionId, actorToken, now = Date.now(), { force = false, error = null } = {}) {
+    this.assertSessionAvailable(sessionId);
     this.#db.exec("BEGIN IMMEDIATE");
     try {
       const row = this.#sessionRow(sessionId);
@@ -659,6 +663,7 @@ export class HarnessStore {
   }
 
   markActorStarted(sessionId, generation, { pid = null, sessionFile = null, processIdentity = null } = {}, now = Date.now()) {
+    this.assertSessionAvailable(sessionId);
     const result = this.#db.prepare(`UPDATE sessions SET lifecycle = 'resident', actor_pid = ?,
       actor_identity_json = ?, session_file = coalesce(?, session_file), started_at = ?, stopped_at = NULL,
       streaming = 0, activity = 'idle', quiet_since = ?, last_error = NULL, updated_at = ?
@@ -867,41 +872,57 @@ export class HarnessStore {
     return this.#mappedSession(matches[0].id);
   }
 
+  // Traverse tombstones too: older deletions could leave live grandchildren.
+  getSessionSubtree(sessionId) {
+    if (!this.#sessionRow(sessionId)) throw new Error("session does not exist");
+    return this.#db.prepare(`WITH RECURSIVE subtree(id) AS (
+      SELECT id FROM sessions WHERE id = ?
+      UNION SELECT s.id FROM sessions s JOIN subtree t ON s.parent_session_id = t.id
+    ) SELECT s.id FROM sessions s JOIN subtree t ON t.id = s.id ORDER BY s.depth DESC, s.id`)
+      .all(sessionId).map((row) => this.#mappedSession(row.id));
+  }
+
+  isSessionDeleting(sessionId) { return this.#deletingSessions.has(sessionId); }
+  assertSessionAvailable(sessionId) {
+    if (this.isSessionDeleting(sessionId)) {
+      throw Object.assign(new Error("session subtree is being deleted"), { code: "session_deleting" });
+    }
+    const session = this.#sessionRow(sessionId);
+    if (!session || session.lifecycle === "deleted") throw new Error("session does not exist");
+  }
+
+  // The supervisor owns this synchronous fence across asynchronous actor shutdown.
+  beginSessionDeletion(sessionId) {
+    const sessions = this.getSessionSubtree(sessionId);
+    if (sessions.some((session) => this.isSessionDeleting(session.sessionId))) {
+      throw Object.assign(new Error("session subtree is already being deleted"), { code: "session_deleting" });
+    }
+    for (const session of sessions) this.#deletingSessions.add(session.sessionId);
+    return sessions;
+  }
+  endSessionDeletion(sessions) {
+    for (const session of sessions) this.#deletingSessions.delete(session.sessionId);
+  }
+
   deleteChild(parentId, selector, now = Date.now()) {
     const child = this.resolveDirectChild(parentId, selector);
-    this.#db.exec("BEGIN IMMEDIATE");
-    try {
-      this.#db.prepare("DELETE FROM actor_inputs WHERE session_id = ?").run(child.sessionId);
-      this.#terminalizeSessionWork(child.sessionId, now);
-      this.#db.prepare(`UPDATE sessions SET display_name = display_name || '-deleted-' || short_id,
-        lifecycle = 'deleted', actor_token = '', actor_pid = NULL, actor_identity_json = NULL,
-        streaming = 0, activity = 'inactive', quiet_since = NULL, last_error = NULL,
-        deleted_at = ?, stopped_at = ?, updated_at = ? WHERE id = ?`)
-        .run(now, now, now, child.sessionId);
-      this.#refreshAncestors(child.sessionId, now);
-      this.#db.exec("COMMIT");
-      return this.#mappedSession(child.sessionId);
-    } catch (error) { this.#db.exec("ROLLBACK"); throw error; }
+    return this.deleteSession(child.sessionId, now);
   }
 
   deleteSession(sessionId, now = Date.now()) {
-    const session = this.#mappedSession(sessionId);
-    if (!session) throw new Error("session does not exist");
-    if (session.kind === "root" && session.lifecycle === "deleted") return session;
-    if (session.kind === "child") {
-      const parentId = session.parentSessionId;
-      return this.deleteChild(parentId, session.sessionId, now);
-    }
-    const liveChildren = this.#db.prepare("SELECT count(*) AS count FROM sessions WHERE parent_session_id = ? AND lifecycle <> 'deleted'").get(sessionId);
-    if (Number(liveChildren.count) > 0) throw new Error("root with retained children cannot be deleted");
     this.#db.exec("BEGIN IMMEDIATE");
     try {
-      this.#db.prepare("DELETE FROM actor_inputs WHERE session_id = ?").run(sessionId);
-      this.#terminalizeSessionWork(sessionId, now);
-      this.#db.prepare(`UPDATE sessions SET display_name = display_name || '-deleted-' || short_id,
+      const sessions = this.getSessionSubtree(sessionId);
+      const tombstone = this.#db.prepare(`UPDATE sessions SET display_name = display_name || '-deleted-' || short_id,
         lifecycle = 'deleted', actor_token = '', actor_pid = NULL, actor_identity_json = NULL,
         streaming = 0, activity = 'inactive', quiet_since = NULL, last_error = NULL,
-        deleted_at = ?, stopped_at = ?, updated_at = ? WHERE id = ?`).run(now, now, now, sessionId);
+        deleted_at = ?, stopped_at = ?, updated_at = ? WHERE id = ? AND lifecycle <> 'deleted'`);
+      for (const session of sessions) {
+        this.#db.prepare("DELETE FROM actor_inputs WHERE session_id = ?").run(session.sessionId);
+        this.#terminalizeSessionWork(session.sessionId, now);
+        tombstone.run(now, now, now, session.sessionId);
+      }
+      this.#refreshAncestors(sessionId, now);
       this.#db.exec("COMMIT");
       return this.#mappedSession(sessionId);
     } catch (error) { this.#db.exec("ROLLBACK"); throw error; }
@@ -1152,6 +1173,7 @@ export class HarnessStore {
   createActorInput(sessionId, { inputId = randomUUID(), message, images = [], behavior = "auto", source = "user",
     origin = null, clientMessageId = null, retryIntent = null, pendingLimit = 100, pendingBytesLimit = MAX_PENDING_INPUT_BYTES_PER_SESSION,
     globalPendingBytesLimit = MAX_PENDING_INPUT_BYTES_GLOBAL }, now = Date.now()) {
+    this.assertSessionAvailable(sessionId);
     const session = this.#sessionRow(sessionId);
     if (!session || session.lifecycle === "deleted") throw new Error("session does not exist");
     const provenance = normalizeInputProvenance(source, origin);
@@ -1376,6 +1398,8 @@ export class HarnessStore {
     this.#db.exec("BEGIN IMMEDIATE");
     try {
       const { target, relationship } = this.#resolveReachableTarget(senderId, params.target);
+      this.assertSessionAvailable(senderId);
+      this.assertSessionAvailable(target.id);
       const id = params.messageId ?? randomUUID();
       const existing = this.#db.prepare("SELECT * FROM messages WHERE id = ?").get(id);
       if (existing) {
@@ -1399,6 +1423,8 @@ export class HarnessStore {
   }
 
   recordMessageSenderEntry(senderId, { messageId, entryId, peerId, relationship, body }, now = Date.now()) {
+    this.assertSessionAvailable(senderId);
+    this.assertSessionAvailable(peerId);
     this.#db.exec("BEGIN IMMEDIATE");
     try {
       const row = this.#db.prepare("SELECT * FROM messages WHERE id = ? AND sender_id = ?").get(messageId, senderId);

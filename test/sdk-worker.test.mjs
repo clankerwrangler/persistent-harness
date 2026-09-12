@@ -638,3 +638,111 @@ test("extension-requested shutdown drains command responses, UI, and owner work 
   idle.resolve(); await running;
   assert.equal(closed, true);
 });
+
+
+test("external compaction hook receives canonical projections and composed namespace instructions", async () => {
+  const { default: harnessExtension } = await import("../src/extension.mjs");
+  const directory = await mkdtemp(path.join(temporary, "projection-hook-"));
+  const extensionPath = path.join(directory, "projection-hook.mjs");
+  await writeFile(extensionPath, `export default function(pi) {
+    pi.on("session_before_compact", event => {
+      const projections = {};
+      for (const mode of ["native", "ordinary"]) {
+        const request = { entries: event.branchEntries, leafId: event.branchEntries.at(-1)?.id ?? null, mode };
+        pi.events.emit("persistent-harness:project-canonical-context:v1", request);
+        if (request.error || !request.result) return { cancel: true };
+        projections[mode] = request.result;
+      }
+      return { compaction: { summary: "external hook summary", tokensBefore: event.preparation.tokensBefore,
+        firstKeptEntryId: event.preparation.firstKeptEntryId,
+        details: { projections, instructions: event.customInstructions } } };
+    });
+  }`);
+  let projectionBus;
+  const { worker } = await fixture({
+    argv: ["--mode", "rpc", "--session", path.join(directory, "session.jsonl"),
+      "--provider", "worker-fixture", "--model", "fixture", "--no-extensions",
+      "--extension", extensionPath, "--no-skills", "--no-context-files"],
+    extensionFactory(pi, lifecycle) {
+      projectionBus = pi.events;
+      harnessExtension(pi, lifecycle);
+      fixtureExtension(pi);
+      lifecycle.prepareCompaction = event => ({
+        customInstructions: `${event.customInstructions}\nNAMESPACE_DIAGNOSTIC_FIXTURE`,
+      });
+    },
+  });
+  try {
+    assert.ok(worker.resources.getExtensions().extensions.some(e => e.path === extensionPath));
+    await worker.mutate(() => worker.session.settingsManager.applyOverrides({
+      compaction: { enabled: false, reserveTokens: 256, keepRecentTokens: 20 }, retry: { enabled: false },
+    }));
+    const manager = worker.session.sessionManager;
+    const user = content => ({ role: "user", content, timestamp: 1 });
+    const assistant = (content, extra = {}) => ({ role: "assistant", content,
+      api: "openai-responses", provider: "worker-fixture", model: "fixture", stopReason: "stop", timestamp: 2,
+      usage: { input: 50, output: 2, cacheRead: 0, cacheWrite: 0, totalTokens: 52,
+        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } }, ...extra });
+    manager.appendMessage(user("old context ".repeat(100)));
+    manager.appendMessage(assistant([{ type: "text", text: "old answer ".repeat(100) }]));
+    manager.appendMessage(user("native question"));
+    const callEntry = manager.appendMessage(assistant([
+      { type: "thinking", thinking: "reason", thinkingSignature: JSON.stringify({ type: "reasoning", id: "rs_fixture", summary: [] }) },
+      { type: "toolCall", id: "call_fixture", name: "read", arguments: { path: "x" }, async: true,
+        providerCallId: "call_fixture", providerItemId: "fc_fixture" },
+    ], { id: "message_fixture", stopReason: "toolUse" }));
+    manager.appendCustomEntry("persistent-harness:assistant-thinking-signature:v1", {
+      version: 1, messageEntryId: callEntry, messageId: "message_fixture", contentIndex: 0,
+      itemId: "rs_fixture", encryptedContent: "ENCRYPTED_REASONING_FIXTURE",
+    });
+    manager.appendMessage(assistant([{ type: "text", text: "interleaved progress" }]));
+    manager.appendMessage({ role: "toolResult", toolCallId: "call_fixture", toolName: "read",
+      content: [{ type: "text", text: "ACTUAL_COMPLETED_RESULT" }], isError: false, timestamp: 3 });
+    const staleRequest = { entries: structuredClone(manager.getBranch()), leafId: manager.getLeafId(), mode: "ordinary" };
+    manager.appendMessage(user("retained question ".repeat(100)));
+    manager.appendMessage(assistant([{ type: "text", text: "retained answer ".repeat(100) }]));
+    const file = manager.getSessionFile(), before = await readFile(file, "utf8");
+    const channel = "persistent-harness:project-canonical-context:v1";
+    const currentRequest = { entries: structuredClone(manager.getBranch()), leafId: manager.getLeafId(), mode: "ordinary" };
+    const rawRequest = structuredClone(currentRequest);
+    projectionBus.emit(channel, rawRequest);
+    assert.equal(rawRequest.error, undefined);
+    assert.equal(rawRequest.result.messages.filter(m => m.role === "toolResult").length, 1);
+    rawRequest.result.messages.length = 0;
+    assert.equal((await readFile(file, "utf8")), before, "projection is detached and does not write history");
+    const altered = structuredClone(currentRequest);
+    altered.entries.find(e => e.type === "message").message.content = "altered payload";
+    for (const invalid of [staleRequest, altered, { ...currentRequest, entries: [] },
+      { ...currentRequest, leafId: "foreign-leaf" }, { ...currentRequest, mode: "unsupported" }]) {
+      invalid.result = { messages: ["stale result"] };
+      projectionBus.emit(channel, invalid);
+      assert.deepEqual(invalid.error, { code: "canonical_context_unavailable" });
+      assert.equal(invalid.result, undefined, "rejected requests cannot reuse a stale result");
+    }
+    assert.equal((await readFile(file, "utf8")), before);
+    const result = await worker.handle({ type: "compact", customInstructions: "CALLER_INSTRUCTIONS_FIXTURE" });
+    assert.equal(result.summary, "external hook summary");
+    assert.equal(result.details.instructions, "CALLER_INSTRUCTIONS_FIXTURE\nNAMESPACE_DIAGNOSTIC_FIXTURE");
+    const { native, ordinary } = result.details.projections;
+    for (const projection of [native, ordinary]) {
+      assert.deepEqual(projection.outstanding, []);
+      assert.equal(projection.diagnostics.some(d => d.severity === "blocking"), false);
+      assert.equal(projection.messages.filter(m => m.role === "toolResult" && m.toolCallId === "call_fixture").length, 1);
+    }
+    const callIndex = ordinary.messages.findIndex(m => m.role === "assistant" && m.id === "message_fixture");
+    assert.equal(ordinary.messages[callIndex + 1].role, "toolResult");
+    assert.equal(native.messages[native.messages.findIndex(m => m.role === "assistant" && m.id === "message_fixture") + 1].role, "assistant");
+    const input = external.responsesApi.convertResponsesMessages({ ...worker.session.model, api: "openai-responses" },
+      { messages: external.sdk.convertToLlm(ordinary.messages) }, new Set(["worker-fixture"]));
+    const wire = JSON.stringify(input);
+    assert.equal((wire.match(/ACTUAL_COMPLETED_RESULT/g) ?? []).length, 1);
+    assert.equal((wire.match(/ENCRYPTED_REASONING_FIXTURE/g) ?? []).length, 1);
+    assert.doesNotMatch(wire, /No result provided/);
+    assert.ok((await readFile(file, "utf8")).startsWith(before));
+    const reopened = external.sdk.SessionManager.open(file);
+    assert.equal(reopened.getLeafEntry().summary, result.summary);
+    assert.equal(reopened.getLeafEntry().fromHook, true);
+    assert.equal(reopened.getEntries().filter(e => e.type === "compaction").length, 1);
+  } finally { await worker.close(); }
+  assert.throws(() => worker.lifecycle.projectContext({ entries: [], leafId: null, mode: "ordinary" }), /unavailable/);
+});

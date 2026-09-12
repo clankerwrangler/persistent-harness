@@ -3,6 +3,8 @@ import { evaluateInferenceRetry } from "./inference-retry.mjs";
 import { estimateActorContextTokens } from "./actor-compaction.mjs";
 import { randomUUID } from "node:crypto";
 import { readFile } from "node:fs/promises";
+import { isDeepStrictEqual } from "node:util";
+import { projectCanonicalBranch } from "./canonical-context.mjs";
 
 const zeroUsage = () => ({ input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0,
   cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } });
@@ -74,6 +76,18 @@ export class ActorCoordinator {
     }, { registerProvider: (name, config) => this.models.registerProvider(name, config),
       registerNativeProvider: provider => this.models.registerNativeProvider(provider), unregisterProvider: name => this.models.unregisterProvider(name) });
     const fixedIdentity = async () => { throw new Error("actor identity replacement belongs to the supervisor"); };
+    this.lifecycle.projectContext = request => {
+      if (this.closed || this.stopping || !request || !["native", "ordinary"].includes(request.mode)) {
+        throw new Error("canonical context is unavailable");
+      }
+      const entries = this.manager.getBranch(), leafId = this.manager.getLeafId();
+      // Compaction hooks receive detached entries with selected signature amendments applied.
+      if (request.leafId !== leafId || (!isDeepStrictEqual(request.entries, entries)
+        && !isDeepStrictEqual(request.entries, projectCanonicalBranch({ entries, leafId }).entries))) {
+        throw new Error("canonical context request does not match the current session branch");
+      }
+      return this.projectContext({ entries, leafId, mode: request.mode, buildSessionContext: this.sdk.buildSessionContext });
+    };
     this.runner.bindCommandContext({ waitForIdle: () => this.waitForIdle(), newSession: fixedIdentity, fork: fixedIdentity,
       switchSession: fixedIdentity, reload: async () => { throw new Error("actor reload belongs to the supervisor generation lifecycle"); },
       navigateTree: (target, options = {}) => this.navigateTree(target, options) });

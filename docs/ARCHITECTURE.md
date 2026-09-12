@@ -18,6 +18,14 @@ Late reasoning-signature metadata amends a selected prior assistant entry withou
 
 Compaction and navigation use one owner lease, active extension hooks, public SDK helpers, drained provider streams, and one canonical writer. Default compaction and public extension hooks receive current namespace diagnostics; unresolved real tool results remain a compaction boundary.
 
+## Current-session projection service
+
+Explicit extensions that serialize canonical history can use the synchronous `pi.events` channel `persistent-harness:project-canonical-context:v1`. Emit a mutable request with `entries`, `leafId`, and `mode` (`"native"` or `"ordinary"`). The active actor returns `request.result` containing detached `messages`, `outstanding`, and `diagnostics`, or `request.error` with code `canonical_context_unavailable`. Missing service is not a successful projection.
+
+Requests must match the current canonical branch: either its raw entries or the detached, signature-overlaid entries passed to compaction hooks. Foreign, stale, or altered entries and stopping or closed owners are rejected. The service always uses its own canonical manager and pinned SDK helper. It does not write history, resolve credentials, send requests, or execute tools. Ordinary-mode callers must reject outstanding calls and blocking diagnostics before handing history to a serializer; a known deferred result appears once at its required call boundary.
+
+This is an in-process extension contract, not an additional tool, Pi patch, or permission boundary. Loaded extensions already execute with the actor's privileges.
+
 ## Clients
 
 The Unix-socket framing and validation contract is in `src/framing.mjs` and `src/protocol.mjs`. `src/client.mjs` provides `HarnessClient`; terminal commands use the same supervisor requests as other clients.

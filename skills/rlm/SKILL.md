@@ -22,7 +22,7 @@ Useful operations:
 - `rlm.list_subagents()` — list direct retained children and lifecycle state.
 - `rlm.stop_subagent(selector)` — passivate one direct child while preserving it for revival.
 - `rlm.revive_subagent(selector)` — queue one stopped/passivated direct child for canonical revival.
-- `rlm.delete_subagent(selector)` — stop and tombstone one direct child. Deletion removes it from routing and observation but retains its transcript/artifacts on disk, matching retained-session semantics.
+- `rlm.delete_subagent(selector)` — stop and tombstone one direct child and all its descendants. Deletion removes the subtree from routing and observation but retains every transcript and artifact on disk. The selector must identify a direct child, not a grandchild or unrelated session.
 
 Model names resolve exactly, with no fallback. Use `provider/model` when a bare model ID is ambiguous. Unsupported options and unavailable configured or explicit models fail rather than falling back.
 

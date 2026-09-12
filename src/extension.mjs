@@ -413,6 +413,13 @@ export function createActorInputDelivery({ pi, getClient, getContext }) {
 }
 
 export default function persistentHarnessExtension(pi, owner = null) {
+  if (owner) pi.events.on("persistent-harness:project-canonical-context:v1", (request) => {
+    if (!request || typeof request !== "object" || Array.isArray(request)) return;
+    try {
+      delete request.result; delete request.error;
+      request.result = owner.projectContext(request);
+    } catch { request.error = { code: "canonical_context_unavailable" }; }
+  });
   if (!ACTOR_ID || !ACTOR_TOKEN || !Number.isInteger(ACTOR_GENERATION)) {
     pi.on("session_start", (_event, ctx) => {
       ctx.ui.setStatus(STATUS_KEY, "harness client only");

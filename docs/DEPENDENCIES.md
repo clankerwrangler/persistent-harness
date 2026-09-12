@@ -37,3 +37,17 @@ The bundled catalog provides `agent-message`, `rlm`, `kernel`, `operations`, `cr
 Installation writes thin wrappers under the selected agent directory (`PI_CODING_AGENT_DIR`, default `~/.pi/agent`). Each launcher reads the optional `harness/launch-env.sh` there. Put the absolute Pi command, SDK, and optional Python/catalog exports in that file or your service environment. The installer does not create, replace, or populate it with credentials.
 
 Use the same environment for the supervisor and its workers. Configure credentials through Pi, never in source, examples, or committed environment files. Both Node and the external files must remain accessible after restarting your terminal or service.
+
+## External extensions and clients
+
+`PI_HARNESS_ACTOR_EXTENSIONS` selects additional extension entry paths as a JSON array or a platform-delimited list. For example:
+
+```sh
+export PI_HARNESS_ACTOR_EXTENSIONS='["/absolute/path/to/extension/index.ts"]'
+```
+
+The supervisor loads its harness first, then explicit extensions in order, removing duplicate paths. Automatic extension discovery is disabled for actors. A configured extension runs in the active coordinator runner; the separate SDK service runtime remains extension-empty so it cannot start competing work. Compaction and navigation use the active runner's hooks under the coordinator's service lease.
+
+No external extension is bundled, downloaded, or installed by this setting. Maintain its source and dependencies separately and verify compatibility with the pinned Pi and canonical history formats before activation. Custom compaction handlers receive composed caller and namespace instructions in `event.customInstructions` and must include them in their own summary request.
+
+A browser or HTTP frontend is a separate client process. Configure its entry point in your service setup and connect it through `HarnessClient` and the selected supervisor socket. Shared protocol and projection modules come from the same published harness checkout; the core does not import or launch the frontend.
