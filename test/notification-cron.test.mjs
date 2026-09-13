@@ -103,7 +103,7 @@ for (const intent of ["silent", "conditional"]) for (const origin of ["cron", "u
   root.busy(); root.idle(); await delay(160);
   assert.equal((await list()).filter(n => n.kind === "idle").length, before + (origin === "user" ? 1 : 0));
   assert.equal(cron.listRuns(job.jobId).length, 1);
-  // Actual Commander admission must still win after a cron-owned continuation.
+  // Actual user admission must still win after a cron-owned continuation.
   await f.client.request("submit_input", { sessionId: root.session.sessionId, message: "New user task", behavior: "follow_up" });
   root.busy(); root.idle(); await delay(160);
   assert.equal((await list()).filter(n => n.kind === "idle").length, before + (origin === "user" ? 2 : 1));

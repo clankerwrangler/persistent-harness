@@ -40,7 +40,7 @@ test("actual recovery baseline writable startup preserves successor notification
   const jobBefore = cron.getJob("compat-job"), runBefore = cron.getRun("compat-run"), noticeBefore = notices.get(item.id), deliveriesBefore = notices.deliveries(item.id);
   const synthetic = { inputId: "after-input", source: "cron", origin: { jobId: "compat-job", runId: "compat-run" }, message: "Successor task", acceptedAt: Date.now(), images: [] };
   assert.equal(actorInputDigest(synthetic.message, "[]", "auto"), baselineProtocol.actorInputDigest(synthetic.message, "[]", "auto"));
-  // Historical Commander headers and new generic headers remain canonical verifier inputs.
+  // Historical role headers and new generic headers remain canonical verifier inputs.
   assert.deepEqual(actorInputCustomPayload(synthetic, "Commander"), baselineProtocol.actorInputCustomPayload(synthetic));
   assert.equal(actorInputCustomPayload(synthetic, "user").details.inputId, "after-input");
   notices.close(); cron.close(); current.close();
