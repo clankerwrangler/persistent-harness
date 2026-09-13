@@ -15,6 +15,7 @@ function mapJob(row) {
   return {
     jobId: row.id, name: row.name, prompt: row.prompt, schedule: parseJson(row.schedule_json),
     scheduleDisplay: row.schedule_display, timezone: row.timezone, executionMode: row.execution_mode,
+    notificationIntent: row.notification_intent ?? null,
     originSessionId: row.origin_session_id, cwd: row.cwd, repositoryRoot: row.repository_root,
     launch: normalizeCronLaunch(parseJson(row.launch_json, {})), repeat: row.repeat_times == null ? null : Number(row.repeat_times),
     fireCount: Number(row.fire_count), enabled: Boolean(row.enabled), state: row.state,
@@ -30,6 +31,8 @@ function mapRun(row) {
     runId: row.id, jobId: row.job_id, source: row.source, scheduledAt: Number(row.scheduled_at), status: row.status,
     executionModeRequested: row.execution_mode_requested, executionModeUsed: row.execution_mode_used,
     sessionId: row.session_id, fallbackReason: row.fallback_reason, inputId: row.input_id,
+    notificationIntent: row.notification_intent ?? null, notificationDisposition: row.notification_disposition ?? null,
+    notificationBody: row.notification_body ?? null, notificationEvaluatedAt: row.notification_evaluated_at ?? null,
     output: row.output, error: row.error, claimedAt: Number(row.claimed_at),
     startedAt: row.started_at == null ? null : Number(row.started_at),
     completedAt: row.completed_at == null ? null : Number(row.completed_at),
@@ -100,6 +103,21 @@ export class CronStore {
     this.#db.exec(`BEGIN IMMEDIATE; ${CRON_SCHEMA} COMMIT;`);
     const version = this.#db.prepare("SELECT value FROM cron_meta WHERE key = 'schema_version'").get()?.value;
     if (version !== "1") throw new Error(`unsupported cron schema version: ${String(version)}`);
+    const notificationVersion = this.#db.prepare("SELECT value FROM cron_meta WHERE key='notification_schema_version'").get()?.value;
+    if (notificationVersion !== undefined && notificationVersion !== "1") throw new Error("unsupported cron notification schema version");
+    // Additive, independently versioned fields. Core user_version and execution
+    // schema guards stay unchanged; baseline writers can preserve these fields.
+    this.#db.exec("BEGIN IMMEDIATE");
+    try {
+      for (const [table, columns] of Object.entries({ cron_jobs: { notification_intent: "TEXT CHECK(notification_intent IN ('result','conditional','silent'))" },
+        cron_runs: { notification_intent: "TEXT CHECK(notification_intent IN ('result','conditional','silent'))",
+          notification_disposition: "TEXT CHECK(notification_disposition IN ('deliver','no_finding'))", notification_body: "TEXT",
+          notification_evaluated_at: "INTEGER", notification_recorded: "INTEGER NOT NULL DEFAULT 0" } })) {
+        const present = new Set(this.#db.prepare(`PRAGMA table_info(${table})`).all().map(r => r.name));
+        for (const [name, type] of Object.entries(columns)) if (!present.has(name)) this.#db.exec(`ALTER TABLE ${table} ADD COLUMN ${name} ${type}`);
+      }
+      this.#db.exec("INSERT OR IGNORE INTO cron_meta VALUES ('notification_schema_version','1'); COMMIT;");
+    } catch (error) { this.#db.exec("ROLLBACK"); throw error; }
   }
 
   createJob(params, now = Date.now()) {
@@ -107,12 +125,12 @@ export class CronStore {
     if (typeof initiallyPaused !== "boolean") throw new TypeError("initiallyPaused must be a boolean");
     this.#db.prepare(`INSERT INTO cron_jobs(id, name, prompt, schedule_json, schedule_display, timezone,
       execution_mode, origin_session_id, cwd, repository_root, launch_json, repeat_times, fire_count,
-      enabled, state, next_run_at, created_at, updated_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?)`)
+      enabled, state, next_run_at, created_at, updated_at, notification_intent)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?)`)
       .run(params.jobId, params.name, params.prompt, JSON.stringify(params.schedule), params.scheduleDisplay,
         params.timezone, params.executionMode, params.originSessionId, params.cwd, params.repositoryRoot,
         JSON.stringify(normalizeCronLaunch(params.launch ?? {})), params.repeat,
-        initiallyPaused ? 0 : 1, initiallyPaused ? "paused" : "scheduled", params.nextRunAt, now, now);
+        initiallyPaused ? 0 : 1, initiallyPaused ? "paused" : "scheduled", params.nextRunAt, now, now, params.notificationIntent ?? null);
     return this.getJob(params.jobId);
   }
 
@@ -142,11 +160,11 @@ export class CronStore {
   replaceJob(jobId, params, now = Date.now()) {
     const result = this.#db.prepare(`UPDATE cron_jobs SET name = ?, prompt = ?, schedule_json = ?,
       schedule_display = ?, timezone = ?, execution_mode = ?, launch_json = ?, repeat_times = ?, fire_count = ?,
-      enabled = ?, state = ?, next_run_at = ?, last_error = NULL, updated_at = ?
+      enabled = ?, state = ?, next_run_at = ?, last_error = NULL, updated_at = ?, notification_intent = ?
       WHERE id = ? AND state <> 'removed'`).run(params.name, params.prompt, JSON.stringify(params.schedule),
         params.scheduleDisplay, params.timezone, params.executionMode,
         JSON.stringify(normalizeCronLaunch(params.launch ?? {})), params.repeat, params.fireCount,
-        params.enabled ? 1 : 0, params.state, params.nextRunAt, now, jobId);
+        params.enabled ? 1 : 0, params.state, params.nextRunAt, now, params.notificationIntent ?? null, jobId);
     if (result.changes !== 1) throw new Error("cron job does not exist");
     return this.getJob(jobId);
   }
@@ -205,10 +223,10 @@ export class CronStore {
       const state = exhausted || finalNext == null ? "completed" : "scheduled";
       const enabled = state === "scheduled" ? 1 : 0;
       this.#db.prepare(`INSERT INTO cron_runs(id, job_id, source, scheduled_at, status,
-        execution_mode_requested, claimed_at, completed_at, error)
-        VALUES (?, ?, 'scheduled', ?, ?, ?, ?, ?, ?)`)
+        execution_mode_requested, claimed_at, completed_at, error, notification_intent)
+        VALUES (?, ?, 'scheduled', ?, ?, ?, ?, ?, ?, ?)`)
         .run(runId, jobId, scheduledAt, status, row.execution_mode, now,
-          active ? now : null, active ? `overlap with active run ${active.id}` : null);
+          active ? now : null, active ? `overlap with active run ${active.id}` : null, row.notification_intent);
       this.#db.prepare(`UPDATE cron_jobs SET fire_count = ?, enabled = ?, state = ?, next_run_at = ?,
         last_run_at = ?, last_status = ?, last_error = ?, updated_at = ? WHERE id = ?`)
         .run(fireCount, enabled, state, finalNext, scheduledAt, status,
@@ -227,8 +245,8 @@ export class CronStore {
       const active = this.#db.prepare("SELECT id FROM cron_runs WHERE job_id = ? AND status IN ('claimed', 'running') LIMIT 1").get(jobId);
       if (active) throw new Error(`cron job is already running: ${active.id}`);
       this.#db.prepare(`INSERT INTO cron_runs(id, job_id, source, scheduled_at, status,
-        execution_mode_requested, claimed_at) VALUES (?, ?, 'manual', ?, 'claimed', ?, ?)`)
-        .run(runId, jobId, scheduledAt, job.execution_mode, now);
+        execution_mode_requested, claimed_at, notification_intent) VALUES (?, ?, 'manual', ?, 'claimed', ?, ?, ?)`)
+        .run(runId, jobId, scheduledAt, job.execution_mode, now, job.notification_intent);
       this.#db.prepare("UPDATE cron_jobs SET last_run_at = ?, last_status = 'claimed', last_error = NULL, updated_at = ? WHERE id = ?")
         .run(scheduledAt, now, jobId);
       const run = mapRun(this.#db.prepare("SELECT * FROM cron_runs WHERE id = ?").get(runId));
@@ -284,9 +302,30 @@ export class CronStore {
       .all(sessionId).map(mapRun);
   }
   hasActiveRunForSession(sessionId) { return this.listActiveRunsForSession(sessionId).length > 0; }
+  activeRunSessionIds() { return this.#db.prepare("SELECT DISTINCT session_id FROM cron_runs WHERE status IN ('claimed','running') AND session_id IS NOT NULL").all().map(row => row.session_id); }
 
+  reportNotification(runId, sessionId, { disposition, body = null }, now = Date.now()) {
+    if (!["deliver", "no_finding"].includes(disposition) || disposition === "deliver" && (typeof body !== "string" || !body.trim() || body.length > 1000)
+      || disposition === "no_finding" && body !== null) throw new Error("invalid cron delivery disposition");
+    const run = this.getRun(runId);
+    if (!run || run.sessionId !== sessionId || !["result", "conditional"].includes(run.notificationIntent)) throw new Error("run does not accept a disposition from this actor");
+    if (disposition === "no_finding" && run.notificationIntent !== "conditional") throw new Error("result runs require a deliver disposition");
+    if (run.notificationDisposition !== null) {
+      if (run.notificationDisposition !== disposition || run.notificationBody !== body) throw new Error("cron run already has a different disposition");
+      return run;
+    }
+    if (run.status !== "running") throw new Error("cron run is no longer evaluating");
+    this.#db.prepare("UPDATE cron_runs SET notification_disposition=?,notification_body=?,notification_evaluated_at=? WHERE id=? AND notification_disposition IS NULL")
+      .run(disposition, body, now, runId);
+    return this.getRun(runId);
+  }
+  pendingNotifications(limit = 100) {
+    return this.#db.prepare(`SELECT * FROM cron_runs WHERE notification_intent IS NOT NULL AND notification_recorded=0
+      AND status NOT IN ('claimed','running') ORDER BY completed_at,id LIMIT ?`).all(limit).map(mapRun);
+  }
+  notificationRecorded(runId) { this.#db.prepare("UPDATE cron_runs SET notification_recorded=1 WHERE id=?").run(runId); }
   pruneRuns(keepPerJob = 50) {
-    return this.#db.prepare(`DELETE FROM cron_runs WHERE status IN ('completed', 'failed', 'unknown', 'skipped_overlap')
+    return this.#db.prepare(`DELETE FROM cron_runs WHERE (notification_intent IS NULL OR notification_recorded=1) AND status IN ('completed', 'failed', 'unknown', 'skipped_overlap')
       AND id IN (SELECT id FROM cron_runs older WHERE older.job_id = cron_runs.job_id ORDER BY claimed_at DESC, id DESC LIMIT -1 OFFSET ?)`)
       .run(keepPerJob).changes;
   }

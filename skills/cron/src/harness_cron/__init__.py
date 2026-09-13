@@ -17,6 +17,10 @@ async def run(
     prompt: str | None = None,
     schedule: dict[str, Any] | None = None,
     execution_mode: str | None = None,
+    notification_intent: str | None = None,
+    run_id: str | None = None,
+    disposition: str | None = None,
+    body: str | None = None,
     provider: str | None | object = _UNSET,
     model: str | None | object = _UNSET,
     thinking_level: str | None | object = _UNSET,
@@ -26,7 +30,11 @@ async def run(
 ) -> SkillResult:
     """Perform one bounded scheduler operation through the canonical host."""
     payload: dict[str, Any] = {"action": action}
-    if action == "list":
+    if action == "report":
+        payload.update({"runId": run_id, "disposition": disposition})
+        if body is not None:
+            payload["body"] = body
+    elif action == "list":
         payload["includeRemoved"] = include_removed
     elif action == "create":
         payload.update({
@@ -64,6 +72,8 @@ async def run(
         payload["selector"] = selector
         if action == "history":
             payload["limit"] = limit
+    if action in {"create", "update"} and notification_intent is not None:
+        payload["notificationIntent"] = notification_intent
     return SkillResult(host_request("cron.manage", payload))
 
 

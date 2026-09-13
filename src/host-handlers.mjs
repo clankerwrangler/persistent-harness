@@ -1075,6 +1075,14 @@ export function createHostHandlers({ cwd, getClient, getContext = () => undefine
       return client.request("cron_job", requireRecord(payload, "cron.manage payload"));
     },
 
+    async "agent_message.request_attention"(payload) {
+      const client = getClient(); if (!client?.isConnected) throw new Error("harness is offline");
+      return client.request("request_attention", requireRecord(payload, "agent_message.request_attention payload"));
+    },
+    async "agent_message.resolve_attention"(payload) {
+      const client = getClient(); if (!client?.isConnected) throw new Error("harness is offline");
+      return client.request("resolve_attention", requireRecord(payload, "agent_message.resolve_attention payload"));
+    },
     async "agent_message.list_agents"() {
       const client = getClient();
       if (!client?.isConnected) throw new Error("harness is offline");

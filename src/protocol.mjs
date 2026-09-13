@@ -44,6 +44,7 @@ const requestTypes = new Set([
   "set_session_name", "update_activity", "update_progress_heading", "record_progress_entry", "record_agent_message_entry", "record_child_creation_entry", "set_skill_manifest", "record_usage", "record_context_usage",
   "get_actor_input", "accept_actor_input", "record_input_delivery", "flush_actor_inputs",
   "get_roster", "send_message", "ack_message", "spawn_child", "list_children", "session_history", "cron_job",
+  "request_attention", "resolve_attention", "list_notifications", "get_notification", "read_notification", "claim_notification_delivery", "record_notification_delivery",
   "stop_child", "revive_child", "delete_child",
   "create_root", "list_sessions", "rename_session", "subscribe_session", "unsubscribe_session", "subscribe_root_output", "unsubscribe_root_output",
   "submit_input", "respond_extension_ui", "get_session_inference", "set_session_inference", "get_actor_state", "get_actor_entries", "get_visible_messages", "get_visible_image", "compact_session", "restart_kernel", "abort_session",
@@ -287,28 +288,37 @@ function optionalThinkingLevel(value) {
 }
 function cronJob(params) {
   const value = record(params, "params"); const action = string(value.action, "params.action", 16);
-  if (!["create", "list", "update", "pause", "resume", "run", "remove", "history"].includes(action)) {
+  if (!["create", "list", "update", "pause", "resume", "run", "remove", "history", "report"].includes(action)) {
     throw new ProtocolError("invalid_request", "params.action is unsupported");
   }
+  if (action === "report") {
+    exact(value, new Set(["action", "runId", "disposition", "body"]), "params");
+    if (!["deliver", "no_finding"].includes(value.disposition)) throw new ProtocolError("invalid_request", "invalid cron disposition");
+    if (value.disposition === "no_finding" && value.body !== undefined) throw new ProtocolError("invalid_request", "no_finding does not accept a body");
+    const body = value.disposition === "deliver" ? string(value.body, "params.body", 1000) : null;
+    if (body !== null && (!body.trim() || /[\x00-\x1f\x7f]/.test(body))) throw new ProtocolError("invalid_request", "cron body must be plain nonblank text without control characters");
+    return { action, runId: string(value.runId, "params.runId", 128), disposition: value.disposition, body };
+  }
+  if (value.notificationIntent !== undefined && !["result", "conditional", "silent"].includes(value.notificationIntent)) throw new ProtocolError("invalid_request", "invalid cron notification intent");
   if (action === "list") { exact(value, new Set(["action", "includeRemoved"]), "params"); return { action,
     includeRemoved: value.includeRemoved === undefined ? false : bool(value.includeRemoved, "params.includeRemoved") }; }
   if (action === "create") {
-    exact(value, new Set(["action", "name", "prompt", "schedule", "executionMode", "repeat", "provider", "model", "thinkingLevel"]), "params");
+    exact(value, new Set(["action", "name", "prompt", "schedule", "executionMode", "repeat", "provider", "model", "thinkingLevel", "notificationIntent"]), "params");
     const executionMode = value.executionMode ?? "fresh";
     if (!["fresh", "origin"].includes(executionMode)) throw new ProtocolError("invalid_request", "params.executionMode must be fresh or origin");
     return { action, name: utf8(value.name, "params.name", 128), prompt: utf8(value.prompt, "params.prompt", MAX_USER_INPUT_BYTES),
-      schedule: cronSchedule(value.schedule, "params.schedule"), executionMode,
+      schedule: cronSchedule(value.schedule, "params.schedule"), executionMode, notificationIntent: value.notificationIntent ?? null,
       repeat: value.repeat == null ? null : integer(value.repeat, "params.repeat", 1, 1_000_000),
       ...optionalProviderModel(value), ...optionalThinkingLevel(value) };
   }
   const selector = string(value.selector, "params.selector", 256);
   if (action === "update") {
-    exact(value, new Set(["action", "selector", "name", "prompt", "schedule", "executionMode", "repeat", "provider", "model", "thinkingLevel"]), "params");
+    exact(value, new Set(["action", "selector", "name", "prompt", "schedule", "executionMode", "repeat", "provider", "model", "thinkingLevel", "notificationIntent"]), "params");
     const executionMode = value.executionMode;
     if (executionMode !== undefined && !["fresh", "origin"].includes(executionMode)) throw new ProtocolError("invalid_request", "params.executionMode must be fresh or origin");
     const pin = optionalProviderModel(value);
     const thinking = optionalThinkingLevel(value);
-    if ([value.name, value.prompt, value.schedule, value.executionMode, value.repeat, pin.provider, thinking.thinkingLevel].every((item) => item === undefined)) {
+    if ([value.name, value.prompt, value.schedule, value.executionMode, value.repeat, pin.provider, thinking.thinkingLevel, value.notificationIntent].every((item) => item === undefined)) {
       throw new ProtocolError("invalid_request", "cron update requires at least one changed field");
     }
     return { action, selector,
@@ -316,6 +326,7 @@ function cronJob(params) {
       ...(value.prompt === undefined ? {} : { prompt: utf8(value.prompt, "params.prompt", MAX_USER_INPUT_BYTES) }),
       ...(value.schedule === undefined ? {} : { schedule: cronSchedule(value.schedule, "params.schedule") }),
       ...(executionMode === undefined ? {} : { executionMode }),
+      ...(value.notificationIntent === undefined ? {} : { notificationIntent: value.notificationIntent }),
       ...(value.repeat === undefined ? {} : { repeat: value.repeat === null ? null : integer(value.repeat, "params.repeat", 1, 1_000_000) }),
       ...pin, ...thinking };
   }
@@ -324,7 +335,35 @@ function cronJob(params) {
   exact(value, new Set(["action", "selector"]), "params"); return { action, selector };
 }
 
+function notificationIdentity(value, label) {
+  const result = string(value, label, 64);
+  if (!/^[a-f0-9]{64}$/.test(result)) throw new ProtocolError("invalid_request", `${label} must be a notification identity`);
+  return result;
+}
+function attentionRequest(params, resolve = false) {
+  const p = record(params, "params"); exact(p, new Set(resolve ? ["key"] : ["key", "title", "body", "expiresIn"]), "params");
+  const key = string(p.key, "params.key", 128);
+  if (!/^[a-zA-Z0-9][a-zA-Z0-9._:-]*$/.test(key)) throw new ProtocolError("invalid_request", "params.key must be a stable identifier");
+  if (resolve) return { key };
+  const title = string(p.title, "params.title", 120), body = string(p.body, "params.body", 1000);
+  if (![title, body].every(v => v.trim() && !/[\x00-\x1f\x7f]/.test(v))) throw new ProtocolError("invalid_request", "attention text must be plain nonblank text without control characters");
+  return { key, title, body, expiresIn: p.expiresIn === undefined ? 86400 : integer(p.expiresIn, "params.expiresIn", 1, 604800) };
+}
+function notificationParam(params) {
+  const p = record(params, "params"); exact(p, new Set(["id"]), "params"); return { id: notificationIdentity(p.id, "params.id") };
+}
 const validators = new Map([
+  ["request_attention", attentionRequest], ["resolve_attention", p => attentionRequest(p, true)],
+  ["get_notification", notificationParam], ["read_notification", notificationParam],
+  ["list_notifications", params => { const p = record(params, "params"); exact(p, new Set(["limit", "before"]), "params");
+    return { limit: p.limit === undefined ? 100 : integer(p.limit, "params.limit", 1, 100),
+      before: p.before === undefined ? Number.MAX_SAFE_INTEGER : integer(p.before, "params.before", 1, Number.MAX_SAFE_INTEGER) }; }],
+  ["claim_notification_delivery", params => { const p = record(params, "params"); exact(p, new Set(["endpointIds"]), "params");
+    return { endpointIds: [...new Set(array(p.endpointIds, "params.endpointIds", 8).map(v => notificationIdentity(v, "params.endpointIds[]")))] }; }],
+  ["record_notification_delivery", params => { const p = record(params, "params"); exact(p, new Set(["id", "endpointId", "leaseId", "status"]), "params");
+    if (!["accepted", "retry", "gone", "failed", "suppressed"].includes(p.status)) throw new ProtocolError("invalid_request", "invalid delivery status");
+    return { id: notificationIdentity(p.id, "params.id"), endpointId: notificationIdentity(p.endpointId, "params.endpointId"),
+      leaseId: string(p.leaseId, "params.leaseId", 128), status: p.status }; }],
   ["register_actor", actorRegistration], ["register_client", clientRegistration],
   ["set_session_name", (p) => { const value = record(p, "params"); exact(value, new Set(["name"]), "params"); return { name: value.name == null ? null : string(value.name, "params.name", 256) }; }],
   ["update_activity", (p) => { const value = record(p, "params"); exact(value, new Set(["streaming"]), "params"); return { streaming: bool(value.streaming, "params.streaming") }; }],

@@ -38,6 +38,7 @@ The harness retains child delegation and context forking, durable family message
 
 - [Operations and recovery](docs/OPERATIONS.md)
 - [Architecture and protocol](docs/ARCHITECTURE.md)
+- [Durable attention and notifications](docs/NOTIFICATIONS.md)
 - [Validation](docs/VALIDATION.md)
 - [Third-party notices](THIRD_PARTY_NOTICES.md)
 

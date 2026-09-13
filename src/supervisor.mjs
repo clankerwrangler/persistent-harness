@@ -16,6 +16,7 @@ import { normalizeCronLaunch } from "./cron-launch.mjs";
 import { DEFAULT_CRON_TIMEZONE } from "./cron-schedule.mjs";
 import { CronScheduler } from "./cron-scheduler.mjs";
 import { CronStore } from "./cron-store.mjs";
+import { NotificationStore, NOTIFICATION_IDLE_MS } from "./notification-store.mjs";
 import { JsonLineDecoder, encodeFrame } from "./framing.mjs";
 import { projectAvailableModels, resolveModelSelection, validateInferenceEffort } from "./inference-options.mjs";
 import { actorInputPrompt,
@@ -370,6 +371,8 @@ export class HarnessSupervisor {
   #cronCompletionTails = new Map();
   #backgroundCompletionMonitor;
   #autoTitleInflight = new Map();
+  #notifications;
+  #notificationTimer;
 
   constructor({
     socketPath, databasePath, pidPath,
@@ -411,6 +414,8 @@ export class HarnessSupervisor {
     backgroundJobsDirectory = defaultBackgroundJobsDirectory(),
     backgroundCompletionIntervalMs = Number(process.env.PI_HARNESS_BACKGROUND_COMPLETION_TICK_MS ?? 1_000),
     titleGenerator = createRootTitleGenerator(),
+    notificationIdleMs = NOTIFICATION_IDLE_MS,
+    notificationTickMs = 1_000,
   }) {
     Object.assign(this, { socketPath, databasePath, pidPath, maxFrameBytes, messageRateCapacity, messageRateRefillPerSecond,
       pendingMessageLimit, maxMessageDeliveryAttempts, maxDepth, maxResidentActors, maxConcurrentStarts, actorInactivityMs,
@@ -418,7 +423,7 @@ export class HarnessSupervisor {
       actorStartupTimeoutMs, actorPromptPreflightTimeoutMs, actorShutdownTimeoutMs, logger, maxLogBytes,
       cronTickIntervalMs, cronMaxParallel, cronDefaultTimezone, cronStoreFactory, cronSchedulerFactory,
       backgroundJobsDirectory,
-      backgroundCompletionIntervalMs, titleGenerator });
+      backgroundCompletionIntervalMs, titleGenerator, notificationIdleMs, notificationTickMs });
     this.actorExtensionPath = path.resolve(actorExtensionPath);
     this.actorExtensionPaths = [...new Set(actorExtensionPaths.map((item) => path.resolve(item)))].filter((item) => item !== this.actorExtensionPath);
     this.skillsPath = path.resolve(skillsPath);
@@ -459,6 +464,8 @@ export class HarnessSupervisor {
     this.#ownedSocketPath = ownedSocketPath(this.socketPath, this.#ownerToken); this.#store = new HarnessStore(this.databasePath);
     try {
       this.#cronStore = this.cronStoreFactory(this.databasePath);
+      this.#notifications = new NotificationStore(this.databasePath, { idleMs: this.notificationIdleMs });
+      this.#notifications.cancelDialogs();
       if (!this.sessionHistoryIndex) {
         try {
           this.sessionHistoryIndex = this.sessionHistoryIndexFactory({
@@ -490,6 +497,7 @@ export class HarnessSupervisor {
         dispatch: (job) => this.#dispatchBackgroundCompletion(job),
         onActiveJobsChanged: (sessionId, jobs) => {
           for (const job of jobs) {
+            this.#notifications.bindOrigin(sessionId, `background:${job.id}`, job.startedAt);
             const startedAt = Date.parse(job.startedAt);
             if (Number.isSafeInteger(startedAt) && startedAt >= 0) this.store.recordSessionActivity(sessionId, startedAt);
           }
@@ -498,12 +506,22 @@ export class HarnessSupervisor {
         logger: this.logger,
       });
       this.#backgroundCompletionMonitor.start();
+      this.#notificationTimer = setInterval(() => {
+        try {
+          this.#notifications.expire(); this.#recordCronNotifications();
+          for (const id of this.#notifications.openFamilies()) this.#observeNotifications(id);
+          for (const id of this.#cronStore.activeRunSessionIds()) if (!this.#cronCompletionTails.has(id)) void this.#completeCronRunsForSession(id);
+        }
+        catch (error) { this.logger.error?.(`notification reconciliation failed: ${error.message}`); }
+      }, this.notificationTickMs);
+      this.#notificationTimer.unref();
     } catch (error) {
       this.#server?.close(); this.#server = undefined;
       if (this.#ownedSocketPath) try { await unlink(this.#ownedSocketPath); } catch {}
       this.#closeSessionHistoryIndex();
       await this.#backgroundCompletionMonitor?.stop().catch(() => {}); this.#backgroundCompletionMonitor = undefined;
       await this.#cronScheduler?.stop().catch(() => {}); this.#cronScheduler = undefined;
+      clearInterval(this.#notificationTimer); this.#notifications?.close(); this.#notifications = undefined;
       this.#cronStore?.close(); this.#cronStore = undefined;
       this.#store?.close(); this.#store = undefined; throw error;
     }
@@ -604,6 +622,7 @@ export class HarnessSupervisor {
       }
       return { continuationOwner: pending, run: () => {
         this.#extensionUiRequests.delete(key); clearTimeout(pending.timer);
+        if (pending.notificationId) this.#notifications.transition(pending.notificationId, params.cancelled ? "cancelled" : "resolved");
         actor.worker.send({ type: "extension_ui_response", id: params.uiRequestId,
           ...(params.value !== undefined ? { value: params.value } : {}),
           ...(params.confirmed !== undefined ? { confirmed: params.confirmed } : {}),
@@ -708,7 +727,7 @@ export class HarnessSupervisor {
     this.#requireActor(state);
     if (["spawn_child", "send_message", "revive_child"].includes(type)) this.store.assertSessionAvailable(state.sessionId);
     if (type === "set_session_name") { const session = this.store.setSessionName(state.sessionId, params.name); this.#broadcastNavigator("name_changed"); return { session }; }
-    if (type === "update_activity") { const session = this.store.setActorActivity(state.sessionId, state.generation, params.streaming); this.#syncPassivationTimers(); this.#broadcastNavigator("activity_changed"); return { session }; }
+    if (type === "update_activity") { const session = this.store.setActorActivity(state.sessionId, state.generation, params.streaming); this.#observeNotifications(state.sessionId); this.#syncPassivationTimers(); this.#broadcastNavigator("activity_changed"); return { session }; }
     if (type === "update_progress_heading") return this.#updateProgressHeading(state, params);
     if (type === "record_progress_entry") {
       const record = this.#actors.get(state.sessionId);
@@ -753,11 +772,28 @@ export class HarnessSupervisor {
     if (type === "set_skill_manifest") return { grant: this.#acceptActorSkillManifest(state, params.skills) };
     if (type === "record_usage") return this.store.recordUsage(state.sessionId, params);
     if (type === "record_context_usage") return this.store.recordContextUsage(state.sessionId, params);
+    if (["request_attention", "resolve_attention"].includes(type)) {
+      this.store.assertSessionAvailable(state.sessionId);
+      const session = this.store.getSession(state.sessionId);
+      const actor = this.#actors.get(state.sessionId);
+      if (session.kind !== "root" || session.depth !== 0 || !actor || actor.generation !== state.generation || !actor.worker.isRunning) {
+        throw requestFailure("attention_forbidden", "human attention requests require the current root actor; children must route through their parent");
+      }
+      return { notification: type === "request_attention" ? this.#notifications.request(state.sessionId, params, Date.now(), state.generation)
+        : this.#notifications.resolveKey(state.sessionId, params.key) };
+    }
     if (type === "get_roster") return { agents: this.store.getRoster(state.sessionId) };
     if (type === "session_history") return this.#sessionHistory(state.sessionId, params);
-    if (type === "cron_job") return this.#cronOperation(state.sessionId, params);
+    if (type === "cron_job") {
+      if (params.action === "report") {
+        const actor = this.#actors.get(state.sessionId);
+        if (!actor || actor.generation !== state.generation || !actor.worker.isRunning) throw requestFailure("cron_forbidden", "cron disposition requires the current actor");
+      }
+      return this.#cronOperation(state.sessionId, params);
+    }
     if (type === "send_message") {
       this.#consumeMessageToken(state.sessionId); const message = this.store.createMessage(state.sessionId, params, { pendingLimit: this.pendingMessageLimit });
+      this.#notifications.bindOrigin(state.sessionId, `message:${message.messageId}`, message.createdAt);
       const target = this.store.getSession(message.targetId);
       setImmediate(() => this.#deliverPendingOutgoingHistory(state));
       return { message: { ...message, targetName: target?.name, targetShortId: target?.shortId, targetDepth: target?.depth } };
@@ -772,6 +808,11 @@ export class HarnessSupervisor {
   }
 
   async #dispatchClient(state, type, params) {
+    if (type === "list_notifications") return this.#notifications.list(params);
+    if (type === "get_notification") return { notification: this.#notifications.get(params.id), deliveries: this.#notifications.deliveries(params.id) };
+    if (type === "read_notification") return { notification: this.#notifications.read(params.id) };
+    if (type === "claim_notification_delivery") return { claims: this.#notifications.claim(params.endpointIds) };
+    if (type === "record_notification_delivery") return this.#notifications.receipt(params);
     if (type === "create_root") return this.#createRoot(params);
     if (type === "list_sessions") return this.#navigator();
     if (type === "get_skill_runtime_plan") return this.#skillRuntimePlan();
@@ -787,13 +828,13 @@ export class HarnessSupervisor {
         const actor = this.#actors.get(selected.sessionId);
         return { session: this.#sessionView(this.store.getSession(selected.sessionId)),
           state: { sessionId: selected.sessionId, sessionFile: selected.sessionFile, isStreaming: Boolean(actor && this.store.getSession(selected.sessionId)?.activity === "working") },
-          eventSeq: actor?.eventSeq ?? 0, events: [], passive: true };
+          eventSeq: actor?.eventSeq ?? 0, events: [], pendingUiRequests: this.#pendingUiRequests(selected.sessionId), passive: true };
       }
       try {
         const actor = await this.#ensureActorReady(selected.sessionId);
         const current = await actor.worker.request("get_state");
         return { session: this.#sessionView(this.store.getSession(selected.sessionId)), state: current,
-          eventSeq: actor.eventSeq, events: current?.isStreaming ? this.#boundedReplay(actor.eventRing) : [], passive: false };
+          eventSeq: actor.eventSeq, events: current?.isStreaming ? this.#boundedReplay(actor.eventRing) : [], pendingUiRequests: this.#pendingUiRequests(selected.sessionId), passive: false };
       } catch (error) {
         if (!wasSubscribed) state.subscriptions.delete(selected.sessionId);
         throw error;
@@ -829,6 +870,7 @@ export class HarnessSupervisor {
       }
       const input = this.store.createActorInput(params.sessionId, { inputId, ...payload, behavior: params.behavior,
         retryIntent, clientMessageId, pendingLimit: this.pendingMessageLimit });
+      if (!prior) this.#notifications.noteUserInput(params.sessionId);
       if (input.state !== "completed") {
         const actor = await this.#ensureActorReady(params.sessionId);
         this.#kickActorInputDelivery(params.sessionId, actor);
@@ -909,6 +951,7 @@ export class HarnessSupervisor {
       for (const item of sessions) {
         if (item.sessionFile) this.transcriptReader.clear(item.sessionFile);
         this.#clearSessionRouting(item.sessionId);
+        this.#notifications.cancelSession(item.sessionId);
       }
       for (const client of this.#clientConnections) this.#write(client, event("sessions_deleted", { sessionIds: ids }));
       this.#broadcastNavigator("sessions_deleted");
@@ -1033,7 +1076,7 @@ export class HarnessSupervisor {
     }
   }
 
-  #limits() { return { maxFrameBytes: this.maxFrameBytes, maxDepth: this.maxDepth, maxResidentActors: this.maxResidentActors, maxConcurrentStarts: this.maxConcurrentStarts, rootOutputSseVersion: 1, rootOutputPresentationVersion: 1 }; }
+  #limits() { return { maxFrameBytes: this.maxFrameBytes, maxDepth: this.maxDepth, maxResidentActors: this.maxResidentActors, maxConcurrentStarts: this.maxConcurrentStarts, rootOutputSseVersion: 1, rootOutputPresentationVersion: 1, notificationVersion: 1 }; }
   #resolveSession(selector) { return this.store.resolveSession(selector); }
   #sessionView(session) {
     const actor = this.#actors.get(session.sessionId);
@@ -1124,6 +1167,36 @@ export class HarnessSupervisor {
     }
     for (const state of subscribers) this.#write(state, encoded);
   }
+  #recordCronNotifications() {
+    for (const run of this.#cronStore.pendingNotifications()) {
+      if (run.notificationIntent === "silent" || run.status === "completed" && run.notificationIntent === "conditional" && run.notificationDisposition === "no_finding") {
+        this.#cronStore.notificationRecorded(run.runId); continue;
+      }
+      const job = this.#cronStore.getJob(run.jobId);
+      const sessionId = run.sessionId ?? job.originSessionId;
+      const family = this.#notifications.family(sessionId);
+      if (!family) { this.#cronStore.notificationRecorded(run.runId); continue; }
+      const missing = run.notificationIntent === "conditional" && !run.notificationDisposition;
+      const output = run.notificationBody ?? run.output;
+      const failed = run.status !== "completed" || missing || !output?.trim();
+      this.#notifications.create({ key: `cron:${run.runId}`, rootId: family.rootId, sessionId,
+        kind: "cron", title: failed ? `Scheduled result unavailable: ${job.name}` : job.name,
+        body: failed ? missing ? "This scheduled check ended without the required deliver/no-finding disposition. Its condition was not established."
+          : `This scheduled run did not produce its promised result (${run.status}). Open the conversation or cron history to inspect the outcome.` : output,
+        expiresAt: (run.completedAt ?? Date.now()) + 86400_000,
+        source: { type: "cron", runId: run.runId, jobId: run.jobId, intent: run.notificationIntent, failed } });
+      this.#cronStore.notificationRecorded(run.runId);
+    }
+  }
+  #observeNotifications(sessionId) {
+    if (!this.#notifications || this.#stoppingPromise) return;
+    const family = this.#notifications.family(sessionId);
+    if (!family) { this.#notifications.cancelSession(sessionId); return; }
+    const cron = family.members.some(s => this.#cronStore?.hasActiveRunForSession(s.id));
+    const backgroundCount = family.members.reduce((n, s) => n + (this.#backgroundCompletionMonitor?.getActiveBackgroundJobs(s.id)?.length ?? 0), 0);
+    const liveActors = family.members.filter(s => this.#actors.get(s.id)?.notificationWork?.size).map(s => s.id);
+    this.#notifications.observe(sessionId, { owner: cron ? "cron" : null, backgroundCount, liveActors });
+  }
   #broadcastNavigator(reason) {
     if (this.#clientConnections.size === 0) return;
     const frame = event("navigator_changed", { reason, ...this.#navigator() });
@@ -1153,6 +1226,15 @@ export class HarnessSupervisor {
     const session = this.store.getSession(sessionId);
     if (!session || session.lifecycle === "deleted" || session.kind !== "root" || session.depth !== 0) {
       throw requestFailure("cron_forbidden", "cron management is available only to live root sessions");
+    }
+    if (params.action === "report") {
+      const run = this.#cronStore.reportNotification(params.runId, sessionId, params);
+      // Exact-run readiness is explicit. It does not wait for unrelated family work.
+      if (run.status === "running") {
+        this.#cronStore.finishRun(run.runId, "completed", { output: run.notificationBody });
+        void this.#log("cron_run_finished", { runId: run.runId, jobId: run.jobId, sessionId, status: "completed" });
+      }
+      return { run: this.#cronStore.getRun(run.runId) };
     }
     if (this.#sessionIsIsolatedScheduledRun(sessionId)) {
       throw requestFailure("cron_recursive_scheduling", "scheduled runs cannot manage the scheduler");
@@ -1193,7 +1275,13 @@ export class HarnessSupervisor {
     const dispatch = async (target, executionModeUsed, fallbackReason = null) => {
       const isolated = executionModeUsed === "fresh";
       const inputId = isolated ? `cron-input-${run.runId}` : `cron-origin-${run.runId}`;
-      const message = isolated ? prompt : job.prompt;
+      const original = isolated ? prompt : job.prompt;
+      const intent = run.notificationIntent;
+      const deliveryContext = intent === "conditional"
+        ? `Evaluate this run's notification condition explicitly. Before settling, use cron(action="report", run_id="${run.runId}", disposition="deliver", body="the meaningful finding") when it holds, or disposition="no_finding" with no body when it does not. An absent disposition is an evaluation failure, not a negative finding.`
+        : intent === "result" ? `This run promises a meaningful result or reminder. Its exact-run final response is delivered; you may instead bind concise notification text with cron(action="report", run_id="${run.runId}", disposition="deliver", body="the result").`
+        : intent === "silent" ? "This run is silent: no routine completion notification is intended." : null;
+      const message = deliveryContext ? `${original}\n\n[Scheduled delivery context: run ${run.runId}; intent ${intent}]\n${deliveryContext}\nThis delivery context does not grant any additional authority.` : original;
       this.#cronStore.markRunRunning(run.runId, { executionModeUsed, sessionId: target.sessionId, fallbackReason, inputId });
       this.store.createActorInput(target.sessionId, { inputId, message, behavior: "auto", source: "cron",
         origin: { jobId: job.jobId, runId: run.runId }, pendingLimit: this.pendingMessageLimit });
@@ -1227,6 +1315,7 @@ export class HarnessSupervisor {
         pendingLimit: this.pendingMessageLimit,
       });
       if (input.state !== "completed") {
+        this.#notifications.noteContinuation(job.sessionId, `background:${job.id}`, job.startedAt);
         const actor = await this.#ensureActorReady(job.sessionId);
         this.#kickActorInputDelivery(job.sessionId, actor);
       }
@@ -1277,18 +1366,24 @@ export class HarnessSupervisor {
     const operation = previous.then(async () => {
       const runs = this.#cronStore?.listActiveRunsForSession(sessionId) ?? [];
       if (runs.length === 0) return;
+      const settled = () => this.#notifications.settled(sessionId, {
+        liveActors: [...this.#actors].filter(([, actor]) => actor.notificationWork?.size).map(([id]) => id),
+      });
+      if (!settled()) return;
       const session = this.store.getSession(sessionId);
       if (!session?.sessionFile) return;
       const transcript = await this.transcriptReader.read({ sessionFile: session.sessionFile,
         sessionId, maxMessages: 512, maxBytes: 64 * 1024,
         sanitizePresentation: session.kind === "root" && session.depth === 0 });
+      if (!settled()) return;
       for (const run of runs) {
+        if (!["claimed", "running"].includes(this.#cronStore.getRun(run.runId)?.status)) continue;
         const inputEntryId = transcript.inputEntries?.[run.inputId];
-        if (!inputEntryId) continue;
-        const inputIndex = transcript.messages.findIndex((message) => message.id === inputEntryId);
-        if (inputIndex < 0) continue;
-        const output = transcript.messages.slice(inputIndex + 1).filter((message) => message.role === "assistant").at(-1)?.text?.trim();
-        if (output) this.#cronStore.finishRun(run.runId, "completed", { output });
+        const inputIndex = inputEntryId ? transcript.messages.findIndex((message) => message.id === inputEntryId) : -1;
+        const after = inputIndex < 0 ? [] : transcript.messages.slice(inputIndex + 1);
+        const nextInput = after.findIndex(message => ["user", "scheduled_job", "background_notification"].includes(message.role));
+        const output = (nextInput < 0 ? after : after.slice(0, nextInput)).filter(message => message.role === "assistant").at(-1)?.text?.trim();
+        if (output || run.notificationDisposition) this.#cronStore.finishRun(run.runId, "completed", { output: output ?? null });
         else this.#cronStore.finishRun(run.runId, "failed", { error: "scheduled agent returned no visible response" });
         const finished = this.#cronStore.getRun(run.runId);
         await this.#log("cron_run_finished", { runId: run.runId, jobId: run.jobId,
@@ -1575,7 +1670,7 @@ export class HarnessSupervisor {
       shutdownTimeoutMs: this.actorShutdownTimeoutMs, session });
     const record = { worker, generation: session.actorGeneration, rootOutputSession: Object.freeze({ sessionId: session.sessionId, kind: session.kind, depth: session.depth }), expectedLifecycle: null, exitError: null, eventSeq: 0, eventRing: [], eventRingBytes: 0, progressSummary: undefined, progressTurnId: null,
       skillGrantFingerprint: skillGrant.fingerprint, skillGrantSkills: skillGrant.skills, skillRefreshPending: false,
-      messageTransportRepairAttempted: false, presentationFilters: new Map(), liveConversation: new LiveConversation(), assistantMessageIdentity: null, assistantTextIds: new Map() }; this.#actors.set(sessionId, record);
+      notificationWork: new Set(), messageTransportRepairAttempted: false, presentationFilters: new Map(), liveConversation: new LiveConversation(), assistantMessageIdentity: null, assistantTextIds: new Map() }; this.#actors.set(sessionId, record);
     worker.on("event", (frame) => this.#onActorEvent(sessionId, record, frame)); worker.on("protocolError", (error) => this.logger.error?.(`actor ${sessionId} RPC protocol error: ${error.message}`)); worker.on("exit", (details) => this.#onActorExit(sessionId, record, details));
     try {
       const state = await worker.start(); if (state?.sessionId !== session.sessionId) throw new Error(`Pi session mismatch: expected ${session.sessionId}, received ${String(state?.sessionId)}`);
@@ -1792,6 +1887,11 @@ export class HarnessSupervisor {
         const createdAt = Date.parse(frame.createdAt);
         if (Number.isSafeInteger(createdAt) && createdAt >= 0) this.store.recordSessionActivity(sessionId, createdAt);
       }
+      if (frame?.type === "tool_execution_start" && typeof frame.toolCallId === "string") record.notificationWork.add(`tool:${frame.toolCallId}`);
+      if (frame?.type === "tool_execution_end") record.notificationWork.delete(`tool:${frame.toolCallId}`);
+      if (frame?.type === "compaction_start") record.notificationWork.add("compaction");
+      if (frame?.type === "compaction_end") record.notificationWork.delete("compaction");
+      if (["tool_execution_start", "tool_execution_end", "compaction_start", "compaction_end"].includes(frame?.type)) this.#observeNotifications(sessionId);
       if (frame?.type === "agent_start") this.store.setActorActivity(sessionId, record.generation, true);
       else if (frame?.type === "agent_settled") {
         const failure = this.store.submittedChildTask?.(sessionId) ? assistantTurnFailureFromEvents(record) : null;
@@ -1811,7 +1911,7 @@ export class HarnessSupervisor {
           setImmediate(() => this.#retryQueuedMessages(sessionId));
         }
       }
-      if (frame?.type === "agent_start" || frame?.type === "agent_settled") this.#syncPassivationTimers();
+      if (frame?.type === "agent_start" || frame?.type === "agent_settled") { this.#observeNotifications(sessionId); this.#syncPassivationTimers(); }
     } catch (error) { this.logger.error?.(`actor ${sessionId} event failed: ${error instanceof Error ? error.message : String(error)}`); }
     if (visibleRetained) {
       const subscribers = [...this.#clientConnections].filter((client) => client.subscriptions.has(sessionId));
@@ -1876,6 +1976,7 @@ export class HarnessSupervisor {
   }
   async #deliverMessageWhenReady(message) {
     return this.#withSessionMutation(message.targetId, async () => {
+      this.#notifications.noteContinuation(message.senderId, `message:${message.messageId}`, message.createdAt);
       const residentBefore = this.#actors.get(message.targetId);
       let record = await this.#ensureActorReady(message.targetId);
       let targetState = this.#matchingActorConnection(message.targetId, record.generation)
@@ -1941,7 +2042,9 @@ export class HarnessSupervisor {
       || session?.lifecycle !== "resident" || session.actorGeneration !== state.generation
       || record?.generation !== state.generation || record.expectedLifecycle || !record.worker.isRunning) return;
     let delivered; try { delivered = this.store.markMessageDelivered(message.messageId, state.sessionId, Date.now(), this.maxMessageDeliveryAttempts); } catch (error) { this.logger.error?.(error); return; }
-    if (!delivered || delivered.permanentlyFailed) return; state.deliveryInFlight.add(delivered.messageId);
+    if (!delivered || delivered.permanentlyFailed) return;
+    this.#notifications.noteContinuation(delivered.senderId, `message:${delivered.messageId}`, delivered.createdAt);
+    state.deliveryInFlight.add(delivered.messageId);
     const sender = this.store.getSession(delivered.senderId);
     if (!this.#write(state, event("message_available", { message: { ...delivered, senderName: sender?.name, senderShortId: sender?.shortId, senderDepth: sender?.depth, relationship: receiverRelationship(delivered.relationship) }, deliverAs: delivered.deliveryMode === "follow_up" ? "follow_up" : "steer" }))) state.deliveryInFlight.delete(delivered.messageId);
   }
@@ -1952,10 +2055,17 @@ export class HarnessSupervisor {
     const key = `${sessionId}\0${requestId}`;
     if (this.#extensionUiRequests.has(key) || this.#extensionUiRequests.size >= 256) return false;
     const timeout = Number.isSafeInteger(event.timeout) ? Math.min(event.timeout, 600_000) : 600_000;
-    const pending = { generation: record.generation, timer: null };
+    const expiresAt = Date.now() + Math.max(0, timeout);
+    const session = this.store.getSession(sessionId);
+    const notification = session?.kind === "root" && session.depth === 0 ? this.#notifications.create({
+      key: `dialog:${sessionId}:${record.generation}:${requestId}`, rootId: sessionId, sessionId, kind: "attention",
+      title: event.title || "Decision needed", body: event.message || event.title || "A live interactive request needs your response.", expiresAt,
+      source: { type: "extension_ui", requestId, actorGeneration: record.generation } }) : null;
+    const pending = { generation: record.generation, timer: null, event, expiresAt, notificationId: notification?.id };
     pending.timer = setTimeout(() => {
       if (this.#extensionUiRequests.get(key) !== pending) return;
       this.#extensionUiRequests.delete(key);
+      this.#notifications.expire();
       const actor = this.#actors.get(sessionId);
       if (actor?.generation === pending.generation && actor.worker.isRunning) {
         try { actor.worker.send({ type: "extension_ui_response", id: requestId, cancelled: true }); } catch {}
@@ -1963,10 +2073,16 @@ export class HarnessSupervisor {
     }, timeout);
     pending.timer.unref(); this.#extensionUiRequests.set(key, pending); return true;
   }
+  #pendingUiRequests(sessionId) {
+    const actor = this.#actors.get(sessionId); if (!actor?.worker.isRunning) return [];
+    return [...this.#extensionUiRequests.entries()].filter(([key, p]) => key.startsWith(`${sessionId}\0`) && p.generation === actor.generation && p.expiresAt > Date.now())
+      .map(([, p]) => ({ ...p.event, timeout: Math.max(0, p.expiresAt - Date.now()) }));
+  }
   #clearExtensionUiRequests(sessionId, generation) {
     const prefix = `${sessionId}\0`;
     for (const [key, pending] of this.#extensionUiRequests) if (key.startsWith(prefix) && pending.generation === generation) {
       clearTimeout(pending.timer); this.#extensionUiRequests.delete(key);
+      if (pending.notificationId) this.#notifications.transition(pending.notificationId, "cancelled");
     }
   }
 
@@ -2180,6 +2296,7 @@ export class HarnessSupervisor {
   async stop() {
     if (this.#stoppingPromise) return this.#stoppingPromise;
     this.#stoppingPromise = (async () => {
+      clearInterval(this.#notificationTimer);
       for (const timer of this.#passivationTimers.values()) clearTimeout(timer); this.#passivationTimers.clear(); this.#startQueue = [];
       await this.#backgroundCompletionMonitor?.stop(); this.#backgroundCompletionMonitor = undefined;
       await this.#cronScheduler?.stop(); this.#cronScheduler = undefined;
@@ -2190,6 +2307,7 @@ export class HarnessSupervisor {
       if (this.#socketLinkTarget) await unlinkSocketLinkIfOwned(this.socketPath, this.#socketLinkTarget);
       await unlinkIfOwned(this.pidPath, this.#pidIdentity); await this.#log("daemon_stopped", { pid: process.pid }); await this.#logTail;
       this.#closeSessionHistoryIndex();
+      clearInterval(this.#notificationTimer); this.#notifications?.close(); this.#notifications = undefined;
       this.#cronStore?.close(); this.#cronStore = undefined;
       for (const waiters of this.#actorConnectionWaiters.values()) for (const finish of waiters) finish(undefined);
       this.#actorConnectionWaiters.clear();

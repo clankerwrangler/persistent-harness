@@ -15,3 +15,15 @@ def send(target: str, body: str, delivery_mode: str = "auto") -> SkillResult:
         "deliveryMode": delivery_mode,
     })
     return SkillResult(result, {"application/vnd.persistent-harness.message+json": result})
+
+
+def request_attention(key: str, title: str, body: str, expires_in: int = 86400) -> SkillResult:
+    """Root-only durable human request; reading it does not resolve it."""
+    return SkillResult(host_request("agent_message.request_attention", {
+        "key": key, "title": title, "body": body, "expiresIn": expires_in,
+    }))
+
+
+def resolve_attention(key: str) -> SkillResult:
+    """Resolve this root's existing request, without granting any authority."""
+    return SkillResult(host_request("agent_message.resolve_attention", {"key": key}))
