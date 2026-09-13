@@ -1,0 +1,12 @@
+[project]
+name = "persistent-harness-rlm"
+version = "1.0.0"
+requires-python = ">=3.11"
+dependencies = []
+
+[tool.persistent-harness]
+id = "rlm"
+import-name = "harness_rlm"
+alias = "rlm"
+entry-point = "spawn"
+host-requests = ["rlm.spawn", "rlm.find_models", "rlm.list_subagents", "rlm.stop_subagent", "rlm.revive_subagent", "rlm.delete_subagent"]

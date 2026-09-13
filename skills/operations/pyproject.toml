@@ -1,0 +1,11 @@
+[project]
+name = "persistent-harness-operations"
+version = "1.0.0"
+requires-python = ">=3.11"
+dependencies = []
+
+[tool.persistent-harness]
+id = "operations"
+import-name = "harness_operations"
+alias = "operations"
+host-requests = ["operations.status", "operations.diagnose", "operations.usage", "operations.events"]

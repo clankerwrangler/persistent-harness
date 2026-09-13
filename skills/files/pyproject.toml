@@ -1,0 +1,11 @@
+[project]
+name = "persistent-harness-files"
+version = "1.0.0"
+requires-python = ">=3.11"
+dependencies = []
+
+[tool.persistent-harness]
+id = "files"
+import-name = "harness_files"
+alias = "files"
+host-requests = ["files.read", "files.write", "files.edit", "files.grep", "files.find", "files.list", "files.attachment"]

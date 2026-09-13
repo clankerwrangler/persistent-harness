@@ -1,0 +1,11 @@
+[project]
+name = "persistent-harness-kernel"
+version = "1.0.0"
+requires-python = ">=3.11"
+dependencies = []
+
+[tool.persistent-harness]
+id = "kernel"
+import-name = "harness_kernel"
+alias = "kernel"
+host-requests = ["kernel.status", "kernel.restart"]

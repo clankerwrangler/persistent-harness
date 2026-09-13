@@ -1,0 +1,11 @@
+[project]
+name = "persistent-harness-shell"
+version = "1.0.0"
+requires-python = ">=3.11"
+dependencies = []
+
+[tool.persistent-harness]
+id = "shell"
+import-name = "harness_shell"
+alias = "shell"
+host-requests = ["shell.run"]

@@ -1,0 +1,13 @@
+[project]
+name = "persistent-harness-session-history"
+version = "1.0.0"
+description = "Bounded read-only search and excerpts from canonical persistent-harness sessions"
+requires-python = ">=3.11"
+dependencies = []
+
+[tool.persistent-harness]
+id = "session-history"
+import-name = "harness_session_history"
+alias = "session_history"
+entry-point = "run"
+host-requests = ["session_history.query"]

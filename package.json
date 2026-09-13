@@ -1,0 +1,32 @@
+{
+  "name": "@local/persistent-harness",
+  "version": "0.0.0",
+  "private": true,
+  "license": "MIT",
+  "type": "module",
+  "description": "Durable, detachable Pi sessions with persistent Python and retained child agents",
+  "scripts": {
+    "test": "node bin/package-load-smoke.mjs && node --test --test-concurrency=1 test/*.test.mjs",
+    "test:package-load": "node bin/package-load-smoke.mjs",
+    "test:p0": "node --test --test-concurrency=1 test/pi-session.test.mjs test/session-paths.test.mjs test/session-actor.test.mjs",
+    "test:p1": "node --test --test-concurrency=1 test/protocol.test.mjs test/store-actor.test.mjs test/supervisor-actor.test.mjs",
+    "test:gate-p": "node --test --test-concurrency=1 test/e2e-persistent-sessions.test.mjs test/e2e-actor-recovery.test.mjs",
+    "install:extension": "node bin/install.mjs install",
+    "uninstall:extension": "node bin/install.mjs uninstall",
+    "provision:skills": "node bin/provision-skills.mjs",
+    "test:native": "node --test --test-concurrency=1 test/native/e2e-async.test.mjs"
+  },
+  "bin": {
+    "harness-supervisor": "./bin/harness-supervisor.mjs",
+    "persistent-harness-install": "./bin/install.mjs",
+    "persistent-pi": "./bin/persistent-pi.mjs",
+    "persistent-harness-provision-skills": "./bin/provision-skills.mjs"
+  },
+  "engines": {
+    "node": ">=24.0.0"
+  },
+  "dependencies": {
+    "croner": "10.0.1",
+    "ws": "8.21.0"
+  }
+}
