@@ -54,7 +54,7 @@ test("supervisor cron steers an origin, completes durable history, isolates fres
   const root = await mkdtemp(path.join(os.tmpdir(), "harness-cron-supervisor-")); const skillsPath = path.join(root, "skills");
   await mkdir(skillsPath); const socketPath = path.join(root, "run", "supervisor.sock"); const actors = new Map();
   const supervisor = new HarnessSupervisor({ socketPath, databasePath: path.join(root, "state", "harness.sqlite"),
-    pidPath: path.join(root, "run", "supervisor.pid"), skillsPath, actorInactivityMs: 0, cronTickIntervalMs: 100,
+    pidPath: path.join(root, "run", "supervisor.pid"), skillsPath, actorInactivityMs: 0, cronTickIntervalMs: 100, notificationIdleMs: 70, notificationTickMs: 10,
     runtimeProvisioner: async () => ({}), actorFactory: (options) => { const actor = new CronFakeActor(options);
       actors.set(options.session.sessionId, actor); return actor; },
     processIdentityFactory: async (pid) => ({ version: 1, pid, processGroup: pid, startTime: "fake", ownerToken: "fake" }),
