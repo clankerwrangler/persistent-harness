@@ -8,6 +8,7 @@ import { HarnessSupervisor } from "../src/supervisor.mjs";
 import { HarnessClient } from "../src/client.mjs";
 import { CronStore } from "../src/cron-store.mjs";
 import { runtimeVersions } from "../src/python-runtime.mjs";
+import { discoverSkillsFromDirectory } from "../src/skills.mjs";
 const { python: PYTHON_VERSION, ipython: IPYTHON_VERSION, dill: DILL_VERSION } = runtimeVersions;
 
 async function settled(client, id, text) {
@@ -23,6 +24,9 @@ async function settled(client, id, text) {
 test("stock worker: real supervisor, external stock SDK, canonical input and persistent Python", { timeout: 60000 }, async t => {
   const root = await mkdtemp(path.join(os.tmpdir(), "sw-")); const cwd = path.join(root, "project"), agentDir = path.join(root, "agent");
   await mkdir(cwd); await mkdir(agentDir);
+  const catalog = await discoverSkillsFromDirectory(path.resolve("skills")); assert.deepEqual(catalog.diagnostics, []);
+  const dependencies = [...new Set(catalog.skills.flatMap(skill => skill.python?.dependencies ?? []))].sort();
+  const expectedRuntimeMessage = `Persistent Harness needs CPython ${PYTHON_VERSION} and:\n${[`ipython==${IPYTHON_VERSION}`, `dill==${DILL_VERSION}`, ...dependencies].join("\n")}`;
   const previous = { PI_CODING_AGENT_DIR: process.env.PI_CODING_AGENT_DIR, HARNESS_FAKE_BASE_URL: process.env.HARNESS_FAKE_BASE_URL };
   process.env.PI_CODING_AGENT_DIR = agentDir;
   const bodies = []; let supervisor, client, cronStore, admission;
@@ -78,8 +82,7 @@ test("stock worker: real supervisor, external stock SDK, canonical input and per
       assert.equal(provisioningAnswered, false); assert.equal(typeof e.id, "string"); assert(e.id.length > 0);
       assert.equal(process.env.PI_CODING_AGENT_DIR, agentDir); assert.equal(path.dirname(agentDir), root);
       assert.equal(process.env.PI_HARNESS_PYTHON, undefined, "fixture must install inside its own agent directory");
-      assert(e.message.startsWith(`Persistent Harness needs CPython ${PYTHON_VERSION} and:\n`));
-      assert(e.message.includes(`ipython==${IPYTHON_VERSION}`)); assert(e.message.includes(`dill==${DILL_VERSION}`));
+      assert.equal(e.message, expectedRuntimeMessage);
       const current = supervisor.store.getSession(admission.sessionId);
       assert(current.actorGeneration > 0 && current.lifecycle === "resident");
       assert.equal(frame.data.actorGeneration, current.actorGeneration);
