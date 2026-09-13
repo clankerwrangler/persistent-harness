@@ -102,6 +102,7 @@ async function readJob(directory, id) {
     id,
     name: safeName(meta.name, id),
     sessionId: meta.session_id,
+    startedAt: startedAt(meta.created_at),
     exitCode: exit.exitCode,
     signal: exit.signal,
     endedAt: exit.endedAt,

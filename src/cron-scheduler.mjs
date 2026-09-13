@@ -97,7 +97,7 @@ export class CronScheduler {
     return {
       name: params.name, prompt: params.prompt, schedule: normalized.schedule,
       scheduleDisplay: normalized.display, timezone: normalized.schedule.timezone,
-      executionMode: params.executionMode ?? "fresh", originSessionId,
+      executionMode: params.executionMode ?? "fresh", notificationIntent: params.notificationIntent ?? null, originSessionId,
       cwd: origin.cwd, repositoryRoot: origin.repositoryRoot,
       launch: cronLaunchFromRequest(params),
       repeat: requireRepeat(params.repeat, normalized.recurring), nextRunAt: normalized.nextRunAt,
@@ -107,7 +107,7 @@ export class CronScheduler {
   #reuseCreation(existing, originSessionId, params) {
     // An existing fixed-ID intent can contain an at-time that was already due when staged.
     const requested = this.#creationParams(originSessionId, params, existing.createdAt, { allowPastAt: true });
-    for (const key of ["name", "prompt", "schedule", "timezone", "executionMode", "originSessionId", "cwd", "repositoryRoot", "launch", "repeat"]) {
+    for (const key of ["name", "prompt", "schedule", "timezone", "executionMode", "notificationIntent", "originSessionId", "cwd", "repositoryRoot", "launch", "repeat"]) {
       if (!isDeepStrictEqual(requested[key], existing[key])) throw new Error(`cron jobId already exists with different intent: ${key}`);
     }
     return existing;
@@ -155,7 +155,7 @@ export class CronScheduler {
     return this.cronStore.replaceJob(current.jobId, {
       name: patch.name ?? current.name, prompt: patch.prompt ?? current.prompt,
       schedule: normalized.schedule, scheduleDisplay: normalized.display, timezone: normalized.schedule.timezone,
-      executionMode: patch.executionMode ?? current.executionMode, repeat,
+      executionMode: patch.executionMode ?? current.executionMode, notificationIntent: patch.notificationIntent ?? current.notificationIntent, repeat,
       launch: mergeCronLaunch(current.launch, patch),
       fireCount: reset ? 0 : current.fireCount, enabled: paused || completed ? false : true,
       state: paused ? "paused" : completed ? "completed" : "scheduled",

@@ -8,4 +8,4 @@ dependencies = []
 id = "agent-message"
 import-name = "harness_agent_message"
 alias = "agent_message"
-host-requests = ["agent_message.list_agents", "agent_message.send"]
+host-requests = ["agent_message.list_agents", "agent_message.send", "agent_message.request_attention", "agent_message.resolve_attention"]

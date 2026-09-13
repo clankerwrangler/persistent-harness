@@ -11,7 +11,7 @@ Only a depth-zero root session may manage jobs. Isolated fresh scheduled session
 
 ## Actions
 
-The `action` argument accepts `create`, `list`, `update`, `pause`, `resume`, `run`, `remove`, and `history`.
+The `action` argument accepts `create`, `list`, `update`, `pause`, `resume`, `run`, `remove`, `history`, and `report`.
 
 Create a recurring origin-session job:
 
@@ -22,6 +22,7 @@ await cron(
     prompt="Review the workspace status and report concrete blockers.",
     schedule={"kind": "cron", "expression": "0 9 * * *"},
     execution_mode="origin",
+    notification_intent="result",
 )
 ```
 
@@ -72,8 +73,41 @@ Unpinned jobs use the global default model at the moment they fire, not the mode
 
 Recurring jobs run forever when `repeat` is omitted or `None`; finite positive repeats are supported. One-shot jobs require exactly one run. A manual `run` does not consume the scheduled repeat count.
 
-Mutating actions identify a job by exact ID or case-insensitive live name. Use `selector` for `update`, `pause`, `resume`, `run`, `remove`, and `history`. `history` returns bounded run records and visible output. `list` excludes removed jobs unless `include_removed=True`.
+Mutating actions identify a job by exact ID or case-insensitive live name. Use `selector` for `update`, `pause`, `resume`, `run`, `remove`, and `history`; use exact `run_id` for `report`. `history` returns bounded run records and visible output. `list` excludes removed jobs unless `include_removed=True`.
 
 Missed recurring occurrences collapse into one catch-up attempt. The same job never overlaps; an occurrence encountered while its prior run remains active is recorded as skipped. The default global limit is two concurrent runs. If the supervisor restarts during a run, that attempt becomes `unknown` and is never automatically replayed.
 
 Prompts must be self-contained and safe for unattended execution. Do not schedule credential disclosure, unbounded side effects, or ambiguous destructive work.
+
+## Notification intent and run disposition
+
+Choose `notification_intent` explicitly on `create` or `update`:
+- `result`: deliver a meaningful result or reminder to the human. A run that cannot
+  produce its promised result is visible as a delivery failure, not a fabricated result.
+- `conditional`: deliver only a concrete finding; explicitly report either `deliver`
+  or `no_finding` for the exact run after evaluating the condition.
+- `silent`: no human notification. Execution history remains available.
+
+Older calls that omit intent remain compatible and unclassified (`None`); they do not
+promise notification delivery. Updating intent affects future runs, not historical
+ones. Notification transport retry never reruns a scheduled job.
+
+Use the run ID from the authenticated cron input header (not an arbitrary remembered
+run). The root executing that run can report its disposition, including an isolated
+fresh root, without gaining scheduler-management rights:
+
+```python
+await cron(action="report", run_id="<exact run ID>", disposition="deliver",
+           body="The bounded check found a concrete problem requiring review.")
+# Or, after actually checking a conditional job:
+await cron(action="report", run_id="<exact run ID>", disposition="no_finding")
+```
+
+`deliver` requires nonblank plain text up to 1000 characters; `no_finding` accepts no
+body and is valid only for conditional runs. A repeated identical report is idempotent;
+a conflicting report or a first report after evaluation ends is rejected. A missing
+conditional disposition is visible as failure to establish the condition, never
+inferred from prose. Result runs may also report an explicit delivery body; otherwise
+the supervisor uses only visible assistant output bound to that run's input, never an
+older or subsequent unrelated answer. Generic family-idle alerts do not bypass a
+cron-only episode's notification intent.
