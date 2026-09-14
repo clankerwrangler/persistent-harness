@@ -72,11 +72,18 @@ The existing authenticated client connection advertises `limits.notificationVers
 
 | Request | Parameters / result |
 | --- | --- |
-| `list_notifications` | optional `limit` (1–100), `before` sequence; returns notifications, `nextBefore`, unread count |
+| `list_notifications` | optional `limit` (1–100), `before` sequence, `view` (`all`, `inbox`, `history`; default `all`); returns notifications, `nextBefore`, global unread count |
 | `get_notification` | `id`; returns notification and secret-free delivery receipts |
 | `read_notification` | `id`; acknowledges reading, not resolution |
 | `claim_notification_delivery` | `endpointIds`, at most eight SHA256 identities; returns bounded leased claims |
 | `record_notification_delivery` | `id`, `endpointId`, `leaseId`, status |
+
+The inbox contains pending unread informational events and pending `attention` requests,
+including those already read. History is its complement: read information and all
+resolved, cancelled, superseded, or expired records. Expiry reconciliation precedes
+selection, and selection precedes sequence ordering and the page limit. Nothing is
+deleted. The global unread count is independent of the view and page. Reset `before`
+when changing views; use the returned `nextBefore` only for that selected view.
 
 Actor-only requests are `request_attention` (`key`, `title`, `body`, optional `expiresIn`)
 and `resolve_attention` (`key`). The supervisor derives root ownership and checks live
