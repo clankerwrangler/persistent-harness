@@ -103,3 +103,46 @@ test("origin ties, missing timestamps and prehistory remain explicit unknown, ne
   store.noteUserInput("root", 2700); store.observe("root", { liveActors: ["root"], now: 2800 }); store.observe("root", { now: 2900 });
   assert.equal(store.observe("root", { now: 3000 }).kind, "idle", "real user admission overrides unknown");
 });
+
+test("inbox and history partition canonical kinds before bounded pagination without changing unread", async t => {
+  const { file, store } = await fixture(t), now = 5000;
+  const old = store.request("root", { ...request, key: "old-read-action" }, 1000);
+  store.read(old.id, 1001);
+  for (let i = 0; i < 105; i++) {
+    const item = store.create({ key: `history:${i}`, rootId: "root", sessionId: "root", kind: "idle", title: "Read information", body: "History", expiresAt: 100000, source: { type: "family_idle" } }, 1100 + i);
+    store.read(item.id, 2000);
+  }
+  const expectedInbox = [old.id], expectedUnread = [];
+  for (const kind of ["idle", "cron", "attention"]) for (const state of ["pending", "resolved", "cancelled", "superseded", "expired"]) for (const read of [false, true]) {
+    const item = store.create({ key: `${kind}:${state}:${read}`, rootId: "root", sessionId: "root", kind,
+      title: "Type, not prose", body: "This text does not classify the request", expiresAt: state === "expired" ? 4000 : 100000,
+      source: { type: kind === "attention" ? "extension_ui" : kind === "idle" ? "family_idle" : "cron" } }, 3000);
+    if (["resolved", "cancelled", "superseded"].includes(state)) store.transition(item.id, state, 3001);
+    if (read) store.read(item.id, 3002);
+    if (state === "pending" && (!read || kind === "attention")) expectedInbox.push(item.id);
+    if (state === "pending" && !read) expectedUnread.push(item.id);
+  }
+  const page = store.list({ view: "inbox" }, now);
+  assert.deepEqual(page.notifications.map(n => n.id).sort(), expectedInbox.sort(), "old read action must not be buried behind over 100 newer historical rows");
+  assert.equal(page.unread, expectedUnread.length);
+  assert.equal(page.notifications.find(n => n.id === old.id).readAt, 1001);
+  const readAll = view => {
+    const rows = []; let before;
+    for (let pages = 0; pages < 30; pages++) {
+      const value = store.list({ view, limit: 7, ...(before ? { before } : {}) }, now);
+      assert.equal(value.unread, expectedUnread.length); assert.ok(value.notifications.length <= 7);
+      rows.push(...value.notifications); before = value.nextBefore;
+      if (before === null) return rows;
+    }
+    assert.fail("pagination did not terminate");
+  };
+  const all = readAll("all"), inbox = readAll("inbox"), history = readAll("history");
+  assert.deepEqual(store.list({}, now), store.list({ view: "all" }, now), "omitted view retains the legacy all-record feed");
+  assert.equal(all.length, 136);
+  assert.deepEqual([...inbox, ...history].map(n => n.id).sort(), all.map(n => n.id).sort());
+  assert.equal(new Set([...inbox, ...history].map(n => n.id)).size, all.length, "views are disjoint");
+  for (const rows of [all, inbox, history]) assert.ok(rows.every((row, i) => i === 0 || row.seq < rows[i - 1].seq));
+  const restarted = new NotificationStore(file); t.after(() => restarted.close());
+  assert.deepEqual(restarted.list({ view: "inbox" }, now), page, "viewing preserves durable read and pending state across reopen");
+  for (const view of [null, "", "active", "INBOX", 1, {}, []]) assert.throws(() => store.list({ view }, now), /view/);
+});

@@ -172,3 +172,10 @@ test("visible history pagination accepts only bounded cursors and page counts", 
     assert.throws(() => validateRequest(frame("get_visible_messages", { sessionId: "actor", ...extra })), /not supported/);
   }
 });
+
+test("notification list views are exact, bounded, and default to the compatible all feed", () => {
+  assert.deepEqual(validateRequest(frame("list_notifications", {})).params, { limit: 100, before: Number.MAX_SAFE_INTEGER, view: "all" });
+  for (const view of ["all", "inbox", "history"]) assert.deepEqual(validateRequest(frame("list_notifications", { view, limit: 7, before: 42 })).params, { limit: 7, before: 42, view });
+  for (const view of [null, "", "INBOX", "pending", [], {}, 1, true]) assert.throws(() => validateRequest(frame("list_notifications", { view })), /view/);
+  for (const params of [{ view: "inbox", unknown: true }, { limit: 101 }, { limit: 0 }, { before: 0 }, { before: "42" }]) assert.throws(() => validateRequest(frame("list_notifications", params)), ProtocolError);
+});

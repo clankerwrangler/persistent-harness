@@ -355,9 +355,11 @@ function notificationParam(params) {
 const validators = new Map([
   ["request_attention", attentionRequest], ["resolve_attention", p => attentionRequest(p, true)],
   ["get_notification", notificationParam], ["read_notification", notificationParam],
-  ["list_notifications", params => { const p = record(params, "params"); exact(p, new Set(["limit", "before"]), "params");
+  ["list_notifications", params => { const p = record(params, "params"); exact(p, new Set(["limit", "before", "view"]), "params");
+    const view = p.view === undefined ? "all" : p.view;
+    if (!["all", "inbox", "history"].includes(view)) throw new ProtocolError("invalid_request", "params.view must be all, inbox, or history");
     return { limit: p.limit === undefined ? 100 : integer(p.limit, "params.limit", 1, 100),
-      before: p.before === undefined ? Number.MAX_SAFE_INTEGER : integer(p.before, "params.before", 1, Number.MAX_SAFE_INTEGER) }; }],
+      before: p.before === undefined ? Number.MAX_SAFE_INTEGER : integer(p.before, "params.before", 1, Number.MAX_SAFE_INTEGER), view }; }],
   ["claim_notification_delivery", params => { const p = record(params, "params"); exact(p, new Set(["endpointIds"]), "params");
     return { endpointIds: [...new Set(array(p.endpointIds, "params.endpointIds", 8).map(v => notificationIdentity(v, "params.endpointIds[]")))] }; }],
   ["record_notification_delivery", params => { const p = record(params, "params"); exact(p, new Set(["id", "endpointId", "leaseId", "status"]), "params");

@@ -197,9 +197,12 @@ export class NotificationStore {
   get(id, now = Date.now()) {
     this.expire(now); return map(this.#db.prepare("SELECT * FROM notifications WHERE id=?").get(id));
   }
-  list({ limit = 100, before = Number.MAX_SAFE_INTEGER } = {}, now = Date.now()) {
+  list({ limit = 100, before = Number.MAX_SAFE_INTEGER, view = "all" } = {}, now = Date.now()) {
+    if (!["all", "inbox", "history"].includes(view)) throw new Error("invalid notification view");
     this.expire(now);
-    const rows = this.#db.prepare("SELECT * FROM notifications WHERE seq<? ORDER BY seq DESC LIMIT ?").all(before, limit);
+    const inbox = "(state='pending' AND (read_at IS NULL OR kind='attention'))";
+    const selection = view === "inbox" ? ` AND ${inbox}` : view === "history" ? ` AND NOT ${inbox}` : "";
+    const rows = this.#db.prepare(`SELECT * FROM notifications WHERE seq<?${selection} ORDER BY seq DESC LIMIT ?`).all(before, limit);
     return { notifications: rows.map(map), nextBefore: rows.length === limit ? rows.at(-1).seq : null,
       unread: this.#db.prepare("SELECT count(*) AS n FROM notifications WHERE state='pending' AND read_at IS NULL").get().n };
   }
