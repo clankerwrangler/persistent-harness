@@ -7,6 +7,8 @@ const PNG_1X1 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8
 
 const frame = (type, params) => ({ version: PROTOCOL_VERSION, id: crypto.randomUUID(), type, params });
 test("protocol separates one authenticated actor from detachable clients", () => {
+  assert.deepEqual(validateRequest(frame("get_liveness", {})).params, {});
+  assert.throws(() => validateRequest(frame("get_liveness", { audit: true })), /not supported/);
   const actor = validateRequest(frame("register_actor", { sessionId: "actor", sessionFile: "/tmp/a.jsonl", cwd: "/tmp", repositoryRoot: null, actorToken: "token", actorGeneration: 2 }));
   assert.equal(actor.params.actorGeneration, 2);
   const client = validateRequest(frame("register_client", { clientInstanceId: "ui-a" }));

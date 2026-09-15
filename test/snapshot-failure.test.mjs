@@ -453,6 +453,141 @@ test("snapshots stay bounded, reuse verified blobs, swap atomically, and reject 
     /name and reason must be strings.*duplicate snapshot name.*also appears in saved/,
   );
 
+  const scopeScript = path.join(root, "snapshot-save-scope.py");
+  await writeFile(scopeScript, String.raw`
+import ast
+import json
+import os
+import sys
+from pathlib import Path
+
+kernel_path, fixture_root = map(Path, sys.argv[1:])
+tree = ast.parse(kernel_path.read_text("utf-8"), filename=str(kernel_path))
+constant_names = {"SNAPSHOT_VERSION", "PER_VARIABLE_LIMIT", "TOTAL_SNAPSHOT_LIMIT", "MANIFEST_LIMIT"}
+nodes = []
+for node in tree.body:
+    if isinstance(node, (ast.Import, ast.FunctionDef, ast.ClassDef)):
+        nodes.append(node)
+    elif isinstance(node, ast.ImportFrom) and node.module not in {"IPython.core.interactiveshell", "_persistent_harness"}:
+        nodes.append(node)
+    elif isinstance(node, ast.Assign) and any(isinstance(target, ast.Name) and target.id in constant_names for target in node.targets):
+        nodes.append(node)
+namespace = {"SkillProxy": type("SkillProxy", (), {})}
+exec(compile(ast.Module(body=nodes, type_ignores=[]), str(kernel_path), "exec"), namespace)
+save = namespace["save_snapshot"]
+restore = namespace["restore_snapshot"]
+original_read = namespace["read_bounded_regular"]
+fixture_root.mkdir()
+target = fixture_root / "state"
+old = {"stable": b"s" * 1024 * 1024, "changed": b"c" * 1024 * 1024,
+       "deleted": b"d" * 1024 * 1024, "corrupt": b"still current"}
+first = save(target, old, set())
+items = {item["name"]: item for item in first["saved"]}
+# An unrelated corrupt/non-regular payload must not even be opened on save.
+(target / items["deleted"]["file"]).unlink()
+os.mkfifo(target / items["deleted"]["file"])
+(target / items["changed"]["file"]).write_bytes(b"wrong old bytes")
+(target / items["corrupt"]["file"]).write_bytes(b"x" * items["corrupt"]["bytes"])
+reads = []
+def counted_read(directory_fd, name, **kwargs):
+    reads.append((name, kwargs.get("expected_bytes", 0)))
+    return original_read(directory_fd, name, **kwargs)
+namespace["read_bounded_regular"] = counted_read
+current = {"stable": old["stable"], "changed": b"new", "corrupt": old["corrupt"]}
+second = save(target, current, set())
+blob_reads = [(name, size) for name, size in reads if name != "manifest.json"]
+assert len(blob_reads) == 2, reads
+assert sorted(size for _, size in blob_reads) == sorted(items[name]["bytes"] for name in ("stable", "corrupt"))
+assert second["stats"]["reusedBlobs"] == 1, second
+assert second["stats"]["writtenBlobs"] == 2, second
+namespace["read_bounded_regular"] = original_read
+restored = {}
+assert restore(target, restored, set())["skipped"] == []
+assert restored == current
+
+# Candidate input/path/size/hash checks survive without auditing old telemetry.
+original_manifest = (target / "manifest.json").read_text()
+for bad in ('{"version":true,"saved":[]}', '{"version":2,"saved":[]}',
+            '{"version":1,"saved":{}}', '{"version":1,"version":1,"saved":[]}',
+            '{"version":1,"saved":[],"unused":NaN}'):
+    (target / "manifest.json").write_text(bad)
+    assert namespace["snapshot_reuse_candidates"](target) == {}
+valid_item = second["saved"][0]
+for field, bad in (("file", "../outside"), ("file", "/absolute"), ("file", "a\\b"),
+                   ("file", "a\x00b"), ("bytes", True), ("bytes", -1),
+                   ("bytes", 4194305), ("sha256", "0" * 63), ("sha256", "A" * 64)):
+    (target / "manifest.json").write_text(json.dumps({"version": 1, "saved": [{**valid_item, field: bad}]}))
+    assert namespace["snapshot_reuse_candidates"](target) == {}
+(target / "manifest.json").write_text(json.dumps({"version": 1, "saved": [valid_item, valid_item]}))
+assert namespace["snapshot_reuse_candidates"](target) == {}
+
+# Impossible old attribution and malformed old skipped/checkpoint fields are not
+# prerequisites of a new save, but remain invalid for restore and recovery.
+old_audit = json.loads(original_manifest)
+old_audit.update(stats={"invalid": True}, skipped="invalid", namespaceCheckpoint=False, totalBytes=-1)
+(target / "manifest.json").write_text(json.dumps(old_audit))
+assert not namespace["validate_snapshot_directory"](target)["complete"]
+assert set(namespace["snapshot_reuse_candidates"](target)) == set(current)
+original_attribution = namespace["exact_blob_attribution_possible"]
+def forbidden_audit(*args):
+    raise AssertionError("save audited old blob attribution")
+namespace["exact_blob_attribution_possible"] = forbidden_audit
+try:
+    clean = save(target, current, set())
+    clean_again = save(target, current, set())
+finally:
+    namespace["exact_blob_attribution_possible"] = original_attribution
+assert clean["stats"]["reusedBlobs"] == len(current)
+assert clean_again["stats"]["reusedBlobs"] == len(current)
+assert namespace["validate_snapshot_directory"](target)["complete"]
+
+# All-current values can be written without reading any old payload.
+reads.clear()
+namespace["read_bounded_regular"] = counted_read
+third = save(target, {"new": 123}, set())
+assert all(name == "manifest.json" for name, _ in reads), reads
+assert third["stats"]["reusedBlobs"] == 0
+namespace["read_bounded_regular"] = original_read
+
+# A source swap after lstat but before link must still fail destination verification.
+original_link = os.link
+for replacement in ("symlink", "corrupt"):
+    initial = save(target, {"value": b"current"}, set())
+    item = initial["saved"][0]
+    outside = fixture_root / "outside.dill"
+    outside.write_bytes((target / item["file"]).read_bytes())
+    swapped = False
+    def swapping_link(source, destination, **kwargs):
+        global swapped
+        swapped = True
+        source.unlink()
+        if replacement == "symlink":
+            source.symlink_to(outside)
+        else:
+            source.write_bytes(b"x" * item["bytes"])
+        return original_link(source, destination, **kwargs)
+    os.link = swapping_link
+    try:
+        result = save(target, {"value": b"current"}, set())
+    finally:
+        os.link = original_link
+    assert swapped and result["stats"]["reusedBlobs"] == 0, result
+    assert not (target / result["saved"][0]["file"]).is_symlink()
+    restored = {}
+    assert restore(target, restored, set())["skipped"] == []
+    assert restored == {"value": b"current"}
+print(json.dumps({"priorPayloadBytes": first["totalBytes"],
+                  "selectedPayloadReadBytes": sum(size for _, size in blob_reads),
+                  "selectedPayloadReadCount": len(blob_reads),
+                  "unselectedPayloadReadCount": 0}))
+`);
+  await new Promise((resolve, reject) => {
+    execFile(runtime.pythonPath, [scopeScript, common.kernelScript, path.join(root, "save-scope")], (error, stdout, stderr) => {
+      if (error) reject(new Error(`${error.message}\n${stdout}\n${stderr}`));
+      else { t.diagnostic(stdout.trim()); resolve(); }
+    });
+  });
+
   const raceScript = path.join(root, "snapshot-recovery-race.py");
   await writeFile(raceScript, String.raw`
 import ast

@@ -27,8 +27,11 @@ export function controlRequest(socketPath, type, params = {}, { timeoutMs = 3000
       try {
         for (const rawFrame of decoder.push(chunk)) {
           const frame = validateServerFrame(rawFrame);
-          if (frame.type === "protocol_error") return finish(new Error(`${frame.code}: ${frame.message}`));
+          if (frame.type === "protocol_error") return finish(Object.assign(
+            new Error(`${frame.code}: ${frame.message}`), { code: frame.code, remoteProtocolError: true },
+          ));
           if (frame.type !== "response" || frame.id !== id) continue;
+          if (frame.requestType !== type) return finish(new Error("control response request type does not match"));
           if (!frame.ok) return finish(new Error(frame.error));
           return finish(undefined, frame.data);
         }

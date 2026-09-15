@@ -683,6 +683,7 @@ export class HarnessSupervisor {
 
   async #dispatch(state, request) {
     const { type, params } = request;
+    if (type === "get_liveness") return { alive: true };
     if (type === "get_status") return this.status();
     if (type === "get_usage") return this.store.getUsageWindow(params.windowMinutes);
     if (type === "shutdown_daemon") { setImmediate(() => this.stop()); return { stopping: true }; }
