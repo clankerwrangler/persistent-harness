@@ -120,7 +120,7 @@ test("migration retains legacy receipt evidence without inventing provenance or 
     CREATE TABLE actor_inputs (id TEXT PRIMARY KEY, session_id TEXT, body TEXT, images_json TEXT, digest TEXT,
       behavior TEXT, state TEXT, created_at INTEGER, accepted_at INTEGER, accepted_generation INTEGER);
     CREATE TABLE actor_input_receipts (id TEXT PRIMARY KEY, session_id TEXT, digest TEXT, created_at INTEGER);
-    CREATE TABLE messages (sender_id TEXT, sender_entry_id TEXT);
+    CREATE TABLE messages (id TEXT PRIMARY KEY, sender_id TEXT, sender_entry_id TEXT, state TEXT);
     INSERT INTO sessions VALUES ('root', 'fixture-owner', 1, 1);
     INSERT INTO actor_input_receipts VALUES ('z-legacy', 'root', 'digest-z', 10), ('a-legacy', 'root', 'digest-a', 10);
     INSERT INTO actor_inputs VALUES ('z-legacy', 'root', 'z', '[]', 'digest-z', 'auto', 'accepted', 10, 20, 1);

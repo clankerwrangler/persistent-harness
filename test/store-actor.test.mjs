@@ -517,3 +517,96 @@ test("default-named roots take an assigned title and keep user names", async (t)
   assert.equal(store.getSession("child").name, "child-name");
   assert.equal(parent.name, "Parent");
 });
+
+
+test("child-exit receipts are atomic, generation-idempotent, private and restart-compatible", async (t) => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), "harness-child-exit-store-"));
+  const databasePath = path.join(dir, "store.sqlite"); let store = new HarnessStore(databasePath);
+  t.after(async () => { store.close(); await rm(dir, { recursive: true, force: true }); });
+  for (const id of ["parent", "unrelated"]) store.createRoot({ sessionId: id, sessionFile: `/${id}.jsonl`, cwd: dir,
+    name: `PRIVATE NAME ${id}`, actorToken: id, launch: {} });
+  const addChild = (id, parent = "parent") => store.createChild(parent, { sessionId: id, sessionFile: `/${id}.jsonl`,
+    actorToken: id, policy: { name: `PRIVATE CHILD ${id}`, depth: parent === "parent" ? 1 : 2, cwd: dir, prompt: "SECRET PROMPT" } });
+  addChild("child"); addChild("grandchild", "child");
+  const injection = new DatabaseSync(databasePath);
+  injection.exec("CREATE TRIGGER deny_exit_receipt BEFORE INSERT ON messages WHEN NEW.child_exit_generation IS NOT NULL BEGIN SELECT RAISE(ABORT, 'synthetic receipt failure'); END");
+  assert.throws(() => store.markActorLifecycle("child", 1, "error", "private", 9, { reportChildExit: true }), /synthetic receipt failure/);
+  assert.equal(store.getSession("child").lifecycle, "starting", "receipt and lifecycle commit atomically");
+  injection.exec("DROP TRIGGER deny_exit_receipt"); injection.close();
+  const fail = (id, generation = 1, error = "PRIVATE STDERR") => store.markActorLifecycle(id, generation, "error", error, 10, { reportChildExit: true });
+  fail("child"); fail("child", 1, "different private stderr");
+  let message = store.listPendingMessages("parent")[0];
+  assert.equal(store.listMessages().length, 1);
+  assert.equal(message.senderEntryId, null);
+  assert.equal(message.state, "queued"); assert.equal(message.childExitGeneration, 1);
+  assert.equal(message.relationship, "parent"); assert.match(message.body, /actor_exit/);
+  assert.doesNotMatch(JSON.stringify(message), /PRIVATE|SECRET/);
+  assert.deepEqual(store.listMessagesAwaitingSenderEntry("child"), []);
+  assert.equal(fail("child", 0), false);
+  assert.throws(() => store.createMessage("child", { messageId: message.messageId, target: "parent", deliveryMode: "auto", body: message.body }), /reserved/);
+  fail("grandchild");
+  assert.equal(store.listPendingMessages("child")[0].senderId, "grandchild");
+  assert.equal(store.listPendingMessages("parent").length, 1, "no grandparent reach");
+  assert.deepEqual(store.listPendingMessages("unrelated"), []);
+  store.close(); store = new HarnessStore(databasePath);
+  assert.deepEqual(store.getMessage(message.messageId), message);
+  store.markMessageDelivered(message.messageId, "parent", 20);
+  store.close(); store = new HarnessStore(databasePath);
+  assert.equal(store.getMessage(message.messageId).state, "delivered");
+  store.acknowledgeMessage(message.messageId, "parent", 21);
+  fail("child"); assert.equal(store.getMessage(message.messageId).state, "acknowledged");
+  store.prepareActorRevival("child", "new-token", 22);
+  fail("child", 2);
+  assert.equal(store.listPendingMessages("parent").length, 1);
+  assert.equal(store.listPendingMessages("parent")[0].childExitGeneration, 2);
+  // Intentional transitions and stale failure callbacks after them are silent.
+  for (const state of ["stopped", "passivated"]) {
+    addChild(state); store.markActorLifecycle(state, 1, state);
+    assert.equal(fail(state), false);
+    assert.equal(store.listMessages().some(m => m.senderId === state), false);
+  }
+  // Root failure has no family recipient.
+  fail("unrelated"); assert.equal(store.listMessages().some(m => m.senderId === "unrelated"), false);
+  assert.deepEqual(store.diagnose(), []);
+});
+
+test("child-exit queue preserves unavailable parents and deletion fencing", async (t) => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), "harness-child-exit-deletion-"));
+  const store = new HarnessStore(path.join(dir,"store.sqlite"));
+  t.after(async () => { store.close(); await rm(dir,{recursive:true,force:true}); });
+  store.createRoot({ sessionId:"parent", sessionFile:"/parent.jsonl",cwd:dir,name:"Parent",actorToken:"token",launch:{} });
+  const add = id => store.createChild("parent", {sessionId:id,sessionFile:`/${id}.jsonl`,actorToken:id,policy:{name:id,depth:1,cwd:dir,prompt:"work"}});
+  add("child");
+  store.markActorLifecycle("parent",1,"stopped");
+  store.markActorLifecycle("child",1,"error","secret",10,{reportChildExit:true});
+  assert.equal(store.listPendingChildExitMessages().length,0);
+  store.markActorLifecycle("parent",1,"error");
+  assert.equal(store.listPendingChildExitMessages().length,0);
+  store.markActorLifecycle("parent",1,"passivated");
+  assert.equal(store.listPendingChildExitMessages().length,1);
+  const message=store.listPendingChildExitMessages()[0];
+  // A deleted parent must terminalize its outstanding receipt rather than wake.
+  store.deleteSession("parent");
+  assert.equal(store.getMessage(message.messageId).state,"rejected");
+  assert.equal(store.listPendingChildExitMessages().length,0);
+  assert.deepEqual(store.diagnose(),[]);
+});
+
+
+test("child-exit retry batches do not strand receipts behind unacknowledged messages", async (t) => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), "harness-child-exit-batches-"));
+  const store = new HarnessStore(path.join(dir,"store.sqlite"));
+  t.after(async () => {store.close(); await rm(dir,{recursive:true,force:true});});
+  store.createRoot({sessionId:"parent",sessionFile:"/parent.jsonl",cwd:dir,name:"Parent",actorToken:"t",launch:{}});
+  for(let n=0;n<103;n++) {
+    const id=`child-${n}`;
+    store.createChild("parent",{sessionId:id,sessionFile:`/${id}.jsonl`,actorToken:id,policy:{name:id,depth:1,cwd:dir,prompt:"work"}});
+    store.markActorLifecycle(id,1,"error","private",n,{reportChildExit:true});
+  }
+  const first=store.listPendingChildExitMessages(); assert.equal(first.length,100);
+  for(const m of first) store.markMessageDelivered(m.messageId,"parent");
+  const second=store.listPendingChildExitMessages(first.at(-1).messageId); assert.equal(second.length,3);
+  assert.equal(new Set([...first,...second].map(m=>m.messageId)).size,103);
+  assert.equal(store.listPendingChildExitMessages(second.at(-1).messageId).length,0);
+  assert.equal(store.listPendingChildExitMessages().length,100,"a fresh scan retries earlier unacknowledged receipts");
+});

@@ -851,3 +851,42 @@ for (const afterResult of [false, true]) test(`post-send unknown after ${afterRe
   assert(decisions.length >= 1);
   assert(decisions.every(entry => !entry.data.decision.retry && entry.data.observations.admittedCount === 1 && entry.data.observations.dispatchedCount === 1));
 });
+
+
+test("abnormal real child exit wakes its parent with one canonical sanitized receipt", { timeout: 120_000 }, async t => {
+  const wake = deferred();
+  const f = await fixture(t, body => {
+    const last = body.input.at(-1);
+    if (last?.role === "user" && text(last).includes("SPAWN_EXIT_PROBE")) {
+      return { calls: [{ id: "spawn-exit-probe", code: "await rlm('Synthetic child, settle without further work.', name='private-name-canary', model='openai-codex/gpt-6-astra')" }] };
+    }
+    if (last?.role === "user" && text(last).includes("Harness lifecycle report")) {
+      wake.resolve(last); return { answer: "FAILURE_RECEIVED_WITHOUT_REPLAY" };
+    }
+    return { answer: "SYNTHETIC_SETTLED" };
+  });
+  await submitAndSettle(f, "SPAWN_EXIT_PROBE");
+  const children = f.supervisor.store.listChildren(f.sessionId);
+  assert.equal(children.length, 1);
+  const child = children[0];
+  const deadline = Date.now() + 30_000;
+  while (f.supervisor.store.getSession(child.sessionId).activity !== "idle" && Date.now() < deadline) {
+    await new Promise(resolve => setTimeout(resolve, 20));
+  }
+  const since = f.log.frames.length;
+  await crashActor({ ...f, sessionId: child.sessionId });
+  const received = await bounded(wake.promise, "automatic parent wake after real child exit");
+  assert.doesNotMatch(text(received), /private-name-canary/);
+  await f.log.waitFrame(frame => frame.event === "actor_event" && frame.data.sessionId === f.sessionId
+    && frame.data.event.type === "agent_settled", "parent settled after failure receipt", since);
+  const messages = f.supervisor.store.listMessages().filter(message => message.childExitGeneration != null);
+  assert.equal(messages.length, 1);
+  const message = messages[0];
+  assert.equal(message.targetId, f.sessionId); assert.equal(message.senderId, child.sessionId);
+  assert.equal(message.state, "acknowledged"); assert.match(message.body, /Failure class: actor_exit/);
+  const entries = await f.entries();
+  assert.equal(entries.filter(entry => entry.customType === "persistent-harness.agent-message-v1"
+    && entry.data.messageId === message.messageId).length, 1);
+  assert.equal(entries.filter(entry => entry.type === "custom_message" && entry.details?.messageId === message.messageId).length, 1);
+  assert.equal(f.supervisor.store.getSession(child.sessionId).lifecycle, "error");
+});

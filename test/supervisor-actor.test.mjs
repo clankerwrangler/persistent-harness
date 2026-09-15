@@ -1364,3 +1364,73 @@ test("original internal Retry derives an unloaded source and dedupes before any 
   const records = supervisor.store.listActorInputReceipts(admission.sessionId);
   assert(records.find((item) => item.inputId === retried.inputId).sequence < records.find((item) => item.source === "cron").sequence);
 });
+
+test("abnormal child exit durably queues a sanitized direct-parent message", async (t) => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "harness-child-exit-"));
+  const skillsPath = path.join(root, "skills"); await mkdir(skillsPath);
+  const actors = new Map();
+  const options = { socketPath: path.join(root, "run/sock"),
+    databasePath: path.join(root, "state/store.sqlite"), pidPath: path.join(root, "run/pid"),
+    skillsPath, actorInactivityMs: 0, runtimeProvisioner: async () => ({}),
+    actorFactory: (options) => { const actor = new FakePiActor(options); actors.set(options.session.sessionId, actor); return actor; },
+    processIdentityFactory: async (pid) => ({ version: 1, pid, processGroup: pid, startTime: "fake", ownerToken: "fake" }),
+    processTerminator: async () => ({ terminated: true }),
+  };
+  let supervisor = new HarnessSupervisor(options);
+  await supervisor.start(); t.after(async () => { await supervisor.stop(); await rm(root, { recursive: true, force: true }); });
+  supervisor.store.createRoot({ sessionId: "exit-parent", sessionFile: path.join(root,"parent.jsonl"), cwd: root,
+    name: "private-parent-name", actorToken: "parent-token", launch: {} });
+  supervisor.store.markActorLifecycle("exit-parent", 1, "stopped");
+  supervisor.store.createChild("exit-parent", { sessionId: "exit-child", sessionFile: path.join(root,"child.jsonl"),
+    actorToken: "child-token", policy: { cwd: root, depth: 1, name: "private-child-name", prompt: "synthetic work" } });
+  const client = new HarnessClient({ socketPath: supervisor.socketPath, heartbeatMs: 0 });
+  await client.start({ registrationType: "register_client", clientInstanceId: "exit-client" }); t.after(() => client.stop());
+  await client.request("revive_session", { sessionId: "exit-child" });
+  const actor = await eventually(() => actors.get("exit-child")); await eventually(() => actor.isRunning);
+  actor.isRunning = false;
+  actor.emit("exit", { code: 1, signal: null, error: "PRIVATE STDERR CANARY JavaScript heap out of memory" });
+  assert.equal(supervisor.store.getSession("exit-child").lifecycle, "error");
+  const messages = supervisor.store.listPendingMessages("exit-parent");
+  assert.equal(messages.length, 1);
+  assert.equal(messages[0].senderId, "exit-child");
+  assert.equal(messages[0].targetId, "exit-parent");
+  assert.equal(messages[0].relationship, "parent");
+  assert.equal(messages[0].childExitGeneration, actor.session.actorGeneration);
+  assert.match(messages[0].body, /heap_exhausted/);
+  assert.doesNotMatch(JSON.stringify(messages), /PRIVATE|private-child-name|private-parent-name/);
+  actor.emit("exit", { code: 1, error: "duplicate" });
+  assert.equal(supervisor.store.listPendingMessages("exit-parent").length, 1);
+  assert.equal(supervisor.store.getSession("exit-parent").lifecycle, "stopped");
+  const receipt = messages[0];
+  const connectParent = async () => {
+    await eventually(() => supervisor.store.getSession("exit-parent").lifecycle === "resident", 6000);
+    const launch = supervisor.store.getActorLaunch("exit-parent");
+    const parent = new HarnessClient({socketPath:supervisor.socketPath,heartbeatMs:0}); const events=[];
+    parent.on("event", frame => { if(frame.event === "message_available") events.push(frame.data); });
+    await parent.start({registrationType:"register_actor",sessionId:launch.sessionId,sessionFile:launch.sessionFile,
+      cwd:launch.cwd,repositoryRoot:launch.repositoryRoot,actorToken:launch.actorToken,actorGeneration:launch.actorGeneration});
+    t.after(() => parent.stop());
+    const delivery = await eventually(() => events[0]);
+    assert.equal(delivery.message.messageId,receipt.messageId);
+    assert.equal(delivery.message.senderName,"Harness lifecycle");
+    assert.equal(delivery.message.relationship,"child");
+    assert.equal(delivery.deliverAs,"steer");
+    assert.doesNotMatch(JSON.stringify(delivery),/PRIVATE|private-child-name|private-parent-name/);
+    return {parent, events};
+  };
+  supervisor.store.markActorLifecycle("exit-parent",1,"passivated");
+  const first = await connectParent();
+  assert.equal(supervisor.store.getMessage(receipt.messageId).state,"delivered");
+  await new Promise(resolve => setTimeout(resolve,1500));
+  assert.equal(first.events.length,1,"retry ticks do not reinject within one connection");
+  await first.parent.stop(); await client.stop(); await supervisor.stop();
+  // No ack was recorded: restart must wake the passivated parent and redeliver the same ID.
+  supervisor = new HarnessSupervisor(options); await supervisor.start();
+  const second = await connectParent();
+  assert.equal(supervisor.store.getSession("exit-child").lifecycle,"error","failed child is never revived");
+  await second.parent.request("ack_message",{messageId:receipt.messageId});
+  assert.equal(supervisor.store.getMessage(receipt.messageId).state,"acknowledged");
+  await new Promise(resolve => setTimeout(resolve,1500));
+  assert.equal(second.events.length,1);
+  assert.equal(supervisor.store.listMessages().length,1);
+});

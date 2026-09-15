@@ -487,6 +487,7 @@ export class HarnessSupervisor {
       await chmod(this.#ownedSocketPath, 0o600); this.#socketLinkTarget = await publishSocketLink(this.socketPath, this.#ownedSocketPath, this.#ownerToken);
       this.#pidIdentity = await writeOwnedPidFile(this.pidPath, { pid: process.pid, ownerToken: this.#ownerToken, socketPath: this.socketPath, startedAt: this.#startedAt });
       for (const actorId of this.store.listQueuedActorIds()) this.#requestActorStart(actorId, false);
+      this.#retryChildExitMessages();
       this.#cronScheduler = this.cronSchedulerFactory({ cronStore: this.#cronStore, sessionStore: this.#store,
         dispatchRun: (value) => this.#dispatchCronRun(value), tickIntervalMs: this.cronTickIntervalMs,
         maxParallel: this.cronMaxParallel, defaultTimezone: this.cronDefaultTimezone, logger: this.logger });
@@ -508,6 +509,7 @@ export class HarnessSupervisor {
       this.#backgroundCompletionMonitor.start();
       this.#notificationTimer = setInterval(() => {
         try {
+          this.#retryChildExitMessages();
           this.#notifications.expire(); this.#recordCronNotifications();
           for (const id of this.#notifications.openFamilies()) this.#observeNotifications(id);
           for (const id of this.#cronStore.activeRunSessionIds()) if (!this.#cronCompletionTails.has(id)) void this.#completeCronRunsForSession(id);
@@ -1696,7 +1698,7 @@ export class HarnessSupervisor {
     } catch (error) {
       const expected = record.expectedLifecycle; const message = error instanceof Error ? error.message : String(error); record.expectedLifecycle ??= "error"; record.exitError = message;
       await worker.close().catch(() => {}); if (!worker.isRunning && this.#actors.get(sessionId) === record) this.#actors.delete(sessionId);
-      if (!expected || expected === "error") { const current = this.store.getSession(sessionId); if (current?.lifecycle !== "error") this.store.markActorLifecycle(sessionId, session.actorGeneration, "error", message); this.store.completeSubmittedChildTask?.(sessionId, message); this.#broadcastNavigator("actor_error"); }
+      if (!expected || expected === "error") { const current = this.store.getSession(sessionId); if (current?.lifecycle !== "error") this.store.markActorLifecycle(sessionId, session.actorGeneration, "error", message, Date.now(), { reportChildExit: true }); this.store.completeSubmittedChildTask?.(sessionId, message); this.#broadcastNavigator("actor_error"); }
       throw error;
     }
   }
@@ -1926,8 +1928,9 @@ export class HarnessSupervisor {
     this.#clearExtensionUiRequests(sessionId, record.generation);
     this.#rootOutput.failSession(sessionId, record.generation, record.expectedLifecycle ?? "actor_exit");
     const lifecycle = record.expectedLifecycle ?? "error"; const error = lifecycle === "error" ? record.exitError ?? details.error ?? `actor exited code=${details.code} signal=${details.signal}` : null;
-    this.store.markActorLifecycle(sessionId, record.generation, lifecycle, error); if (error || lifecycle === "stopped") this.store.completeSubmittedChildTask?.(sessionId, error ?? "actor was explicitly stopped");
+    this.store.markActorLifecycle(sessionId, record.generation, lifecycle, error, Date.now(), { reportChildExit: true }); if (error || lifecycle === "stopped") this.store.completeSubmittedChildTask?.(sessionId, error ?? "actor was explicitly stopped");
     if (error || lifecycle === "stopped") this.#failCronRunsForSession(sessionId, error ?? "session was explicitly stopped during scheduled execution");
+    if (lifecycle === "error") this.#retryChildExitMessages();
     void this.#log("actor_stopped", { sessionId, generation: record.generation, lifecycle, ...(error ? { error } : {}) }); this.#broadcastNavigator(lifecycle === "error" ? "actor_error" : "actor_passivated"); setImmediate(() => this.#drainActorStarts());
   }
   async #stopActor(sessionId, lifecycle = "passivated") {
@@ -1976,7 +1979,13 @@ export class HarnessSupervisor {
   }
   async #deliverMessageWhenReady(message) {
     return this.#withSessionMutation(message.targetId, async () => {
-      this.#notifications.noteContinuation(message.senderId, `message:${message.messageId}`, message.createdAt);
+      if (message.childExitGeneration != null) {
+        const current = this.store.getMessage(message.messageId);
+        const target = this.store.getSession(message.targetId);
+        if (!current || !["queued", "delivered"].includes(current.state)
+          || !["resident", "starting", "passivated"].includes(target?.lifecycle)
+          || this.#stoppingPromise || this.store.isSessionDeleting(message.targetId)) return;
+      } else this.#notifications.noteContinuation(message.senderId, `message:${message.messageId}`, message.createdAt);
       const residentBefore = this.#actors.get(message.targetId);
       let record = await this.#ensureActorReady(message.targetId);
       let targetState = this.#matchingActorConnection(message.targetId, record.generation)
@@ -2013,6 +2022,20 @@ export class HarnessSupervisor {
       this.#deliverMessage(targetState, message);
     });
   }
+  #childExitDeliveries = new Set();
+  #childExitCursor = "";
+  #retryChildExitMessages() {
+    if (this.#stoppingPromise) return;
+    const batch = this.store.listPendingChildExitMessages(this.#childExitCursor);
+    this.#childExitCursor = batch.length ? batch.at(-1).messageId : "";
+    for (const message of batch) {
+      if (this.#childExitDeliveries.has(message.messageId)) continue;
+      this.#childExitDeliveries.add(message.messageId);
+      void this.#deliverMessageWhenReady(message).catch(() => {
+        // The durable row remains retryable; never log child/private failure text here.
+      }).finally(() => this.#childExitDeliveries.delete(message.messageId));
+    }
+  }
   #retryQueuedMessages(sessionId) {
     for (const message of this.store.listPendingMessages(sessionId)) {
       if (message.state !== "queued") continue;
@@ -2043,9 +2066,11 @@ export class HarnessSupervisor {
       || record?.generation !== state.generation || record.expectedLifecycle || !record.worker.isRunning) return;
     let delivered; try { delivered = this.store.markMessageDelivered(message.messageId, state.sessionId, Date.now(), this.maxMessageDeliveryAttempts); } catch (error) { this.logger.error?.(error); return; }
     if (!delivered || delivered.permanentlyFailed) return;
-    this.#notifications.noteContinuation(delivered.senderId, `message:${delivered.messageId}`, delivered.createdAt);
+    if (delivered.childExitGeneration == null) this.#notifications.noteContinuation(delivered.senderId, `message:${delivered.messageId}`, delivered.createdAt);
     state.deliveryInFlight.add(delivered.messageId);
-    const sender = this.store.getSession(delivered.senderId);
+    const sender = delivered.childExitGeneration != null
+      ? { name: "Harness lifecycle", shortId: "child-exit", depth: undefined }
+      : this.store.getSession(delivered.senderId);
     if (!this.#write(state, event("message_available", { message: { ...delivered, senderName: sender?.name, senderShortId: sender?.shortId, senderDepth: sender?.depth, relationship: receiverRelationship(delivered.relationship) }, deliverAs: delivered.deliveryMode === "follow_up" ? "follow_up" : "steer" }))) state.deliveryInFlight.delete(delivered.messageId);
   }
 

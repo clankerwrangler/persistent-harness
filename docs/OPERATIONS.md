@@ -39,6 +39,10 @@ Deletion retains canonical transcripts, kernel state, and artifacts. Successful 
 
 Input acceptance is durable admission, not proof that inference consumed it. An original tool result and its namespace save are also separate. On kernel loss or snapshot mismatch, inspect the explicit diagnostics before making assumptions about Python variables. Uncertain effects are not replayed automatically.
 
+An unexpected child actor exit atomically records its lifecycle error and queues one supervisor-generated message for its direct parent per actor generation. The message contains a bounded child ID, generation, fixed failure class (`heap_exhausted` or `actor_exit`), and an unknown-completion outcome. It contains no display names, raw stderr, prompt, or transcript content. This is a lifecycle report, not a message authored by the failed child.
+
+The existing durable family-message path wakes a passivated parent and retries the same message ID after a disconnect or supervisor restart. Recipient history deduplicates logical incorporation; acknowledgement is not proof that inference completed recovery. Stopped or errored parents retain pending messages until explicitly recovered. Parent deletion rejects pending delivery. Intentional stop, delete, passivation, and supervisor shutdown do not generate failure reports. The failed child is not restarted and work is not replayed. No historical error backfill, busy-work timeout, or new human-notification source is added. Inspect the retained child state and verified saved artifacts before deciding how to continue.
+
 Upgrade and rollback require a compatible reader for canonical assistant metadata, input receipts, and compaction details. Old implementations that do not understand the harness's versioned signature or projection metadata are not an automatically safe rollback after new histories have been written. Keep the tested source, dependency pins, and recovery-compatible state together.
 
 ## Configuration notes
