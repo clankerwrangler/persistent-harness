@@ -49,7 +49,7 @@ const requestTypes = new Set([
   "create_root", "list_sessions", "rename_session", "subscribe_session", "unsubscribe_session", "subscribe_root_output", "unsubscribe_root_output",
   "submit_input", "respond_extension_ui", "get_session_inference", "set_session_inference", "get_actor_state", "get_actor_entries", "get_visible_messages", "get_visible_image", "compact_session", "restart_kernel", "abort_session",
   "get_skill_runtime_plan", "provision_skill_runtime",
-  "stop_session", "revive_session", "delete_session", "get_status", "get_usage", "shutdown_daemon",
+  "stop_session", "revive_session", "delete_session", "get_liveness", "get_status", "get_usage", "shutdown_daemon",
 ]);
 
 export class ProtocolError extends Error {

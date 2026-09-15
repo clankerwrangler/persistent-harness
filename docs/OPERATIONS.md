@@ -13,6 +13,8 @@ node bin/harness-supervisor.mjs shutdown
 
 `start` runs in the foreground; `ensure` starts a detached supervisor if needed. `:quit` detaches a terminal. Stopping a session or shutting down the supervisor is separate from detaching, and graceful shutdown drains pending kernel work/save ownership.
 
+`ensure` checks protocol responsiveness with the read-only `get_liveness` request, not a database audit. An older daemon's exact same-version `unknown_request` rejection for that request also proves responsiveness; no full-status fallback runs. Only a missing or refused socket permits startup. A timeout, incompatible protocol, or invalid response fails the command rather than starting another daemon. Use `status` for full retained-state diagnostics.
+
 The wrappers installed under the agent's `bin/` directory load its optional `harness/launch-env.sh`. A service must receive the same Pi, Python, and catalog paths. Do not rely on a previous interactive shell's environment.
 
 Before restarting, identify what owns the supervisor lifetime. `harness-restart` and a detached local observer can survive a standalone supervisor exit, but not termination of their container. If `harness-supervisor start` is the container's main workload, use the host-owned service/container lifecycle and a continuation observer outside that container. A background job inside the container is not an independent recovery path.

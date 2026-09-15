@@ -375,6 +375,62 @@ def valid_namespace_checkpoint(checkpoint):
     )
 
 
+def read_snapshot_manifest(directory_fd):
+    payload = read_bounded_regular(directory_fd, "manifest.json", max_bytes=MANIFEST_LIMIT)
+    return json.loads(
+        payload.decode("utf-8"),
+        object_pairs_hook=reject_duplicate_json_members,
+        parse_constant=reject_nonfinite_json_number,
+    )
+
+
+def valid_snapshot_basename(value):
+    return (
+        isinstance(value, str) and bool(value) and value not in (".", "..")
+        and "/" not in value and "\\" not in value and "\x00" not in value
+        and Path(value).name == value and not Path(value).is_absolute()
+    )
+
+
+def snapshot_reuse_candidates(snapshot_path):
+    # This is a lookup hint, not a snapshot integrity certificate. Prior stats,
+    # skipped values, and checkpoint attribution do not affect saving the current
+    # namespace. Only reuse_blob() can admit a linked candidate, by checking its
+    # no-follow regular-file bytes against the current serialization.
+    if not hasattr(os, "O_NOFOLLOW"):
+        return {}
+    flags = os.O_RDONLY
+    for flag_name in ("O_CLOEXEC", "O_NOFOLLOW", "O_DIRECTORY", "O_NONBLOCK"):
+        flags |= getattr(os, flag_name, 0)
+    try:
+        directory_fd = os.open(snapshot_path, flags)
+        try:
+            manifest = read_snapshot_manifest(directory_fd)
+        finally:
+            os.close(directory_fd)
+    except Exception:
+        return {}
+    if (not isinstance(manifest, dict) or type(manifest.get("version")) is not int
+            or manifest["version"] != SNAPSHOT_VERSION or not isinstance(manifest.get("saved"), list)):
+        return {}
+    candidates = {}
+    seen = set()
+    for item in manifest["saved"]:
+        if not isinstance(item, dict) or not isinstance(item.get("name"), str):
+            continue
+        name = item["name"]
+        if name in seen:
+            candidates.pop(name, None)
+            continue
+        seen.add(name)
+        if (not valid_snapshot_basename(item.get("file"))
+                or not non_negative_integer(item.get("bytes")) or item["bytes"] > PER_VARIABLE_LIMIT
+                or not isinstance(item.get("sha256"), str) or re.fullmatch(r"[0-9a-f]{64}", item["sha256"]) is None):
+            continue
+        candidates[name] = {key: item[key] for key in ("name", "file", "bytes", "sha256")}
+    return candidates
+
+
 def validate_snapshot_directory(snapshot_path, *, load_payloads=False):
     target = Path(snapshot_path)
     if not hasattr(os, "O_NOFOLLOW"):
@@ -406,12 +462,7 @@ def validate_snapshot_directory(snapshot_path, *, load_payloads=False):
         if not stat.S_ISDIR(os.fstat(directory_fd).st_mode):
             raise ValueError("snapshot path is not a directory")
         try:
-            manifest_payload = read_bounded_regular(directory_fd, "manifest.json", max_bytes=MANIFEST_LIMIT)
-            manifest = json.loads(
-                manifest_payload.decode("utf-8"),
-                object_pairs_hook=reject_duplicate_json_members,
-                parse_constant=reject_nonfinite_json_number,
-            )
+            manifest = read_snapshot_manifest(directory_fd)
         except Exception as error:
             return {
                 "found": True,
@@ -576,16 +627,7 @@ def validate_snapshot_directory(snapshot_path, *, load_payloads=False):
                 item_errors[index].append("name must be a string")
             else:
                 name_indexes.setdefault(name, []).append(index)
-            if (
-                not isinstance(file_name, str)
-                or not file_name
-                or file_name in (".", "..")
-                or "/" in file_name
-                or "\\" in file_name
-                or "\x00" in file_name
-                or Path(file_name).name != file_name
-                or Path(file_name).is_absolute()
-            ):
+            if not valid_snapshot_basename(file_name):
                 item_errors[index].append("file must be a safe basename")
             else:
                 file_indexes.setdefault(file_name, []).append(index)
@@ -761,8 +803,7 @@ def save_snapshot(snapshot_path, namespace, protected_names, *, namespace_checkp
     target.parent.mkdir(parents=True, exist_ok=True)
     temporary = Path(tempfile.mkdtemp(prefix=f"{target.name}.snapshot-tmp-", dir=target.parent))
     previous = target.with_name(f"{target.name}.previous")
-    prior_validation = validate_snapshot_directory(target)
-    prior_entries = {entry["item"]["name"]: entry["item"] for entry in prior_validation["entries"]}
+    prior_entries = snapshot_reuse_candidates(target)
     saved = []
     skipped = []
     total = 0

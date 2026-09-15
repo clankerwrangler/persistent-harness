@@ -38,10 +38,17 @@ function parseArgs(argv) {
 
 async function socketAvailable(socketPath) {
   try {
-    await controlRequest(socketPath, "get_status", {}, { timeoutMs: 500 });
+    const result = await controlRequest(socketPath, "get_liveness", {}, { timeoutMs: 500 });
+    if (result?.alive !== true || Object.keys(result).length !== 1) throw new Error("invalid harness liveness response");
     return true;
-  } catch {
-    return false;
+  } catch (error) {
+    // A same-version protocol rejection on this single-request connection proves
+    // that an older daemon is responsive. Do not fall back to its full audit.
+    if (error.remoteProtocolError === true && error.code === "unknown_request"
+      && error.message === "unknown_request: unknown request type: get_liveness") return true;
+    if (error.remoteProtocolError !== true && ["ENOENT", "ECONNREFUSED"].includes(error.code)) return false;
+    // A timeout or invalid peer is not evidence that starting another daemon is safe.
+    throw error;
   }
 }
 
