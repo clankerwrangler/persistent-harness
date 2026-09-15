@@ -15,6 +15,10 @@ node bin/harness-supervisor.mjs shutdown
 
 The wrappers installed under the agent's `bin/` directory load its optional `harness/launch-env.sh`. A service must receive the same Pi, Python, and catalog paths. Do not rely on a previous interactive shell's environment.
 
+Before restarting, identify what owns the supervisor lifetime. `harness-restart` and a detached local observer can survive a standalone supervisor exit, but not termination of their container. If `harness-supervisor start` is the container's main workload, use the host-owned service/container lifecycle and a continuation observer outside that container. A background job inside the container is not an independent recovery path.
+
+Bind recovery to the service/container generation as well as PID and process start time; replacement containers can reuse the same numeric PID. Record the target session and idempotent continuation receipt before interruption, then verify both service readiness and actual session return. A healthy replacement alone does not prove continuation. Preserve interrupted restart-job evidence rather than replaying shutdown or fabricating a completed receipt.
+
 ## State locations
 
 `PI_CODING_AGENT_DIR` defaults to `~/.pi/agent`. The normal supervisor paths beneath it are:
@@ -65,7 +69,7 @@ Keep development and production as separate checkouts of the same repository. Pu
 4. Stop production writers before changing any source files they use; lazy imports can otherwise mix revisions. Create a consistent state checkpoint and test the successor reader on a separate copy. Verify the production checkout is clean and its remote is the intended repository, then fast-forward to the exact fetched commit, for example with `git merge --ff-only "$REVIEWED_COMMIT"`, or install the prepared clean checkout. Do not reset over unexplained local changes or run an unpinned pull that can fetch a newer revision. Verify `git rev-parse HEAD` equals the reviewed commit and that the tracked worktree remains clean.
 5. Activate separately with the recorded external configuration and dependencies. Verify supervisor and client readiness, session recovery, required integrations, and the loaded revision. Updating checkout files alone does not replace already-running code.
 
-Record a durable boundary before attempting successor startup. Before that boundary, a stopped deployment can restore the exact previous source, configuration, and dependencies. After the successor might have written state, recovery must preserve current canonical state and a reader compatible with those writes. Do not downgrade to an older reader merely because its process used to start. A checkpoint is not permission to rewind completed effects or replay uncertain calls. Keep deployment outcomes and a host-access recovery path outside the processes being replaced.
+Record a durable boundary before attempting successor startup. Before that boundary, a stopped deployment can restore the exact previous source, configuration, and dependencies. After the successor might have written state, recovery must preserve current canonical state and a reader compatible with those writes. Do not downgrade to an older reader merely because its process used to start. A checkpoint is not permission to rewind completed effects or replay uncertain calls. Keep deployment outcomes and the control/continuation path outside the entire failure domain being replaced, including its container. Test container loss when that is the actual deployment boundary; standalone process-restart tests do not establish container-level recovery.
 
 ## Uninstall
 
