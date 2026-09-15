@@ -30,6 +30,8 @@ latest assistant message.
   declares readiness immediately, even while unrelated family work continues.
   Notification retry never reruns execution.
 
+Unexpected child exits use the direct-parent family-message delivery path described in [Recovery boundaries](OPERATIONS.md#recovery-boundaries), not a human attention or push-notification event source. Existing family-idle and explicit root attention behavior is unchanged.
+
 Routine assistant messages and progress are quiet. A pending attention request in the
 same episode suppresses its related idle notice. Cron-only episodes do not produce a
 second generic idle notification or bypass conditional/silent intent. User input admitted

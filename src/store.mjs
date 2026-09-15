@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { actorInputDigest } from "./protocol.mjs";
 import { DatabaseSync } from "node:sqlite";
 import { allocateUniqueRootName, defaultRootName, shortSessionId } from "./root-title.mjs";
@@ -73,6 +73,7 @@ function mapMessage(row) {
     acknowledgedAt: row.acknowledged_at,
     lastError: row.last_error ?? null,
     senderEntryId: row.sender_entry_id ?? null,
+    ...(row.child_exit_generation != null ? { childExitGeneration: Number(row.child_exit_generation) } : {}),
   };
 }
 
@@ -237,10 +238,12 @@ const CURRENT_SCHEMA = `
     delivered_at INTEGER,
     acknowledged_at INTEGER,
     last_error TEXT,
-    sender_entry_id TEXT
+    sender_entry_id TEXT,
+    child_exit_generation INTEGER
   ) STRICT;
   CREATE INDEX pending_messages_target ON messages(target_id, accepted_at, id) WHERE state IN ('queued', 'delivered');
   CREATE UNIQUE INDEX message_sender_entries ON messages(sender_id, sender_entry_id) WHERE sender_entry_id IS NOT NULL;
+  CREATE INDEX pending_child_exit_messages ON messages(id) WHERE child_exit_generation IS NOT NULL AND state IN ('queued', 'delivered');
   CREATE TABLE session_skill_grants (
     session_id TEXT PRIMARY KEY REFERENCES sessions(id) ON DELETE CASCADE,
     manifest_json TEXT NOT NULL,
@@ -350,6 +353,8 @@ export class HarnessStore {
     } catch (error) { this.#db.exec("ROLLBACK"); throw error; }
     const messageColumns = new Set(this.#db.prepare("PRAGMA table_info(messages)").all().map((row) => row.name));
     if (!messageColumns.has("sender_entry_id")) this.#db.exec("ALTER TABLE messages ADD COLUMN sender_entry_id TEXT");
+    if (!messageColumns.has("child_exit_generation")) this.#db.exec("ALTER TABLE messages ADD COLUMN child_exit_generation INTEGER");
+    this.#db.exec("CREATE INDEX IF NOT EXISTS pending_child_exit_messages ON messages(id) WHERE child_exit_generation IS NOT NULL AND state IN ('queued', 'delivered')");
     this.#db.exec("CREATE UNIQUE INDEX IF NOT EXISTS message_sender_entries ON messages(sender_id, sender_entry_id) WHERE sender_entry_id IS NOT NULL");
     this.#db.exec(`CREATE TABLE IF NOT EXISTS session_context_usage (
       session_id TEXT PRIMARY KEY REFERENCES sessions(id) ON DELETE CASCADE,
@@ -674,15 +679,49 @@ export class HarnessStore {
     return this.#mappedSession(sessionId);
   }
 
-  markActorLifecycle(sessionId, generation, lifecycle, error = null, now = Date.now()) {
+  markActorLifecycle(sessionId, generation, lifecycle, error = null, now = Date.now(), { reportChildExit = false } = {}) {
     if (!["passivated", "stopped", "error"].includes(lifecycle)) throw new Error(`unsupported actor lifecycle: ${lifecycle}`);
-    const result = this.#db.prepare(`UPDATE sessions SET lifecycle = ?, actor_pid = NULL,
-      actor_identity_json = NULL, streaming = 0, activity = 'inactive', stopped_at = ?, quiet_since = NULL,
-      last_error = ?, updated_at = ? WHERE id = ? AND actor_generation = ? AND lifecycle <> 'deleted'`)
-      .run(lifecycle, now, error, now, sessionId, generation);
-    if (result.changes !== 1) return false;
-    this.#refreshAncestors(sessionId, now);
-    return true;
+    this.#db.exec("BEGIN IMMEDIATE");
+    try {
+      const previous = this.#sessionRow(sessionId);
+      if (reportChildExit && !["resident", "starting", "error"].includes(previous?.lifecycle)) {
+        this.#db.exec("COMMIT"); return false;
+      }
+      const result = this.#db.prepare(`UPDATE sessions SET lifecycle = ?, actor_pid = NULL,
+        actor_identity_json = NULL, streaming = 0, activity = 'inactive', stopped_at = ?, quiet_since = NULL,
+        last_error = ?, updated_at = ? WHERE id = ? AND actor_generation = ? AND lifecycle <> 'deleted'`)
+        .run(lifecycle, now, error, now, sessionId, generation);
+      if (result.changes !== 1) { this.#db.exec("COMMIT"); return false; }
+      if (reportChildExit && lifecycle === "error") this.#queueChildExit(sessionId, generation, error, now);
+      this.#refreshAncestors(sessionId, now);
+      this.#db.exec("COMMIT");
+      return true;
+    } catch (failure) { this.#db.exec("ROLLBACK"); throw failure; }
+  }
+
+  #queueChildExit(sessionId, generation, error, now) {
+    const child = this.#sessionRow(sessionId);
+    const parent = child?.kind === "child" && this.#sessionRow(child.parent_session_id);
+    if (!parent || parent.lifecycle === "deleted" || this.isSessionDeleting(parent.id)
+      || this.isSessionDeleting(sessionId)) return;
+    // This receipt is supervisor-authored, not a fabricated child transcript entry.
+    // Its key is generation-bound; raw stderr and display names never enter delivery.
+    const id = `child-exit:${createHash("sha256").update(sessionId).digest("hex")}:${generation}`;
+    const identity = /^[a-zA-Z0-9-]{1,128}$/.test(sessionId) ? sessionId : "[invalid child ID]";
+    const failureClass = typeof error === "string" && error.includes("JavaScript heap out of memory")
+      ? "heap_exhausted" : "actor_exit";
+    const body = `Harness lifecycle report (supervisor-generated, not child-authored): direct child ${identity}, generation ${generation}, exited unexpectedly. Failure class: ${failureClass}. Completion is unknown. Inspect retained child state and saved artifacts before deciding recovery. No child restart or work replay was requested.`;
+    this.#db.prepare(`INSERT OR IGNORE INTO messages
+      (id, sender_id, target_id, relationship, delivery_mode, body, state, attempt_count, accepted_at, queued_at, child_exit_generation)
+      VALUES (?, ?, ?, 'parent', 'auto', ?, 'queued', 0, ?, ?, ?)`)
+      .run(id, sessionId, parent.id, body, now, now, generation);
+  }
+
+  listPendingChildExitMessages(after = "") {
+    return this.#db.prepare(`SELECT m.* FROM messages m JOIN sessions p ON p.id = m.target_id
+      WHERE m.child_exit_generation IS NOT NULL AND m.state IN ('queued', 'delivered') AND m.id > ?
+      AND p.lifecycle IN ('resident', 'starting', 'passivated')
+      ORDER BY m.id LIMIT 100`).all(after).map(mapMessage);
   }
 
   setActorActivity(sessionId, generation, streaming, now = Date.now()) {
@@ -1395,6 +1434,7 @@ export class HarnessStore {
   }
 
   createMessage(senderId, params, { pendingLimit = 100, now = Date.now() } = {}) {
+    if (params.messageId?.startsWith("child-exit:")) throw new Error("message ID is reserved for supervisor lifecycle receipts");
     this.#db.exec("BEGIN IMMEDIATE");
     try {
       const { target, relationship } = this.#resolveReachableTarget(senderId, params.target);
