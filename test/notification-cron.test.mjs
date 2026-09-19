@@ -134,3 +134,72 @@ for (const intent of ["result", "conditional"]) test(`delegated ${intent} cron d
   assert.equal(notice.body, "The genuine final result"); assert.equal(notice.source.failed, false);
   child.idle(); await delay(160); assert.equal((await f.client.request("list_notifications")).notifications.length, 1);
 });
+
+for (const outcome of ["output", "empty", "archived_empty", "deliver", "no_finding"]) test(`origin cron waits for exact input admission before ${outcome}`, async t => {
+  const readiness = Promise.withResolvers();
+  t.after(() => readiness.resolve());
+  let hold = false, blocked = false, reads = 0, messages = [], inputEntries = {};
+  const f = await fixture(t, {
+    actorInactivityMs: 180, cronTickIntervalMs: 100,
+    runtimeProvisioner: async () => { if (hold) { blocked = true; await readiness.promise; } return {}; },
+    transcriptReader: { read: async () => { reads++; return { messages, inputEntries }; } },
+  });
+  const root = await f.actor(), sessionId = root.session.sessionId, cron = f.supervisor.cronStore;
+  const intent = ["deliver", "no_finding"].includes(outcome) ? "conditional" : "result";
+  const job = (await root.connection.request("cron_job", { action: "create", name: "Admission check", prompt: "Check",
+    schedule: { kind: "every", intervalSeconds: 600 }, executionMode: "origin", notificationIntent: intent })).job;
+  cron.pauseJob(job.jobId);
+  root.busy(); root.idle();
+  await eventually(() => f.supervisor.store.getSession(sessionId).lifecycle === "passivated");
+  // Force the real pre-revival skill reconciliation await, after an old idle episode.
+  const skill = path.join(f.dir, "skills", "admission-fixture"); await mkdir(skill);
+  await writeFile(path.join(skill, "SKILL.md"), "---\nname: admission-fixture\ndescription: Test readiness barrier.\n---\nFixture only.\n");
+  hold = true;
+  const before = reads;
+  cron.resumeJob(job.jobId, Date.now());
+  await eventually(() => blocked);
+  const run = await eventually(() => cron.listRuns(job.jobId)[0]);
+  const current = () => cron.getRun(run.runId);
+  const input = () => f.supervisor.store.getActorInput(current().inputId, sessionId);
+  await eventually(() => reads >= before + 2 || current().status === "failed");
+  assert.equal(f.supervisor.store.getSession(sessionId).lifecycle, "passivated");
+  assert.equal(input().state, "queued");
+  const pendingStatus = current().status;
+  readiness.resolve();
+  await eventually(() => input().state === "accepted");
+  assert.equal(pendingStatus, "running", "old family quiet time must not finalize a pending origin dispatch");
+  const acceptedReads = reads;
+  await eventually(() => reads >= acceptedReads + 2 || current().status === "failed");
+  assert.equal(current().status, "running", "transport acceptance is not canonical incorporation");
+  assert.equal((await f.client.request("list_notifications")).notifications.filter(n => n.kind === "cron").length, 0);
+
+  const actor = f.actors.get(sessionId); actor.busy();
+  inputEntries = { [current().inputId]: "scheduled" };
+  messages = [{ id: "scheduled", role: "scheduled_job", text: "task" }];
+  if (outcome === "output") messages.push({ id: "answer", role: "assistant", text: "The scheduled answer" });
+  if (outcome === "archived_empty") {
+    // A durable canonical receipt remains authoritative when the bounded view no longer contains its entry.
+    f.supervisor.store.completeActorInput(current().inputId, sessionId, Date.now(), "scheduled");
+    inputEntries = {}; messages = [{ id: "unrelated", role: "assistant", text: "Unrelated later answer" }];
+  }
+  if (["deliver", "no_finding"].includes(outcome)) {
+    const params = { action: "report", runId: run.runId, disposition: outcome, ...(outcome === "deliver" ? { body: "The exact finding" } : {}) };
+    const reported = (await actor.connection.request("cron_job", params)).run;
+    assert.equal(reported.status, "completed", "explicit exact-run readiness does not wait for family idle");
+    assert.deepEqual((await actor.connection.request("cron_job", params)).run, reported);
+  }
+  actor.idle();
+  const empty = outcome.endsWith("empty");
+  await eventually(() => current().status === (empty ? "failed" : "completed"));
+  if (empty) {
+    assert.equal(current().error, "scheduled agent returned no visible response");
+    await assert.rejects(actor.connection.request("cron_job", { action: "report", runId: run.runId, disposition: "deliver", body: "Too late" }), /no longer evaluating/);
+    assert.equal(current().notificationDisposition, null);
+  }
+  if (outcome === "output") assert.equal(current().output, "The scheduled answer");
+  await delay(30);
+  const notices = (await f.client.request("list_notifications")).notifications.filter(n => n.kind === "cron");
+  assert.equal(notices.length, outcome === "no_finding" ? 0 : 1);
+  if (notices.length) assert.equal(notices[0].source.failed, empty);
+  assert.deepEqual(f.errors, []);
+});

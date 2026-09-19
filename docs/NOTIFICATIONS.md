@@ -25,9 +25,14 @@ latest assistant message.
   `no_finding` for that exact run. Missing disposition means evaluation failure, not a
   negative finding. Result runs use explicit reported text or output bound to their exact
   input, stopping at the next unrelated input. Failure to produce a promised result is
-  visible. Transcript-based completion waits for stable recursive family idle, not an
-  interim parent settlement while descendants work. An explicit exact-run disposition
-  declares readiness immediately, even while unrelated family work continues.
+  visible. Transcript-based completion requires canonical incorporation of the exact
+  run input (its transcript marker or durable delivery receipt), then stable recursive
+  family idle. Old quiet time during origin revival and transport acceptance alone
+  cannot finish a run; neither can interim parent settlement while descendants work.
+  An incorporated input with no visible response still fails. An explicit exact-run
+  disposition declares readiness immediately, even while unrelated family work continues.
+  A first report after terminal execution is rejected; identical recorded reports remain
+  idempotent. There is no supported terminal-run reopen or disposition backfill.
   Notification retry never reruns execution.
 
 Unexpected child exits use the direct-parent family-message delivery path described in [Recovery boundaries](OPERATIONS.md#recovery-boundaries), not a human attention or push-notification event source. Existing family-idle and explicit root attention behavior is unchanged.
@@ -136,8 +141,9 @@ source can temporarily lack the new delivery features while preserving additive 
 
 `NotificationLifecycle.tla` models recursive family activity, stable quiet time, queued
 handoffs, attention coalescing and user/cron provenance. `NotificationDelivery.tla` models
-intent/disposition, separate execution and retry, provider acceptance, offline device
-state and freshness. Configurations cover result, conditional and silent runs.
+pending/accepted/incorporated run inputs, intent/disposition, immutable terminal outcomes,
+separate execution and retry, provider acceptance, offline device state and freshness.
+Configurations cover result, conditional and silent runs.
 
 Focused tests: `notification-store`, `notification-supervisor`, `notification-cron`, and
 `notification-compatibility`. The compatibility test takes explicit
