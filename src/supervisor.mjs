@@ -1382,6 +1382,10 @@ export class HarnessSupervisor {
       for (const run of runs) {
         if (!["claimed", "running"].includes(this.#cronStore.getRun(run.runId)?.status)) continue;
         const inputEntryId = transcript.inputEntries?.[run.inputId];
+        // Origin dispatch marks the run running before actor readiness or input
+        // incorporation. Old family quiet time cannot finalize that pending work.
+        // A durable delivery receipt also covers inputs outside the bounded view.
+        if (!inputEntryId && this.store.getActorInput(run.inputId, sessionId)?.deliveredAt == null) continue;
         const inputIndex = inputEntryId ? transcript.messages.findIndex((message) => message.id === inputEntryId) : -1;
         const after = inputIndex < 0 ? [] : transcript.messages.slice(inputIndex + 1);
         const nextInput = after.findIndex(message => ["user", "scheduled_job", "background_notification"].includes(message.role));
