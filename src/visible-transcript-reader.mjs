@@ -243,23 +243,25 @@ export class VisibleTranscriptReader {
     } finally { if (!sharedHandle) await handle.close(); }
   }
 
-  async readImage({ sessionFile, sessionId, entryId, index, sanitizePresentation = false }) {
+  async readImage({ sessionFile, sessionId, entryId, index, sanitizePresentation = false, allowToolImages = false }) {
     const filePath = path.resolve(sessionFile);
     await this.read({ sessionFile: filePath, sessionId, sanitizePresentation });
     const record = this.#records.get(filePath);
     const selected = record?.entries.get(entryId);
     const reference = selected?.item?.kind === "message" ? selected.item.message.images?.[index]?.ref : undefined;
-    if (!reference || reference.entryId !== entryId || reference.index !== index || !this.#activeEntryIds(record).has(entryId)) {
-      throw new Error("visible user image does not exist on the active transcript branch");
+    const inputImage = reference && reference.entryId === entryId && reference.index === index;
+    const toolImage = allowToolImages && Number.isInteger(index) && index >= 0 && index < selected?.toolImageCount;
+    if ((!inputImage && !toolImage) || !this.#activeEntryIds(record).has(entryId)) {
+      throw new Error("visible image does not exist on the active transcript branch");
     }
     const entry = await this.#readCanonicalEntry(record, entryId);
-    const content = entry.type === "message" && entry.message?.role === "user" ? entry.message.content
-      : entry.type === "custom_message" && ["scheduled_job", "background_notification"].includes(selected.item.message.role) ? entry.content : null;
-    if (!content) throw new Error("visible input image source does not match its transcript entry");
+    const content = entry.type === "message" && (entry.message?.role === "user" || (toolImage && entry.message?.role === "toolResult")) ? entry.message.content
+      : entry.type === "custom_message" && ["scheduled_job", "background_notification"].includes(selected.item?.message?.role) ? entry.content : null;
+    if (!content) throw new Error("visible image source does not match its transcript entry");
     const candidates = Array.isArray(content) ? content.filter((part) => part?.type === "image")
       .map((part) => ({ type: "image", data: part.data, mimeType: part.mimeType })) : [];
     const image = normalizeInputImages(candidates)[index];
-    if (!image) throw new Error("visible user image index does not exist");
+    if (!image) throw new Error("visible image index does not exist");
     return image;
   }
 
@@ -409,7 +411,11 @@ export class VisibleTranscriptReader {
     if (entry.parentId !== record.leafId) {
       record.branchId = createHash("sha256").update(JSON.stringify([record.branchId, entry.id, entry.parentId])).digest("hex");
     }
-    record.entries.set(entry.id, { parentId: entry.parentId, source, inputCandidate, assistantParts: assistantMessageParts(entry),
+    // Cache availability only, never tool text, arguments, details, or image bytes.
+    // The image reader revalidates canonical bytes under the input-image bounds.
+    const toolImageCount = entry.type === "message" && entry.message?.role === "toolResult" && Array.isArray(entry.message.content)
+      ? entry.message.content.filter((part) => part?.type === "image").length : 0;
+    record.entries.set(entry.id, { parentId: entry.parentId, source, inputCandidate, toolImageCount, assistantParts: assistantMessageParts(entry),
       inputBoundary: entry.type === "custom_message" || (entry.type === "message" && entry.message?.role === "user"),
       item: message ? { kind: "message", message } : progress ?? agentMessage ?? null });
     record.leafId = entry.id;

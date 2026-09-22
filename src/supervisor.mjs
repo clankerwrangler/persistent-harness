@@ -912,6 +912,7 @@ export class HarnessSupervisor {
       if (input?.images?.[params.index]) return { image: input.images[params.index] };
       return { image: await this.transcriptReader.readImage({ sessionFile: session.sessionFile, sessionId: session.sessionId,
         entryId: input?.entryId ?? params.entryId, index: params.index,
+        allowToolImages: session.kind === "root" && session.depth === 0,
         sanitizePresentation: session.kind === "root" && session.depth === 0 }) };
     }
     if (type === "compact_session") return this.#withSessionMutation(params.sessionId, async () => {
