@@ -510,3 +510,59 @@ test("queued reads still reject canonical source failures after independent sche
     assert.match(result.reason.message, /session header does not match registry identity/);
   }
 });
+
+
+test("root tool image reads expose only active canonical image blocks, never tool history", async (t) => {
+  const { file, id } = await fixture(t);
+  const image = { type: "image", data: PNG_1X1, mimeType: "image/png" };
+  const tool = (id, parentId) => ({ type: "message", id, parentId, timestamp: "2026-01-01T00:00:00Z",
+    message: { role: "toolResult", toolCallId: "call", toolName: "ipython", content: [
+      { type: "text", text: "private tool text" }, image], details: { secret: "private details", image } } });
+  const entries = [header(id), message("user", null, "user", "draw"), tool("abandoned", "user"),
+    tool("output", "user"), { ...message("assistant", "output", "assistant", "answer"),
+      message: { role: "assistant", content: [{ type: "thinking", thinking: PNG_1X1 },
+        { type: "toolCall", name: "ipython", arguments: { image } }, image, { type: "text", text: "answer" }] } },
+    { type: "custom_message", customType: "hidden", id: "hidden", parentId: "assistant", display: false, content: [image] },
+    { ...tool("details-only", "hidden"), message: { role: "toolResult", content: [], details: { image } } }];
+  await writeFile(file, entries.map(JSON.stringify).join("\n") + "\n");
+  const reader = new VisibleTranscriptReader(), options = { sessionFile: file, sessionId: id, index: 0 };
+  assert.doesNotMatch(JSON.stringify(await reader.read(options)), /private tool|private details|thinking|toolCall|iVBOR/);
+  await assert.rejects(reader.readImage({ ...options, entryId: "output" }), /does not exist/);
+  assert.deepEqual(await reader.readImage({ ...options, entryId: "output", allowToolImages: true }), image);
+  // A root-enabled call must not authorize later default/child calls through cache reuse.
+  await assert.rejects(reader.readImage({ ...options, entryId: "output" }), /does not exist/);
+  for (const entryId of ["abandoned", "assistant", "hidden", "details-only", "missing"]) {
+    await assert.rejects(reader.readImage({ ...options, entryId, allowToolImages: true }), /active transcript branch/);
+  }
+  for (const index of [-1, 1, 0.5]) await assert.rejects(reader.readImage({ ...options, entryId: "output", index, allowToolImages: true }), /does not exist/);
+  await appendFile(file, JSON.stringify(message("new-branch", "user", "assistant", "replacement")) + "\n");
+  await assert.rejects(reader.readImage({ ...options, entryId: "output", allowToolImages: true }), /active transcript branch/);
+});
+
+test("tool images retain input image and canonical source bounds", async (t) => {
+  const image = { type: "image", data: PNG_1X1, mimeType: "image/png" };
+  const oversized = Buffer.from(PNG_1X1, "base64"); oversized.writeUInt32BE(8193, 16);
+  for (const [name, content, details, error] of [
+    ["unsupported MIME", [{ ...image, mimeType: "image/svg+xml" }], null, /mimeType/],
+    ["invalid base64", [{ ...image, data: "AA==" }], null, /invalid/],
+    ["too many images", Array(5).fill(image), null, /at most 4/],
+    ["oversized dimensions", [{ ...image, data: oversized.toString("base64") }], null, /oversized/],
+    ["oversized bytes", [{ ...image, data: "A".repeat(4 * 1024 * 1024 + 4) }], null, /bounded/],
+    ["oversized source", [image], "x".repeat(5 * 1024 * 1024), /source exceeds/],
+  ]) await t.test(name, async (t) => {
+    const { file, id } = await fixture(t);
+    await writeFile(file, [header(id), { type: "message", id: "output", parentId: null,
+      message: { role: "toolResult", content, details } }].map(JSON.stringify).join("\n") + "\n");
+    const reader = new VisibleTranscriptReader(), options = { sessionFile: file, sessionId: id, entryId: "output", index: 0, allowToolImages: true };
+    await assert.rejects(reader.readImage(options), error);
+    assert.deepEqual((await reader.read(options)).messages, [], "invalid output must not block ordinary history");
+  });
+  const { file, id } = await fixture(t);
+  const encoded = [header(id), { type: "message", id: "output", parentId: null,
+    message: { role: "toolResult", content: [image], details: "original" } }].map(JSON.stringify).join("\n") + "\n";
+  await writeFile(file, encoded);
+  const reader = new VisibleTranscriptReader(), options = { sessionFile: file, sessionId: id, entryId: "output", index: 0, allowToolImages: true };
+  await reader.read(options);
+  await writeFile(file, encoded.replace("original", "modified"));
+  await assert.rejects(reader.readImage(options), /source changed/);
+});

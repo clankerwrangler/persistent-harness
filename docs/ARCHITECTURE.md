@@ -42,6 +42,8 @@ The Unix-socket framing and validation contract is in `src/framing.mjs` and `src
 
 The protocol retains session creation, subscription, input admission, stop/revive/delete/rename, kernel reload, model selection, compaction, family messages, schedules, background process notifications, canonical history, telemetry, dialogs, and output streams. Client-neutral conversation projections remain in this repository even though no browser client or HTTP adapter is included.
 
+`get_visible_image` reads existing input images and explicit image blocks from root-session `toolResult` messages on the active canonical branch. Tool images are unavailable for child sessions. The reader retains only image availability, rereads hash-checked canonical bytes on demand, and applies the existing PNG/JPEG limits: at most four images, 3 MiB total encoded bytes, bounded dimensions and decoded size, and a 5 MiB tool-result source line. Tool text, details, arguments, reasoning, and filesystem paths are not image sources. Tool results remain absent from visible message history; a frontend can use its existing image URL in an assistant Markdown response.
+
 Input acceptance, canonical delivery, tool execution, result persistence, namespace save, and settlement are distinct events. In particular, `tool_execution_end` is an execution event, not proof of a completed namespace save; use canonical result and checkpoint evidence for their respective boundaries.
 
 ## Capability catalog
