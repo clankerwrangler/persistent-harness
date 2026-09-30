@@ -3,6 +3,7 @@ import test from "node:test";
 import { mkdtemp, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
+import { createAgentStartPromptCapture } from "../src/actor-prompt.mjs";
 import { ActorCoordinator } from "../src/actor-coordinator.mjs";
 import { createCompactionDriver, createCompactionPreparationCapture } from "../src/actor-compaction.mjs";
 import { projectVisibleMessage } from "../src/conversation-projection.mjs";
@@ -11,7 +12,7 @@ const { sdk, api, core } = await loadExternalPi();
 const deferred = () => Promise.withResolvers();
 const wait = async (promise, message) => Promise.race([promise, new Promise((_, reject) => { const timer = setTimeout(() => reject(new Error(message)), 5000); timer.unref(); })]);
 const usage = () => ({ input: 1, output: 1, cacheRead: 0, cacheWrite: 0, totalTokens: 2, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } });
-async function fixture(t, { prepareRequest, script, retry, compaction, compactionDriver, hooks } = {}) {
+async function fixture(t, { prepareRequest, script, retry, compaction, compactionDriver, hooks, promptExtensions = [], captureFirst = false, basePromptOptions } = {}) {
   const root = await mkdtemp(path.join(os.tmpdir(), "sc-"));
   const model = { id: "fixture", name: "Fixture", provider: "coordinator-test", api: "coordinator-test-api", reasoning: false,
     input: ["text"], cost: usage().cost, contextWindow: 32000, maxTokens: 1000 };
@@ -36,14 +37,16 @@ async function fixture(t, { prepareRequest, script, retry, compaction, compactio
       return stream;
     } });
   const settings = sdk.SettingsManager.inMemory({ ...(retry ? { retry } : {}), ...(compaction ? { compaction } : {}) });
+  const promptCapture = createAgentStartPromptCapture();
   const active = new sdk.DefaultResourceLoader({ cwd: root, agentDir: path.join(root, "agent"), settingsManager: settings,
     noExtensions: true, noSkills: true, noPromptTemplates: true, noThemes: true, noContextFiles: true,
-    extensionFactories: [pi => {
+    extensionsOverride: promptCapture.orderLast,
+    extensionFactories: [...(captureFirst ? [promptCapture.extension] : []), pi => {
       hooks?.(pi);
       pi.registerTool({ name: "hold", label: "Hold", description: "Held test tool", parameters: { type: "object", properties: {}, additionalProperties: false }, executionMode: "sequential",
         async execute(_id, _args, signal) { runs++; toolStarted.resolve(); await Promise.race([held.promise, new Promise((_, reject) => signal.addEventListener("abort", () => reject(new Error("cancelled actual tool")), { once: true }))]); return { content: [{ type: "text", text: "REAL" }], details: {} }; } });
       pi.on("session_start", () => pi.setActiveTools(["hold"]));
-    }] });
+    }, ...promptExtensions, ...(!captureFirst ? [promptCapture.extension] : [])] });
   await active.reload();
   const capture = createCompactionPreparationCapture();
   const dormant = new sdk.DefaultResourceLoader({ cwd: root, agentDir: path.join(root, "agent"), settingsManager: settings,
@@ -55,8 +58,8 @@ async function fixture(t, { prepareRequest, script, retry, compaction, compactio
   const manager = sdk.SessionManager.inMemory(root);
   const { session } = await sdk.createAgentSession({ cwd: root, agentDir: path.join(root, "agent"), model: models.getModel(model.provider, model.id), modelRuntime: models, settingsManager: settings, sessionManager: manager, resourceLoader: empty, tools: [] });
   const loaded = active.getExtensions(); const runner = new sdk.ExtensionRunner(loaded.extensions, loaded.runtime, root, manager, new sdk.ModelRegistry(models));
-  coor = new ActorCoordinator({ session, runner, sdk, api, core, models, resources: active, lifecycle: { prepareRequest }, publish: event => events.push(event),
-    basePromptOptions: { contextFiles: [], cwd: root }, isProjectTrusted: () => false, compactionDriver });
+  coor = new ActorCoordinator({ session, runner, sdk, api, core, models, resources: active, promptCapture, lifecycle: { prepareRequest }, publish: event => events.push(event),
+    basePromptOptions: basePromptOptions ?? { contextFiles: [], cwd: root }, isProjectTrusted: () => false, compactionDriver });
   await coor.start(); await runner.emit({ type: "session_start", reason: "startup" });
   t.after(async () => { held.resolve(); await coor.close(); await rm(root, { recursive: true, force: true }); });
   return { coor, requests, events, manager, held, toolStarted, capture, runs: () => runs };
@@ -136,6 +139,58 @@ test("automatic compaction failure commits a visible error and a later user inpu
   await f.coor.submit("try again"); await wait(f.coor.waitForIdle(), "retry input did not recover");
   assert.equal(f.requests.length, 2); assert.equal(f.coor.failure, null);
 });
+function seedCompaction(f) {
+  for (const word of ["old", "recent"]) {
+    f.manager.appendMessage({ role: "user", content: `${word} question `.repeat(1000), timestamp: 1 });
+    f.manager.appendMessage(f.coor.assistant([{ type: "text", text: `${word} answer `.repeat(1000) }], usage(), "stop"));
+  }
+  f.coor.compactionDriver = createCompactionDriver({ sdk, core, runner: f.coor.runner, session: f.coor.session,
+    models: f.coor.models, capture: f.capture, publish: event => f.events.push(event) });
+}
+for (const reason of ["manual", "threshold", "overflow"]) test(`${reason} compaction cancellation is not a summary failure`, async t => {
+  const cancellations = [], failures = [];
+  const f = await fixture(t, {
+    compaction: { enabled: true, reserveTokens: 1000, keepRecentTokens: 20 },
+    script: (_context, n) => n === 1 && reason === "overflow"
+      ? { content: [], stopReason: "error", errorMessage: "context_length_exceeded" }
+      : { content: [{ type: "text", text: "ANSWER" }], usage: reason === "threshold" && n === 1
+        ? { ...usage(), input: 31000, totalTokens: 31001 } : usage() },
+    hooks: pi => {
+      pi.on("session_before_compact", event => { cancellations.push(event.reason); return { cancel: true }; });
+      pi.on("session_compact_failed", event => failures.push(event));
+    },
+  });
+  seedCompaction(f);
+  if (reason === "manual") {
+    const completed = deferred();
+    f.coor.runner.createContext().compact({
+      onComplete: () => completed.reject(new Error("cancellation reported successful compaction")),
+      onError: error => completed.resolve(error),
+    });
+    const error = await wait(completed.promise, "manual cancellation did not complete");
+    assert.equal(error.code, "ERR_COMPACTION_CANCELLED");
+  } else {
+    await f.coor.submit("start"); await wait(f.coor.waitForIdle(), "cancelled compaction did not settle");
+    assert.equal(f.requests.length, 1, "cancellation must not retry inference or loop compaction");
+  }
+  assert.deepEqual(cancellations, [reason]);
+  assert.equal(f.manager.getEntries().filter(entry => entry.type === "compaction").length, 0);
+  const errors = f.manager.getEntries().filter(entry => entry.message?.stopReason === "error");
+  assert.equal(errors.length, reason === "overflow" ? 1 : 0);
+  if (reason === "overflow") {
+    assert.equal(errors[0].message.errorMessage, "context_length_exceeded");
+    assert.match(f.coor.getState().error, /context_length_exceeded/);
+  } else assert.equal(f.coor.failure, null);
+  assert.equal(failures.length, 1); assert.equal(failures[0].aborted, true);
+  const terminals = f.events.filter(event => event.type === "compaction_end");
+  assert.equal(terminals.length, 1); assert.equal(terminals[0].aborted, true);
+  assert.equal(terminals[0].result, undefined);
+  assert.equal(f.coor.compactionHistoryBarrier, null);
+  await f.coor.submit("continue"); await wait(f.coor.waitForIdle(), "input after cancellation did not settle");
+  assert.equal(f.coor.failure, null);
+  assert.equal(f.requests.length, reason === "manual" ? 1 : 2);
+});
+
 test("follow-up waits for the ordinary post-result answer", async t => {
   const f = await fixture(t);
   await f.coor.submit("start"); await wait(f.toolStarted.promise, "tool did not start").catch(error => { throw new Error(`${error.message}; actor=${JSON.stringify(f.coor.getState())}; requests=${f.requests.length}`); });
@@ -226,4 +281,69 @@ for (const kind of ["user", "background", "cron"]) test(`first ${kind} follow-up
   assert.match(JSON.stringify(f.requests[0].messages), /FIRST_INTERNAL_INPUT/);
   assert.equal(f.manager.getBranch().filter(e => e.type === "message" && e.message.role === "assistant").length, 1);
   assert.equal(f.runs(), 0);
+});
+
+for (const captureFirst of [true, false]) for (const forced of [true, false]) {
+  test(`public prompt chain survives owner preparation (observer initially ${captureFirst ? "first" : "last"}, forced=${forced})`, async t => {
+    const prepared = [], chained = [];
+    let resource = "RESOURCE_ONE";
+    const f = await fixture(t, { captureFirst,
+      basePromptOptions: () => ({ cwd: "/fixture", appendSystemPrompt: "BASE_PROMPT\n", contextFiles: [{ path: "AGENTS.md", content: resource }] }),
+      prepareRequest: event => {
+        assert.deepEqual(f.coor.runner.createCommandContext().getSystemPromptOptions(), event.systemPromptOptions);
+        prepared.push(structuredClone(event));
+        return { systemPrompt: `OWNER_DEPTH\n${event.systemPrompt}\nDIAGNOSTIC_${prepared.length}` };
+      },
+      promptExtensions: [pi => pi.on("before_agent_start", event => {
+        event.systemPromptOptions.appendSystemPrompt += `APPEND_${event.prompt}`;
+        event.systemPromptOptions.sections.example = `SECTION_${event.prompt}`;
+        return { message: { customType: "fixture.prompt", content: `NOTICE_${event.prompt}`, display: false } };
+      }), pi => pi.on("before_agent_start", (event, ctx) => {
+        chained.push({ prompt: event.systemPrompt, context: ctx.getSystemPrompt() });
+        if (forced) return { systemPrompt: `FORCE_${event.prompt}` };
+        event.systemPromptOptions.promptGuidelines.push(`GUIDELINE_${event.prompt}`);
+      }), pi => pi.on("before_agent_start", event => {
+        if (forced) event.systemPromptOptions.forceSystemPrompt += "_FINAL";
+        else event.systemPromptOptions.sections.last = "LAST_SECTION";
+      })],
+    });
+    await f.coor.submit("ONE"); await wait(f.toolStarted.promise, "prompt test tool did not start").catch(error => { throw f.coor.failure ?? error; });
+    f.held.resolve(); await wait(f.coor.waitForIdle(), "prompt first run did not settle");
+    resource = "RESOURCE_TWO";
+    await f.coor.submit("TWO"); await wait(f.coor.waitForIdle(), "prompt second run did not settle");
+    assert.equal(f.requests.length, 3); assert.equal(prepared.length, 3); assert.equal(chained.length, 2);
+    for (const [index, request] of f.requests.entries()) {
+      const word = index < 2 ? "ONE" : "TWO";
+      const systemPrompt = request.messages.find(message => message.role === "system").content;
+      assert.match(systemPrompt, new RegExp(`OWNER_DEPTH[\\s\\S]*DIAGNOSTIC_${index + 1}`));
+      assert.equal(prepared[index].systemPromptOptions.appendSystemPrompt, `BASE_PROMPT\nAPPEND_${word}`);
+      assert.equal(prepared[index].systemPromptOptions.contextFiles[0].content, `RESOURCE_${word}`);
+      assert.equal(prepared[index].systemPromptOptions.sections.example, `SECTION_${word}`);
+      assert.match(JSON.stringify(request.messages), new RegExp(`NOTICE_${word}`));
+      if (forced) assert.equal(systemPrompt, `OWNER_DEPTH\nFORCE_${word}_FINAL\nDIAGNOSTIC_${index + 1}`);
+      else {
+        for (const text of ["BASE_PROMPT", `APPEND_${word}`, `RESOURCE_${word}`, `SECTION_${word}`, `GUIDELINE_${word}`, "LAST_SECTION"]) assert(systemPrompt.includes(text), text);
+        if (word === "TWO") assert(!systemPrompt.includes("APPEND_ONE"), "per-run additions cannot leak");
+      }
+    }
+    for (const item of chained) { assert.equal(item.context, item.prompt); assert.match(item.prompt, /APPEND_/); }
+    assert.equal(f.coor.runner.createCommandContext().getSystemPromptOptions().appendSystemPrompt, "BASE_PROMPT\n", "run options end with the run");
+  });
+}
+test("input delivered during owner preparation cannot leave prompt additions one request late", async t => {
+  const entered = deferred(), release = deferred(); let count = 0;
+  t.after(() => release.resolve());
+  const f = await fixture(t, { script: () => [{ type: "text", text: "ANSWER" }],
+    promptExtensions: [pi => pi.on("before_agent_start", event => ({ systemPrompt: `PROMPT_${event.prompt}` }))],
+    prepareRequest: async event => {
+      if (++count === 1) { entered.resolve(); await release.promise; }
+      return { systemPrompt: `${event.systemPrompt}\nOWNER_${count}` };
+    },
+  });
+  await f.coor.submit("FIRST"); await wait(entered.promise, "owner preparation did not start");
+  await f.coor.submit("LATEST", "steer"); release.resolve();
+  await wait(f.coor.waitForIdle(), "fresh prompt request did not settle");
+  assert.equal(f.requests.length, 1); assert.equal(count, 2);
+  assert.equal(f.requests[0].messages.find(message => message.role === "system").content, "PROMPT_LATEST\nOWNER_2");
+  assert.match(JSON.stringify(f.requests[0].messages), /LATEST/);
 });
