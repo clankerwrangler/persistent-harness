@@ -4,6 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import WebSocket from "ws";
+import { createAgentStartPromptCapture } from "./actor-prompt.mjs";
 import { loadExternalPi } from "./external-pi.mjs";
 import { PiRpcLineDecoder } from "./session-actor.mjs";
 
@@ -349,18 +350,21 @@ export async function bootstrapSDKWorker({ argv = [], cwd = process.cwd(), env =
     try { identity = await realpath(path.resolve(cwd, source)); } catch {}
     if (identity !== ownEntry) additionalExtensionPaths.push(source);
   }
+  const promptCapture = createAgentStartPromptCapture();
   const resources = new sdk.DefaultResourceLoader({
     cwd, agentDir, settingsManager: settings,
-    additionalExtensionPaths, extensionFactories: [{ name: "persistent-harness", factory: (pi) => extensionFactory(pi, lifecycle) }],
-    extensionsOverride: usesHarnessFactory ? (loaded) => {
-      // This factory replaces our index.ts re-export, not an unrelated extension.
-      // Identify that public loader result before stock derives command/tool SourceInfo.
-      const owned = loaded.extensions.filter((extension) => extension.path === "<inline:persistent-harness>");
-      if (owned.length !== 1) throw new Error(`Expected exactly one owned harness extension, received ${owned.length}`);
-      const [own] = owned;
-      own.path = ownEntry; own.resolvedPath = ownEntry;
-      return loaded;
-    } : undefined,
+    additionalExtensionPaths, extensionFactories: [{ name: "persistent-harness", factory: (pi) => extensionFactory(pi, lifecycle) }, promptCapture.extension],
+    extensionsOverride: (loaded) => {
+      if (usesHarnessFactory) {
+        // This factory replaces our index.ts re-export, not an unrelated extension.
+        // Identify that public loader result before stock derives command/tool SourceInfo.
+        const owned = loaded.extensions.filter((extension) => extension.path === "<inline:persistent-harness>");
+        if (owned.length !== 1) throw new Error(`Expected exactly one owned harness extension, received ${owned.length}`);
+        const [own] = owned;
+        own.path = ownEntry; own.resolvedPath = ownEntry;
+      }
+      return promptCapture.orderLast(loaded);
+    },
     noExtensions: options.noExtensions, noSkills: options.noSkills, noPromptTemplates: options.noPromptTemplates,
     noThemes: options.noThemes, noContextFiles: options.noContextFiles,
     additionalSkillPaths: options.skills, additionalPromptTemplatePaths: options.promptTemplates,
@@ -417,7 +421,7 @@ export async function bootstrapSDKWorker({ argv = [], cwd = process.cwd(), env =
     const compactionDriver = createCompactionDriver({ sdk, core, runner, session, models, capture, lifecycle, publish: emit });
     const navigationDriver = createNavigationDriver({ sdk, core, runner, session, models, lifecycle, publish: emit });
     const coordinator = new Coordinator({ session, sdk, api, core, models, nativeAdapter, projectContext, planRecovery, lifecycle, compactionDriver, navigationDriver,
-      runner, resources, publish: emit, basePromptOptions, onTiming,
+      runner, resources, promptCapture, publish: emit, basePromptOptions, onTiming,
       isProjectTrusted: () => settings.isProjectTrusted() });
     worker = new SDKWorker({ session, coordinator, runner, resources, sdk, models, projectContext, broker, publish: emit, lifecycle });
     await coordinator.start();

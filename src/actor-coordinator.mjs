@@ -29,9 +29,9 @@ function observedProviderTools(payload) {
 /** One actor's inference, execution, canonical writer, and public extension lifecycle owner. */
 export class ActorCoordinator {
   constructor({ session, runner, sdk, api, core, models, nativeAdapter, projectContext, planRecovery,
-    lifecycle = {}, resources, publish = () => {}, basePromptOptions = {}, onTiming = () => {}, compactionDriver, navigationDriver, isProjectTrusted = () => false }) {
+    lifecycle = {}, resources, promptCapture, publish = () => {}, basePromptOptions = {}, onTiming = () => {}, compactionDriver, navigationDriver, isProjectTrusted = () => false }) {
     Object.assign(this, { session, runner, sdk, api, core, models, nativeAdapter, projectContext, planRecovery,
-      lifecycle, resources, publish, basePromptOptions, onTiming, compactionDriver, navigationDriver, isProjectTrusted });
+      lifecycle, resources, promptCapture, publish, basePromptOptions, onTiming, compactionDriver, navigationDriver, isProjectTrusted });
     this.manager = session.sessionManager;
     this.activeTools = new Set(); this.queue = []; this.tasks = new Map(); this.seenCalls = new Set();
     this.completedResults = [];
@@ -42,10 +42,11 @@ export class ActorCoordinator {
     this.waiters = new Set(); this.recoveryDone = false; this.currentPrompt = session.systemPrompt; this.runPrompt = session.systemPrompt; this.serviceMutation = false;
     this.failedAttempt = null; this.retryAttemptNumber = 1; this.retrying = false; this.overflowRecoveryAttempted = false;
     this.steeringMode = "all"; this.followUpMode = "all"; this.contextUsage = undefined;
-    this.compactionHistoryBarrier = null;
+    this.compactionHistoryBarrier = null; this.runPromptOptions = undefined;
   }
 
   async start() {
+    if (!this.promptCapture) throw new Error("a final public agent-start prompt observer is required");
     if (!this.runner) throw new Error("an independently owned public ExtensionRunner is required");
     if (this.runner === this.session.extensionRunner) throw new Error("active runner must not share the dormant SDK service runtime");
     const core = {
@@ -105,7 +106,8 @@ export class ActorCoordinator {
   }
 
   get isBusy() { return this.running || Boolean(this.flight) || this.tasks.size > 0 || this.compacting || this.serviceMutation; }
-  promptOptions() { return clone(typeof this.basePromptOptions === "function" ? this.basePromptOptions() : this.basePromptOptions); }
+  baseOptions() { return clone(typeof this.basePromptOptions === "function" ? this.basePromptOptions() : this.basePromptOptions); }
+  promptOptions() { return clone((this.running ? this.runPromptOptions : undefined) ?? this.baseOptions()); }
   getContextUsage() { return this.contextUsage; }
   async withServiceMutation(operation) {
     if (this.isBusy) throw new Error("service mutation requires an idle actor");
@@ -229,8 +231,8 @@ export class ActorCoordinator {
         const content = item.images.length ? [{ type: "text", text: item.message }, ...item.images] : item.message;
         const message = { role: "user", content, timestamp: Date.now(), ...(item.messageId ? { id: item.messageId } : {}) };
         await this.emit({ type: "message_start", message, messageId: message.id }); await this.commit(message);
-        const prepared = await this.runner.emitBeforeAgentStart(item.message, item.images, this.session.systemPrompt, this.promptOptions());
-        this.runPrompt = prepared?.systemPrompt ?? this.session.systemPrompt;
+        const prepared = await this.promptCapture.prepare(this.runner, item.message, item.images, this.baseOptions());
+        this.runPrompt = prepared.systemPrompt; this.runPromptOptions = clone(prepared.systemPromptOptions);
         for (const extra of prepared?.messages ?? []) this.manager.appendCustomMessageEntry(extra.customType, extra.content, extra.display, extra.details);
       } else {
         const message = item.message;
@@ -260,7 +262,11 @@ export class ActorCoordinator {
     const tokens = this.session.getContextUsage()?.tokens;
     if (tokens == null) return false;
     if (!this.sdk.shouldCompact(tokens, this.session.model.contextWindow, settings)) return false;
-    await this.compact(undefined, { automatic: true, reason: "threshold", willRetry: false });
+    try { await this.compact(undefined, { automatic: true, reason: "threshold", willRetry: false }); }
+    catch (error) {
+      if (error?.code === "ERR_COMPACTION_CANCELLED") return false;
+      throw error;
+    }
     return true;
   }
   async drive() {
@@ -272,7 +278,7 @@ export class ActorCoordinator {
     }
     if (!this.running) {
       if (!this.queue.some(item => item.behavior !== "next_turn")) return;
-      this.controller = new AbortController(); this.runPrompt = this.session.systemPrompt; this.running = true; this.stopping = false; this.turnIndex = 0; this.retryAttemptNumber = 1; this.failedAttempt = null; this.overflowRecoveryAttempted = false;
+      this.controller = new AbortController(); this.runPrompt = this.session.systemPrompt; this.runPromptOptions = undefined; this.running = true; this.stopping = false; this.turnIndex = 0; this.retryAttemptNumber = 1; this.failedAttempt = null; this.overflowRecoveryAttempted = false;
       await this.emit({ type: "agent_start" }); await this.recover();
       await this.maybeAutoCompact();
     }
@@ -305,6 +311,7 @@ export class ActorCoordinator {
     const overflow = this.api.isContextOverflow(attempt.terminal ?? attempt.error, this.session.model.contextWindow)
       || this.api.isRecoverableLength(attempt.terminal ?? attempt.error, this.session.model.maxTokens);
     if (overflow && this.session.settingsManager.getCompactionSettings().enabled && this.compactionDriver) {
+      const providerFailure = this.failure;
       this.controller.abort(); await this.toolTail;
       if (this.stopping || this.closed || this.overflowRecoveryAttempted) {
         this.failedAttempt = null; return false;
@@ -319,7 +326,10 @@ export class ActorCoordinator {
         const reservedEpoch = ++this.attemptEpoch;
         await this.inference({ reservedEpoch });
         return true;
-      } catch (error) { this.failure = error; this.failedAttempt = null; this.controller.abort(); return false; }
+      } catch (error) {
+        this.failure = error?.code === "ERR_COMPACTION_CANCELLED" ? providerFailure : error;
+        this.failedAttempt = null; this.controller.abort(); return false;
+      }
     }
     const decision = evaluateInferenceRetry(this.retryObservation(attempt));
     this.manager.appendCustomEntry("persistent-harness.inference-retry-v1", decision.record);
@@ -405,9 +415,15 @@ export class ActorCoordinator {
       return { committed, calls, nativeBatch };
     };
     try {
-      const prompt = await this.lifecycle.prepareRequest?.({ systemPrompt: this.runPrompt, systemPromptOptions: this.promptOptions() }, this.runner.createContext());
+      let prompt, preparedOptions;
+      do {
+        preparedOptions = this.runPromptOptions;
+        prompt = await this.lifecycle.prepareRequest?.({ systemPrompt: this.runPrompt, systemPromptOptions: this.promptOptions() }, this.runner.createContext());
+        await this.deliverQueued(false); await this.commitTail; live();
+        // Preparation may flush queued input. Re-prepare only when that delivery
+        // changed the per-run prompt, before taking the matching message snapshot.
+      } while (preparedOptions !== this.runPromptOptions);
       this.currentPrompt = prompt?.systemPrompt ?? this.runPrompt;
-      await this.deliverQueued(false); await this.commitTail; live();
       let messages = this.projectedMessages(); messages = await this.runner.emitContext(messages); live();
       this.sentRevision = this.revision;
       const tools = this.runner.getAllRegisteredTools().filter(item => this.activeTools.has(item.definition.name)).map(item => item.definition);
@@ -563,7 +579,7 @@ export class ActorCoordinator {
     catch (error) {
       // Automatic compaction runs outside inference's error commit path. Give
       // the failed turn a durable, visible error instead of silently settling.
-      if (automatic && !controller.signal.aborted) {
+      if (automatic && !controller.signal.aborted && error?.code !== "ERR_COMPACTION_CANCELLED") {
         const message = this.assistant([{ type: "text", text: "This turn stopped because the conversation summary failed. Send another message to retry." }], zeroUsage(), "error");
         message.errorMessage = `Conversation compaction failed: ${error instanceof Error ? error.message : String(error)}`;
         await this.commit(message);

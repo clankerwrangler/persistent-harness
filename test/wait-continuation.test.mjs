@@ -4,6 +4,7 @@ import { mkdtemp, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { setImmediate as tick } from "node:timers/promises";
+import { createAgentStartPromptCapture } from "../src/actor-prompt.mjs";
 import { ActorCoordinator } from "../src/actor-coordinator.mjs";
 import { loadExternalPi } from "../src/external-pi.mjs";
 import { createNativeProviderAdapter } from "../src/native-provider.mjs";
@@ -83,13 +84,15 @@ for (const state of ["pending", "already-settled"]) for (const newerSteer of [fa
       auth: { apiKey: { name: "fixture", resolve: async () => ({ auth: { apiKey: syntheticKey } }) } },
       api: { stream: denied, streamSimple: denied } }));
     const settings = sdk.SettingsManager.inMemory({ transport: "sse", retry: { enabled: false }, compaction: { enabled: false } });
+    const promptCapture = createAgentStartPromptCapture();
     const resources = new sdk.DefaultResourceLoader({ cwd: root, agentDir: path.join(root, "agent"), settingsManager: settings,
       noExtensions: true, noSkills: true, noPromptTemplates: true, noThemes: true, noContextFiles: true,
       systemPrompt: extensionInternals.skillPrompt([], true),
+      extensionsOverride: promptCapture.orderLast,
       extensionFactories: [pi => {
         pi.registerTool(python); pi.registerTool(wait);
         pi.on("session_start", () => pi.setActiveTools(["ipython", "wait_for_ipython"]));
-      }] });
+      }, promptCapture.extension] });
     await resources.reload();
     // The stock session is a dormant public service shell; only this coordinator runs tools.
     const empty = { getExtensions: () => ({ extensions: [], errors: [], runtime: sdk.createExtensionRuntime() }) };
@@ -161,7 +164,7 @@ for (const state of ["pending", "already-settled"]) for (const newerSteer of [fa
         return new Response(stream, { headers: { "content-type": "text/event-stream" } });
       },
     } });
-    coor = new ActorCoordinator({ session, runner, sdk, api, core, models, nativeAdapter, resources,
+    coor = new ActorCoordinator({ session, runner, sdk, api, core, models, nativeAdapter, resources, promptCapture,
       projectContext: projectCanonicalContext, basePromptOptions: { contextFiles: [], cwd: root }, isProjectTrusted: () => false,
       publish: event => {
         observed.push(structuredClone(event));
