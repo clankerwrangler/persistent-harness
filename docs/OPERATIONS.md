@@ -51,6 +51,12 @@ The existing durable family-message path wakes a passivated parent and retries t
 
 Upgrade and rollback require a compatible reader for canonical assistant metadata, input receipts, and compaction details. Old implementations that do not understand the harness's versioned signature or projection metadata are not an automatically safe rollback after new histories have been written. Keep the tested source, dependency pins, and recovery-compatible state together.
 
+## Model catalog freshness
+
+Actor startup loads Pi's cached catalog without network access. Opening the model picker or calling `rlm.find_models` calls the public Pi catalog refresh before returning the list. Pi owns configured-provider scope, cache persistence, refresh intervals, offline policy, and concurrent-refresh supersession. These operations do not change the selected model or provider.
+
+The one-shot catalog request waits for refresh with a 15-second abort deadline. Unlike Pi's interactive cached-first picker, this API returns one list after refresh. On failure, the existing snapshot remains available with a warning. Child model admission reloads the local catalog without network access so exact pins can use metadata refreshed by another actor.
+
 ## Configuration notes
 
 Prompts use the generic roles `user` and `assistant`. Keep deployment identities and personal instructions in external Pi configuration.
