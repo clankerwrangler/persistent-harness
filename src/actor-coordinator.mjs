@@ -1,3 +1,4 @@
+import { ActorToolDispatch, addToolUsage } from "./actor-tool-dispatch.mjs";
 import { createActorStreamPlanner } from "./actor-stream.mjs";
 import { evaluateInferenceRetry } from "./inference-retry.mjs";
 import { randomUUID } from "node:crypto";
@@ -43,6 +44,7 @@ export class ActorCoordinator {
     this.failedAttempt = null; this.retryAttemptNumber = 1; this.retrying = false; this.overflowRecoveryAttempted = false;
     this.steeringMode = "all"; this.followUpMode = "all"; this.contextUsage = undefined;
     this.compactionHistoryBarrier = null; this.runPromptOptions = undefined;
+    this.toolDispatch = new ActorToolDispatch({ runner, sdk, core, activeTools: () => this.activeTools, emit: event => this.emit(event) });
   }
 
   async start() {
@@ -68,6 +70,8 @@ export class ActorCoordinator {
       setThinkingLevel: level => { if (this.isBusy) throw new Error("thinking changes require an idle actor"); this.session.setThinkingLevel(level, { persist: false }); void this.emit({ type: "thinking_level_select", level: this.session.thinkingLevel }); },
     };
     this.runner.bindCore(core, {
+      getCallableTools: () => this.toolDispatch.callableTools(),
+      executeTool: (...args) => this.toolDispatch.execute(...args),
       getModel: () => this.session.model, getScopedModels: () => this.session.scopedModels,
       isIdle: () => !this.isBusy, isProjectTrusted: () => this.isProjectTrusted(), getSignal: () => this.controller?.signal,
       abort: () => { void this.abort(); }, hasPendingMessages: () => this.queue.length > 0,
@@ -511,6 +515,10 @@ export class ActorCoordinator {
       let result, isError = false;
       const registered = this.runner.getAllRegisteredTools().find(item => item.definition.name === call.name && this.activeTools.has(call.name));
       const tool = registered?.definition;
+      const messages = this.projectedMessages();
+      const issuer = this.manager.getBranch().map(entry => entry.message).findLast(message => message?.role === "assistant"
+        && message.content.some(part => part.type === "toolCall" && part.id === call.id));
+      this.toolDispatch.open(call.id, executionController.signal, issuer, messages);
       try {
         if (executionController.signal.aborted) throw new Error("Tool cancelled before execution; it did not run.");
         if (blockedReason) throw new Error(blockedReason);
@@ -521,16 +529,20 @@ export class ActorCoordinator {
         if (blocked?.block) throw new Error(blocked.reason ?? "Tool execution blocked");
         if (attempt) attempt.dispatchedCount++;
         this.onTiming({ phase: "tool_dispatch", at: performance.now(), toolCallId: call.id });
-        result = await tool.execute(call.id, args, executionController.signal,
-          partialResult => { void this.emit({ type: "tool_execution_update", toolCallId: call.id, toolName: call.name, args, partialResult }).catch(error => this.fail(error)); },
-          this.runner.createContext());
+        result = await this.sdk.wrapRegisteredTool(registered, this.runner).execute(call.id, args, executionController.signal,
+          partialResult => { void this.emit({ type: "tool_execution_update", toolCallId: call.id, toolName: call.name, args, partialResult }).catch(error => this.fail(error)); });
+        isError = result.isError === true;
       } catch (error) { isError = true; result = { content: [{ type: "text", text: error.message }], details: { error: error.message } }; }
       const patch = await this.runner.emitToolResult({ type: "tool_result", toolCallId: call.id, toolName: call.name, input: call.arguments,
-        content: result.content, details: result.details, usage: result.usage, isError });
+        content: result.content, details: result.details, structuredContent: result.structuredContent, usage: result.usage, isError });
       result = { ...result, ...patch }; isError = patch?.isError ?? isError;
+      if (patch?.content && patch.structuredContent === undefined) delete result.structuredContent;
+      const nested = await this.toolDispatch.finish(call.id);
       await this.emit({ type: "tool_execution_end", toolCallId: call.id, toolName: call.name, result, isError });
       const message = { role: "toolResult", toolCallId: call.id, toolName: call.name, content: result.content,
-        details: result.details, ...(result.usage ? { usage: result.usage } : {}), isError, timestamp: Date.now() };
+        details: result.details, ...(result.structuredContent !== undefined ? { structuredContent: result.structuredContent } : {}),
+        ...(result.usage || nested.usage ? { usage: addToolUsage(result.usage, nested.usage) } : {}),
+        ...(nested.nestedCalls ? { nestedCalls: nested.nestedCalls } : {}), isError, timestamp: Date.now() };
       await this.emit({ type: "message_start", message }); await this.commit(message);
       task.resultCommitted = true; this.completedResults.push(message); this.revision++;
       this.onTiming({ phase: "real_result_committed", at: performance.now(), toolCallId: call.id }); this.wake();

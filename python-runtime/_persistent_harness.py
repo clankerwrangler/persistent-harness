@@ -1,6 +1,7 @@
 """Runtime support for persistent-harness skills."""
 from __future__ import annotations
 
+from contextvars import ContextVar
 import importlib
 import json
 import os
@@ -10,6 +11,7 @@ import uuid
 from collections.abc import Mapping
 from typing import Any
 
+_execution_id = ContextVar("harness_execution_id", default=None)
 _control = None
 _control_lock = threading.Lock()
 
@@ -37,7 +39,7 @@ def _receive() -> dict[str, Any]:
 def host_request(request_type: str, payload: dict[str, Any]) -> Any:
     request_id = str(uuid.uuid4())
     with _control_lock:
-        _send({"type": "host_request", "id": request_id, "requestType": request_type, "payload": payload})
+        _send({"type": "host_request", "id": request_id, "requestType": request_type, "payload": payload, "executionId": _execution_id.get()})
         while True:
             response = _receive()
             if response.get("id") != request_id:

@@ -35,6 +35,8 @@ test("native opt-in is exact and does not broaden the Python schema or execution
     const tool = tools.get("ipython");
     assert.equal(tool.async, true);
     assert.equal(tool.executionMode, "sequential");
+    assert.equal(tool.exposure, "model-only", "Python orchestration cannot be nested");
+    assert.equal(tools.get("wait_for_ipython").exposure, "model-only");
     assert.deepEqual(Object.keys(tool.parameters.properties), ["code"]);
     assert.deepEqual(tool.parameters.required, ["code"]);
     assert.equal(tool.parameters.additionalProperties, false);

@@ -1,0 +1,11 @@
+[project]
+name = "persistent-harness-clm"
+version = "1.0.0"
+requires-python = ">=3.11"
+dependencies = []
+
+[tool.persistent-harness]
+id = "clm"
+import-name = "harness_clm"
+alias = "clm"
+host-requests = ["extension_tool.live_context_annotate", "extension_tool.live_context_recall"]

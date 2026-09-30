@@ -3,6 +3,7 @@ import { spawn } from "node:child_process";
 import { mkdir, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { JsonLineDecoder, encodeFrame } from "./framing.mjs";
+import { dispatchExtensionTool } from "./extension-tool-host.mjs";
 
 const KERNEL_FRAME_BYTES = 1024 * 1024;
 
@@ -269,7 +270,14 @@ export class PythonKernel {
     const active = this.#active;
     const control = this.#control;
     const allowed = this.manifest.skills.some((skill) => skill.python?.hostRequests?.includes(frame.requestType));
-    const handler = allowed ? this.hostHandlers[frame.requestType] : undefined;
+    const cellBound = typeof frame.requestType === "string" && frame.requestType.startsWith("extension_tool.");
+    const handler = !allowed ? undefined : cellBound
+      ? (payload, context) => dispatchExtensionTool(frame.requestType, payload, context)
+      : this.hostHandlers[frame.requestType];
+    if (cellBound && (!active || frame.executionId !== active.id || active.abortController.signal.aborted)) {
+      this.#writeControl({ type: "host_response", id: frame.id, ok: false, error: "extension tool request has no live originating cell" });
+      return;
+    }
     if (!active || !handler) {
       this.#writeControl({
         type: "host_response",
@@ -289,6 +297,7 @@ export class PythonKernel {
     try {
       const result = await handler(frame.payload, {
         signal: active.abortController.signal,
+        toolContext: active.toolContext,
         onProgress: (stream, text) => reply({ type: "host_progress", id: frame.id, stream, text }),
       });
       reply({ type: "host_response", id: frame.id, ok: true, result });
@@ -320,7 +329,7 @@ export class PythonKernel {
     });
   }
 
-  execute(code, { signal, onUpdate, namespaceCheckpoint, checkpointInBackground = false, onCheckpoint } = {}) {
+  execute(code, { signal, onUpdate, toolContext, namespaceCheckpoint, checkpointInBackground = false, onCheckpoint } = {}) {
     const deferred = checkpointInBackground && namespaceCheckpoint ? Promise.withResolvers() : null;
     const failureEpoch = this.#failureEpoch;
     const notAdmitted = () => {
@@ -346,7 +355,7 @@ export class PythonKernel {
       const abortController = new AbortController();
       const abort = () => this.interrupt();
       signal?.addEventListener("abort", abort, { once: true });
-      this.#active = { id, collector, abortController };
+      this.#active = { id, collector, abortController, toolContext };
       const startedAt = Date.now();
       try {
         const pending = new Promise((resolve, reject) => {
