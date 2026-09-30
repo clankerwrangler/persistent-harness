@@ -5,6 +5,7 @@ import os from "node:os";
 import path from "node:path";
 import { loadExternalPi } from "../src/external-pi.mjs";
 import { ActorCoordinator } from "../src/actor-coordinator.mjs";
+import { projectCanonicalContext } from "../src/canonical-context.mjs";
 import { createAgentStartPromptCapture } from "../src/actor-prompt.mjs";
 import { PythonKernel } from "../src/kernel.mjs";
 import { PythonRuntimeManager } from "../src/python-runtime.mjs";
@@ -69,7 +70,7 @@ async function fixture(t, { cells = [], configure = () => {}, grant = true } = {
   const loaded = active.getExtensions();
   const runner = new sdk.ExtensionRunner(loaded.extensions, loaded.runtime, dir, manager, new sdk.ModelRegistry(models));
   runner.onError(error => errors.push(error));
-  const coor = new ActorCoordinator({ session, runner, sdk, api, core, models, resources: active, promptCapture, publish: event => events.push(event),
+  const coor = new ActorCoordinator({ session, runner, sdk, api, core, models, resources: active, promptCapture, projectContext: projectCanonicalContext, publish: event => events.push(event),
     basePromptOptions: { cwd: dir, contextFiles: [], appendSystemPrompt: extensionInternals.skillPrompt(manifest.skills) } });
   await coor.start(); await runner.emit({ type: "session_start", reason: "startup" });
   t.after(async () => { await coor.close(); await kernel.close({ snapshot: false }); await rm(dir, { recursive: true, force: true }); });
@@ -83,7 +84,7 @@ function tool(pi, name, exposure, execute, parameters = object({})) {
 const annotationParameters = { ...object({ action: { type: "string" }, source: { type: "string" }, title: { type: "string" },
   reason: { type: "string" }, futureAction: { type: "string" }, retention: { type: "string" }, id: { type: "string" }, resolution: { type: "string" } }), required: ["action"] };
 
-test("dedicated companion skill invokes only its exact grants through real Python and native hooks", { timeout: 30000 }, async t => {
+test("dedicated companion skill invokes exact grants through ordinary replay gates, real Python, and native hooks", { timeout: 30000 }, async t => {
   const executions = [], hooks = [];
   const f = await fixture(t, { cells: [String.raw`
 from _persistent_harness import host_request
@@ -114,6 +115,7 @@ print("EXACT_OPERATIONS_PASSED")`], configure(pi) {
     pi.on("tool_result", event => { if (event.toolName === "live_context_recall") return { content: [{ type: "text", text: "REDACTED" }] }; });
   } });
   await f.coor.submit("test"); await wait(f.coor.waitForIdle());
+  assert.equal(f.coor.failure, null, "admitted tool execution must not require a completed provider transcript");
   const results = f.manager.getBranch().filter(entry => entry.message?.role === "toolResult").map(entry => entry.message);
   assert.equal(results.length, 1, "only outer native result is canonical");
   assert.match(results[0].details.stdout, /EXACT_OPERATIONS_PASSED/);
