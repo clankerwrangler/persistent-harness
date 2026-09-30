@@ -234,7 +234,15 @@ export class SDKWorker {
       }
       case "get_tree": return { tree: manager.getTree(), leafId: manager.getLeafId() };
       case "get_session_stats": return { ...session.getSessionStats(), contextUsage: runner.createContext().getContextUsage() };
-      case "get_available_models": return { models: await models.getAvailable(undefined, { signal: AbortSignal.timeout(15000) }) };
+      case "get_available_models": {
+        let warning;
+        try {
+          const result = await models.refresh({ signal: AbortSignal.timeout(15_000) });
+          if (result.aborted || result.errors.size || models.getError()) warning = "Model catalog refresh failed; showing cached models.";
+        } catch { warning = "Model catalog refresh failed; showing cached models."; }
+        if (warning) this.broker.ui.notify(warning, "warning");
+        return { models: [...models.getAvailableSnapshot()], ...(warning ? { warning } : {}) };
+      }
       case "get_thinking_level": return { level: session.thinkingLevel };
       case "get_available_thinking_levels": return { levels: session.getAvailableThinkingLevels() };
       case "set_thinking_level": return this.mutateModel(async () => {
