@@ -5,7 +5,7 @@ import { createActorStreamPlanner, ACTOR_STREAM_LIMITS } from "../src/actor-stre
 import { projectCanonicalContext, THINKING_SIGNATURE_CUSTOM_TYPE } from "../src/canonical-context.mjs";
 import { createNativeProviderAdapter } from "../src/native-provider.mjs";
 
-// Tests require an explicitly selected stock 0.85.1 public SDK/API graph.
+// Tests require an explicitly selected stock 0.99.1 public SDK/API graph.
 const { sdk, api, responsesApi } = await loadExternalPi();
 const clone = structuredClone;
 const usage = () => ({ input: 10, output: 20, cacheRead: 3, cacheWrite: 4, reasoning: 5, totalTokens: 37,
@@ -132,7 +132,7 @@ test("late encryption emits canonical custom metadata bound to exact entry and L
     messageEntryId: "entry1", messageId: "core1", contentIndex: 0, itemId: "rs", encryptedContent: "encrypted" } }]);
   assert.equal(JSON.stringify(f.entries), bytes);
   const metadata = { type: "custom", id: "sig", parentId: "entry1", timestamp: new Date(0).toISOString(), ...end.amendments[0] };
-  const projected = projectCanonicalContext({ entries: [...f.entries, metadata], leafId: "sig", buildSessionContext: sdk.buildSessionContext, mode: "native" });
+  const projected = projectCanonicalContext({ entries: [...f.entries, metadata], leafId: "sig", buildSessionProjection: sdk.buildSessionProjection, mode: "native" });
   assert.equal(JSON.parse(projected.messages[1].content[0].thinkingSignature).encrypted_content, "encrypted");
   assert.equal(JSON.stringify(f.entries), bytes);
 });

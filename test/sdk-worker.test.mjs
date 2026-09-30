@@ -13,6 +13,7 @@ import https from "node:https";
 import { resolveExternalPi, loadExternalPi } from "../src/external-pi.mjs";
 import { RpcDialogBroker, bootstrapSDKWorker, runSDKWorkerRpc, toWorkerRpcEvent } from "../src/sdk-worker.mjs";
 import { PiSessionActor } from "../src/session-actor.mjs";
+import { createCompactionDriver, prepareActorCompaction } from "../src/actor-compaction.mjs";
 import { projectCanonicalBranch } from "../src/canonical-context.mjs";
 
 const candidate = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
@@ -200,11 +201,11 @@ test("resolver requires explicit install and uses manifest exports beside bundle
   const byModule = await resolveExternalPi({ env: { PI_HARNESS_PI_MODULE: path.join(stock, "dist/index.js") } });
   const byCommand = await resolveExternalPi({ env: { PI_HARNESS_PI_COMMAND: path.join(stock, "dist/bundle/cli.js") } });
   assert.deepEqual(byModule, byCommand);
-  assert.equal(byModule.version, "0.85.1");
+  assert.equal(byModule.version, "0.99.1");
   assert.equal(byModule.sdk, path.join(stock, "dist/index.js"));
   const apiPackageFile = findPackageJSON(pathToFileURL(byModule.api));
   const apiPackage = JSON.parse(await readFile(apiPackageFile, "utf8"));
-  assert.equal(apiPackage.name, "@earendil-works/pi-ai"); assert.equal(apiPackage.version, "0.85.1");
+  assert.equal(apiPackage.name, "@earendil-works/pi-ai"); assert.equal(apiPackage.version, "0.99.1");
   const target = apiPackage.exports["./api/*"].import;
   assert.equal(target, "./dist/api/*.js");
   assert.equal(byModule.responsesApi, fileURLToPath(new URL(target.replace("*", "openai-responses-shared"), pathToFileURL(apiPackageFile))));
@@ -228,15 +229,15 @@ test("resolver honors the explicit official bundled SDK without changing public 
 test("resolver rejects altered bundled entry bytes before executing them", async () => {
   const directory = path.join(temporary, "altered/node_modules/@earendil-works/pi-coding-agent");
   await mkdir(path.join(directory, "dist/bundle"), { recursive: true });
-  await writeFile(path.join(directory, "package.json"), JSON.stringify({ name: "@earendil-works/pi-coding-agent", version: "0.85.1",
-    exports: { ".": { import: "./dist/index.js" } }, dependencies: { "@earendil-works/pi-ai": "0.85.1", "@earendil-works/pi-agent-core": "0.85.1" } }));
+  await writeFile(path.join(directory, "package.json"), JSON.stringify({ name: "@earendil-works/pi-coding-agent", version: "0.99.1",
+    exports: { ".": { import: "./dist/index.js" } }, dependencies: { "@earendil-works/pi-ai": "0.99.1", "@earendil-works/pi-agent-core": "0.99.1" } }));
   await writeFile(path.join(directory, "dist/index.js"), "throw new Error('must not execute');");
   await writeFile(path.join(directory, "dist/bundle/index.js"), "throw new Error('must not execute');");
   for (const name of ["pi-ai", "pi-agent-core"]) {
     const dependency = path.join(directory, "node_modules/@earendil-works", name);
     await mkdir(dependency, { recursive: true });
-    await writeFile(path.join(dependency, "package.json"), JSON.stringify({ name: `@earendil-works/${name}`, version: "0.85.1",
-      dependencies: name === "pi-agent-core" ? { "@earendil-works/pi-ai": "0.85.1" } : {} }));
+    await writeFile(path.join(dependency, "package.json"), JSON.stringify({ name: `@earendil-works/${name}`, version: "0.99.1",
+      dependencies: name === "pi-agent-core" ? { "@earendil-works/pi-ai": "0.99.1" } : {} }));
   }
   await assert.rejects(loadExternalPi({ env: { PI_HARNESS_PI_MODULE: path.join(directory, "dist/bundle/index.js") } }), /official stock bytes/);
 });
@@ -248,9 +249,9 @@ test("resolver rejects a different stock version before importing code", async (
   await mkdir(ai, { recursive: true }); await mkdir(core, { recursive: true });
   await writeFile(path.join(directory, "package.json"), JSON.stringify({ name: "@earendil-works/pi-coding-agent", version: "0.85.0",
     dependencies: { "@earendil-works/pi-ai": "*", "@earendil-works/pi-agent-core": "*" } }));
-  await writeFile(path.join(ai, "package.json"), JSON.stringify({ name: "@earendil-works/pi-ai", version: "0.85.1" }));
-  await writeFile(path.join(core, "package.json"), JSON.stringify({ name: "@earendil-works/pi-agent-core", version: "0.85.1", dependencies: { "@earendil-works/pi-ai": "*" } }));
-  await assert.rejects(resolveExternalPi({ env: { PI_HARNESS_PI_MODULE: directory } }), /Expected stock Pi 0.85.1/);
+  await writeFile(path.join(ai, "package.json"), JSON.stringify({ name: "@earendil-works/pi-ai", version: "0.99.1" }));
+  await writeFile(path.join(core, "package.json"), JSON.stringify({ name: "@earendil-works/pi-agent-core", version: "0.99.1", dependencies: { "@earendil-works/pi-ai": "*" } }));
+  await assert.rejects(resolveExternalPi({ env: { PI_HARNESS_PI_MODULE: directory } }), /Expected stock Pi 0.99.1/);
 });
 
 test("UI broker correlates overlapping dialogs, ignores invalid/stale replies, and drains cancellation", async () => {
@@ -302,7 +303,7 @@ test("bootstrap uses distinct runtimes, one manager, inline harness once, compan
     assert.equal(initialized, 1); assert.equal(started, 1);
     assert.notEqual(worker.runner, worker.session.extensionRunner);
     assert.notEqual(worker.resources.getExtensions().runtime, worker.session.resourceLoader.getExtensions().runtime);
-    assert.equal(worker.session.resourceLoader.getExtensions().extensions.length, 0);
+    assert.deepEqual(worker.session.resourceLoader.getExtensions().extensions.map(e => e.path), ["<inline:compaction-preparation>"]);
     assert.equal(worker.runner.createContext().sessionManager, worker.session.sessionManager);
     const commands = (await worker.handle({ type: "get_commands" })).commands;
     assert.ok(commands.some((item) => item.name === "companion")); assert.ok(commands.some((item) => item.name === "discovered"));
@@ -424,8 +425,8 @@ test("dormant SDK prompt follows active Python tools without disabled builtin me
         assert.deepEqual(options.selectedTools, names);
         assert.deepEqual(worker.session.getActiveToolNames(), names);
         assert.deepEqual([...worker.coordinator.activeTools], names);
-        assert.deepEqual(Object.keys(options.toolSnippets), names);
-        assert.deepEqual(options.promptGuidelines, names.map((name) => `Use fixture ${name} only when needed.`));
+        assert.deepEqual(names.map((name) => options.toolSnippets[name]), names.map((name) => `Fixture ${name} capability`));
+        assert.deepEqual(names.flatMap((name) => options.toolGuidelines[name]), names.map((name) => `Use fixture ${name} only when needed.`));
         for (const builtin of ["read", "bash", "edit", "write"]) {
           assert.doesNotMatch(worker.session.systemPrompt, new RegExp(`(?:^|\\n)- ${builtin}:`));
           assert.equal(options.selectedTools.includes(builtin), false);
@@ -757,7 +758,7 @@ test("external compaction hook receives canonical projections and composed names
       assert.equal(projection.diagnostics.filter(item => item.code === "UNADMITTED_CALL_OMITTED"
         && item.severity === "info" && item.toolCallId === failedWait.content[0].id).length, 1);
     }
-    const expectedNative = external.sdk.buildSessionContext(expectedBranch, expectedBranch.at(-1).id).messages
+    const expectedNative = external.sdk.buildSessionProjection(expectedBranch, expectedBranch.at(-1).id).messages
       .map(message => message.id === failedWait.id ? { ...message, content: [] } : message);
     assert.deepEqual(native.messages, expectedNative, "native projection changes no other retained message");
     const expectedOrdinary = expectedNative.filter(message => message.role !== "toolResult");
@@ -811,23 +812,22 @@ test("external compaction hook receives canonical projections and composed names
 
 
 test("worker recovery, context reads, and compaction preserve large opaque archives with small live context", async () => {
-  const { worker } = await fixture({ argv: ["--mode", "rpc", "--no-session", "--provider", "worker-fixture", "--model", "fixture",
+  let capture;
+  const { worker } = await fixture({ createCompactionDriver: options => { capture = options.capture; return createCompactionDriver(options); }, argv: ["--mode", "rpc", "--no-session", "--provider", "worker-fixture", "--model", "fixture",
     "--no-extensions", "--no-skills", "--no-context-files"] });
   try {
     const manager = worker.session.sessionManager;
     const payload = "x".repeat(4 * 1024 * 1024);
     for (let i = 0; i < 17; i++) manager.appendCustomEntry("fixture-archive", { payload, nested: { kept: true } });
-    for (let i = 0; i < 3; i++) manager.appendMessage({ role: "user", content: `question ${i} `.repeat(80), timestamp: i });
+    for (let i = 0; i < 3; i++) manager.appendMessage({ role: "user", content: `question ${i} `.repeat(8000), timestamp: i });
     const entries = manager.getEntries(), leafId = manager.getLeafId();
-    const plain = external.sdk.buildSessionContext(entries, leafId).messages;
+    const plain = external.sdk.buildSessionProjection(entries, leafId).messages;
     assert.equal(plain.length, 3);
     assert.deepEqual(worker.getMessages(), plain);
     assert.deepEqual(worker.coordinator.projectedMessages(), plain);
     await worker.coordinator.recover();
     assert.deepEqual(manager.getEntries(), entries, "no unknown result or history repair is needed");
-    const { prepareActorCompaction } = await import("../src/actor-compaction.mjs");
-    const prepared = prepareActorCompaction({ sdk: external.sdk, core: external.core, entries, leafId,
-      settings: { enabled: true, reserveTokens: 256, keepRecentTokens: 20 } });
+    const prepared = await prepareActorCompaction({ sdk: external.sdk, session: worker.session, capture });
     assert(prepared.preparation);
     assert.deepEqual(prepared.branchEntries, entries);
     assert.equal(prepared.outstanding.length, 0);
@@ -841,10 +841,10 @@ test("worker recovery, context reads, and compaction preserve large opaque archi
 test("configured process budget reaches worker reads, recovery, compaction and the canonical extension service", async () => {
   const previous = process.env.PI_HARNESS_CONTEXT_STRING_CODE_UNITS;
   process.env.PI_HARNESS_CONTEXT_STRING_CODE_UNITS = "201326592";
-  let emitProjection, worker;
+  let emitProjection, worker, capture;
   try {
     const { default: harnessExtension } = await import("../src/extension.mjs");
-    ({ worker } = await fixture({ argv: ["--mode", "rpc", "--no-session", "--provider", "worker-fixture", "--model", "fixture",
+    ({ worker } = await fixture({ createCompactionDriver: options => { capture = options.capture; return createCompactionDriver(options); }, argv: ["--mode", "rpc", "--no-session", "--provider", "worker-fixture", "--model", "fixture",
       "--no-extensions", "--no-skills", "--no-context-files"], extensionFactory(pi, lifecycle) {
         fixtureExtension(pi); harnessExtension(pi, lifecycle);
         emitProjection = request => pi.events.emit("persistent-harness:project-canonical-context:v1", request);
@@ -852,14 +852,12 @@ test("configured process budget reaches worker reads, recovery, compaction and t
     const manager = worker.session.sessionManager, payload = "x".repeat(4 * 1024 * 1024);
     for (let i = 0; i < 19; i++) manager.appendMessage({ role: "user", content: payload, details: { payload, kept: true }, timestamp: i });
     const entries = manager.getEntries(), leafId = manager.getLeafId();
-    const plain = external.sdk.buildSessionContext(entries, leafId).messages;
+    const plain = external.sdk.buildSessionProjection(entries, leafId).messages;
     assert.deepEqual(worker.getMessages(), plain);
     assert.deepEqual(worker.coordinator.projectedMessages(), plain);
     await worker.coordinator.recover();
     assert.deepEqual(manager.getEntries(), entries);
-    const { prepareActorCompaction } = await import("../src/actor-compaction.mjs");
-    assert(prepareActorCompaction({ sdk: external.sdk, core: external.core, entries, leafId,
-      settings: { enabled: true, reserveTokens: 256, keepRecentTokens: 20 } }).preparation);
+    assert((await prepareActorCompaction({ sdk: external.sdk, session: worker.session, capture })).preparation);
     for (const mode of ["native", "ordinary"]) {
       const request = { entries: manager.getBranch(), leafId, mode };
       emitProjection(request);
@@ -876,4 +874,38 @@ test("configured process budget reaches worker reads, recovery, compaction and t
     if (previous === undefined) delete process.env.PI_HARNESS_CONTEXT_STRING_CODE_UNITS;
     else process.env.PI_HARNESS_CONTEXT_STRING_CODE_UNITS = previous;
   }
+});
+
+
+test("dormant public preparation capture has no provider, transcript, UI or active-owner effects", async () => {
+  let capture, providerCalls = 0, activeHooks = 0;
+  const { worker, events } = await fixture({
+    createCompactionDriver: options => { capture = options.capture; return createCompactionDriver(options); },
+    extensionFactory(pi) {
+      pi.registerProvider("worker-fixture", { ...modelConfig, streamSimple() { providerCalls++; throw new Error("capture must not infer"); } });
+      pi.on("session_before_compact", () => { activeHooks++; });
+    },
+  });
+  try {
+    worker.session.settingsManager.applyOverrides({ compaction: { enabled: false, reserveTokens: 256, keepRecentTokens: 20 } });
+    const manager = worker.session.sessionManager;
+    manager.appendMessage({ role: "user", content: "old ".repeat(100), timestamp: 1 });
+    manager.appendMessage({ role: "user", content: "new ".repeat(100), timestamp: 2 });
+    const old = manager.getBranch().find(e => e.type === "message");
+    manager.appendContextEdit(old.id, { content: "edited old ".repeat(100) });
+    const before = structuredClone(manager.getEntries()), leaf = manager.getLeafId();
+    const state = structuredClone(worker.session.agent.state.messages), beforeEvents = structuredClone(events);
+    worker.coordinator.controller = new AbortController();
+    const controller = worker.coordinator.controller;
+    const prepared = await worker.coordinator.withServiceMutation(() => prepareActorCompaction({ sdk: external.sdk, session: worker.session, capture }));
+    assert(prepared.preparation.messagesToSummarize.some(m => m.content === "edited old ".repeat(100)));
+    assert.equal(providerCalls, 0); assert.equal(activeHooks, 0);
+    assert.deepEqual(manager.getEntries(), before); assert.equal(manager.getLeafId(), leaf);
+    assert.deepEqual(worker.session.agent.state.messages, state);
+    assert.deepEqual(events, beforeEvents, "service compaction events must not become user notifications");
+    assert.equal(worker.coordinator.controller, controller); assert.equal(controller.signal.aborted, false);
+    assert.equal(worker.coordinator.serviceMutation, false); assert.equal(worker.session.isIdle, true);
+    await worker.handle({ type: "prompt", message: "subsequent input" }); await worker.coordinator.waitForIdle();
+    assert.equal(providerCalls, 1, "the independent active owner still dispatches after preparation");
+  } finally { await worker.close(); }
 });

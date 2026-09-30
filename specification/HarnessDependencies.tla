@@ -1,9 +1,9 @@
 ----------------------- MODULE HarnessDependencies -----------------------
 EXTENDS Sequences, FiniteSets, Naturals
 VARIABLES operation, stage, extras, loaded, hook, owner, summarySource,
-          summaryWrites, externalFiles, localConfig, projection, installed, requestScope, requestMode, sourceData, resultData
+          summaryWrites, externalFiles, localConfig, projection, installed, requestScope, requestMode, sourceData, resultData, runtimeIdentity
 vars == <<operation, stage, extras, loaded, hook, owner, summarySource,
-          summaryWrites, externalFiles, localConfig, projection, installed, requestScope, requestMode, sourceData, resultData>>
+          summaryWrites, externalFiles, localConfig, projection, installed, requestScope, requestMode, sourceData, resultData, runtimeIdentity>>
 ExtraChoices == {<<>>, <<"user-a">>, <<"user-b", "user-a", "user-b", "harness">>}
 RECURSIVE Normalize(_)
 Normalize(xs) == IF Len(xs) = 0 THEN <<>>
@@ -19,38 +19,41 @@ Init == /\ operation \in {"install", "start", "smoke", "uninstall"}
         /\ requestScope \in {"current", "stale", "foreign", "altered"}
         /\ requestMode \in {"native", "ordinary", "invalid"}
         /\ sourceData = <<"real-call", "real-result", "signature">> /\ resultData = <<>>
+        /\ runtimeIdentity \in {"accepted", "wrong-version", "mixed-graph", "modified-bundle"}
         /\ installed = FALSE
 Install == /\ stage = "new" /\ operation = "install"
            /\ stage' = "installed" /\ installed' = TRUE
            /\ UNCHANGED <<operation, extras, loaded, hook, owner, summarySource,
-                          summaryWrites, externalFiles, localConfig, projection, requestScope, requestMode, sourceData, resultData>>
+                          summaryWrites, externalFiles, localConfig, projection, requestScope, requestMode, sourceData, resultData, runtimeIdentity>>
 Uninstall == /\ ((stage = "new" /\ operation = "uninstall") \/ stage = "installed")
              /\ stage' = "removed" /\ installed' = FALSE
              /\ UNCHANGED <<operation, extras, loaded, hook, owner, summarySource,
-                            summaryWrites, externalFiles, localConfig, projection, requestScope, requestMode, sourceData, resultData>>
+                            summaryWrites, externalFiles, localConfig, projection, requestScope, requestMode, sourceData, resultData, runtimeIdentity>>
 Start == /\ stage = "new" /\ operation = "start"
-         /\ stage' = "ready" /\ loaded' = <<"harness">> \o Normalize(extras)
+         /\ stage' = IF runtimeIdentity = "accepted" THEN "ready" ELSE "rejected"
+         /\ loaded' = IF runtimeIdentity = "accepted" THEN <<"harness">> \o Normalize(extras) ELSE <<>>
          /\ UNCHANGED <<operation, extras, hook, owner, summarySource,
-                        summaryWrites, externalFiles, localConfig, projection, installed, requestScope, requestMode, sourceData, resultData>>
-Smoke == /\ stage = "new" /\ operation = "smoke" /\ stage' = "passed"
+                        summaryWrites, externalFiles, localConfig, projection, installed, requestScope, requestMode, sourceData, resultData, runtimeIdentity>>
+Smoke == /\ stage = "new" /\ operation = "smoke"
+         /\ stage' = IF runtimeIdentity = "accepted" THEN "passed" ELSE "rejected"
          /\ UNCHANGED <<operation, extras, loaded, hook, owner, summarySource,
-                        summaryWrites, externalFiles, localConfig, projection, installed, requestScope, requestMode, sourceData, resultData>>
+                        summaryWrites, externalFiles, localConfig, projection, installed, requestScope, requestMode, sourceData, resultData, runtimeIdentity>>
 Compact == /\ stage = "ready" /\ stage' = "compacting" /\ owner' = "coordinator"
            /\ summarySource' = CASE hook = "absent" -> "stock-service"
                                     [] hook = "custom" -> "active-hook"
                                     [] OTHER -> "none"
            /\ UNCHANGED <<operation, extras, loaded, hook, summaryWrites,
-                          externalFiles, localConfig, projection, installed, requestScope, requestMode, sourceData, resultData>>
+                          externalFiles, localConfig, projection, installed, requestScope, requestMode, sourceData, resultData, runtimeIdentity>>
 Finish == /\ stage = "compacting" /\ stage' = "settled" /\ owner' = "none"
           /\ summaryWrites' = IF hook = "cancel" THEN 0 ELSE 1
           /\ UNCHANGED <<operation, extras, loaded, hook, summarySource,
-                         externalFiles, localConfig, projection, installed, requestScope, requestMode, sourceData, resultData>>
+                         externalFiles, localConfig, projection, installed, requestScope, requestMode, sourceData, resultData, runtimeIdentity>>
 Project == /\ stage \in {"ready", "compacting", "settled"} /\ projection = "none"
            /\ projection' = IF requestScope = "current" /\ requestMode \in {"native", "ordinary"}
                              THEN "returned" ELSE "rejected"
            /\ resultData' = IF projection' = "returned" THEN sourceData ELSE <<>>
            /\ UNCHANGED <<operation, stage, extras, loaded, hook, owner, summarySource,
-                          summaryWrites, externalFiles, localConfig, installed, requestScope, requestMode, sourceData>>
+                          summaryWrites, externalFiles, localConfig, installed, requestScope, requestMode, sourceData, runtimeIdentity>>
 Next == Install \/ Uninstall \/ Start \/ Smoke \/ Compact \/ Finish \/ Project
 StandaloneDependencies == stage = "new" => ENABLED (Install \/ Uninstall \/ Start \/ Smoke)
 OnlyExplicitExtras == loaded # <<>> => loaded = <<"harness">> \o Normalize(extras)
@@ -67,5 +70,7 @@ ProjectionScope == projection = "returned" => requestScope = "current" /\ reques
 ProjectionUsesCanonical == projection = "returned" => resultData = sourceData
 ProjectionReadOnly == sourceData = <<"real-call", "real-result", "signature">>
 RejectedHasNoResult == projection = "rejected" => resultData = <<>>
+ExactStockGraph == stage \in {"ready", "passed", "compacting", "settled"} => runtimeIdentity = "accepted"
+RejectedRuntimeNotLoaded == stage = "rejected" => loaded = <<>>
 Spec == Init /\ [][Next]_vars
 =============================================================================

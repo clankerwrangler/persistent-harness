@@ -9,7 +9,7 @@ This repository contains the harness additions and nine generic capability skill
 Requirements:
 
 - Linux with `/proc`, Node.js 24 or newer, Bash, Perl, and standard Unix utilities.
-- Unmodified `@earendil-works/pi-coding-agent` **0.85.1**, including its matching SDK dependencies.
+- Unmodified `@earendil-works/pi-coding-agent` **0.99.1**, including its matching SDK dependencies.
 - CPython 3.12.12, IPython 9.10.0, and dill 0.3.8, either provisioned by the harness or supplied explicitly.
 
 Follow [Dependencies and installation](docs/DEPENDENCIES.md) to install Pi and configure the Python runtime. Then, from this checkout:

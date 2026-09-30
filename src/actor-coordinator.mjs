@@ -1,6 +1,5 @@
 import { createActorStreamPlanner } from "./actor-stream.mjs";
 import { evaluateInferenceRetry } from "./inference-retry.mjs";
-import { estimateActorContextTokens } from "./actor-compaction.mjs";
 import { randomUUID } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { isDeepStrictEqual } from "node:util";
@@ -87,7 +86,7 @@ export class ActorCoordinator {
         && !isDeepStrictEqual(request.entries, projectCanonicalBranch({ entries, leafId }).entries))) {
         throw new Error("canonical context request does not match the current session branch");
       }
-      return this.projectContext({ entries, leafId, mode: request.mode, buildSessionContext: this.sdk.buildSessionContext });
+      return this.projectContext({ entries, leafId, mode: request.mode, buildSessionProjection: this.sdk.buildSessionProjection });
     };
     this.runner.bindCommandContext({ waitForIdle: () => this.waitForIdle(), newSession: fixedIdentity, fork: fixedIdentity,
       switchSession: fixedIdentity, reload: async () => { throw new Error("actor reload belongs to the supervisor generation lifecycle"); },
@@ -128,7 +127,7 @@ export class ActorCoordinator {
     return { model: this.session.model, thinkingLevel: this.session.thinkingLevel, isStreaming: this.isBusy,
       isCompacting: this.compacting, isRetrying: this.retrying, retryAttempt: this.retryAttemptNumber - 1, steeringMode: this.steeringMode, followUpMode: this.followUpMode,
       sessionFile: this.manager.getSessionFile(), sessionId: this.manager.getSessionId(), sessionName: this.manager.getSessionName(),
-      messageCount: this.manager.buildSessionContext().messages.length, pendingMessageCount: this.queue.length,
+      messageCount: this.manager.buildSessionProjection().messages.length, pendingMessageCount: this.queue.length,
       autoCompactionEnabled: this.session.autoCompactionEnabled, ...(this.failure ? { error: this.failure.message } : {}) };
   }
   async emit(event) {
@@ -244,7 +243,7 @@ export class ActorCoordinator {
   }
   async recover() {
     if (this.recoveryDone) return;
-    const args = { entries: this.manager.getEntries(), leafId: this.manager.getLeafId(), buildSessionContext: this.sdk.buildSessionContext, mode: "native" };
+    const args = { entries: this.manager.getEntries(), leafId: this.manager.getLeafId(), buildSessionProjection: this.sdk.buildSessionProjection, mode: "native" };
     if (this.planRecovery) for (const result of this.planRecovery({ ...args, timestamp: Date.now() })) await this.commit(result);
     for (const entry of this.manager.getBranch()) if (entry.type === "message" && entry.message.role === "assistant")
       for (const part of entry.message.content) if (part.type === "toolCall") this.seenCalls.add(part.id);
@@ -258,7 +257,8 @@ export class ActorCoordinator {
     const latestCompaction = this.sdk.getLatestCompactionEntry(entries);
     const assistant = [...entries].reverse().find(entry => entry.type === "message" && entry.message.role === "assistant" && !["error", "aborted"].includes(entry.message.stopReason));
     if (!assistant || (latestCompaction && assistant.message.timestamp <= Date.parse(latestCompaction.timestamp))) return false;
-    const tokens = estimateActorContextTokens({ sdk: this.sdk, core: this.core, entries: this.manager.getEntries(), leafId: this.manager.getLeafId() });
+    const tokens = this.session.getContextUsage()?.tokens;
+    if (tokens == null) return false;
     if (!this.sdk.shouldCompact(tokens, this.session.model.contextWindow, settings)) return false;
     await this.compact(undefined, { automatic: true, reason: "threshold", willRetry: false });
     return true;
@@ -349,9 +349,9 @@ export class ActorCoordinator {
     } finally { this.retrying = false; }
   }
   projectedMessages() {
-    if (!this.projectContext) return this.manager.buildSessionContext().messages;
+    if (!this.projectContext) return this.manager.buildSessionProjection().messages;
     const projection = this.projectContext({ entries: this.manager.getEntries(), leafId: this.manager.getLeafId(),
-      buildSessionContext: this.sdk.buildSessionContext, mode: nativeModel(this.session.model) ? "native" : "ordinary" });
+      buildSessionProjection: this.sdk.buildSessionProjection, mode: nativeModel(this.session.model) ? "native" : "ordinary" });
     const blocking = projection.diagnostics?.filter(item => item.severity === "blocking") ?? [];
     if (blocking.length) throw new Error(`canonical context is not ready: ${blocking.map(item => item.code).join(", ")}`);
     return projection.messages;
@@ -527,7 +527,7 @@ export class ActorCoordinator {
   async settle() {
     if (this.tasks.size || this.flight || !this.running) return;
     await this.commitTail;
-    await this.emit({ type: "agent_end", messages: this.manager.buildSessionContext().messages });
+    await this.emit({ type: "agent_end", messages: this.manager.buildSessionProjection().messages });
     this.running = false; this.stopping = false;
     await this.emit({ type: "agent_settled" }); this.notifyIdle();
   }

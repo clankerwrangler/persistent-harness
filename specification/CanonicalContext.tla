@@ -94,13 +94,12 @@ FirstKeptBad ==
  IF target.effective = "none" THEN FALSE
  ELSE IF target.effective = "old" THEN
     target.oldAnchor # "valid" \/ ~target.oldSummary
- ELSE target.anchor \notin {"old", "recent", "self"} \/ ~target.latestSummary \/
-      (target.anchor = "old" /\ ~target.oldSummary)
+ ELSE target.anchor \notin {"old", "recent", "self"} \/ ~target.latestSummary
 FirstKeptExpected ==
  IF target.effective = "none" THEN <<"c1", "user">>
  ELSE IF target.effective = "old" THEN <<"summaryOld", "c1", "user">>
  ELSE <<"summaryLatest">> \o
-   (CASE target.anchor = "old" -> <<"summaryOld", "user">>
+   (CASE target.anchor = "old" -> <<"user">>
       [] target.anchor = "recent" -> <<"user">>
       [] OTHER -> <<>>)
 FirstKeptInit ==
@@ -133,6 +132,35 @@ FirstKeptTailNotResult == phase = "planned" /\ ~FirstKeptBad /\ ~target.actualRe
 FirstKeptObsoleteIgnored == phase # "input" /\ target.effective = "latest" /\
  target.anchor \in {"recent", "self"} /\ target.latestSummary => ~rejected
 FirstKeptRetainedOldSummary == phase # "input" /\ target.effective = "latest" /\
- target.anchor = "old" /\ ~target.oldSummary => rejected
+ target.anchor = "old" /\ target.latestSummary => ~rejected
+
+\* Stock projection owns edit application. The harness verifies its raw source,
+\* allows content-only changes with active edit provenance, and never derives
+\* recovery/admission from a replacement or an omitted known result.
+ProjectionInit ==
+ /\ target \in [source: {"selected", "foreign", "altered"},
+       content: {"same", "edited", "omitted"}, edit: BOOLEAN,
+       identity: {"same", "changed"}, actualResult: BOOLEAN]
+ /\ canonical = target /\ phase = "input"
+ /\ selectedCalls = {} /\ selectedResults = {} /\ native = {} /\ cut = 0
+ /\ projected = <<>> /\ outstanding = {} /\ plans = {} /\ executed = {}
+ /\ overlay = FALSE /\ rejected = FALSE /\ failed = {} /\ blocking = {}
+ /\ mode = "native" /\ reused = FALSE /\ metadata = "selected-valid"
+ProjectionBad == target.source # "selected" \/ target.identity # "same" \/
+                 (target.content = "edited" /\ ~target.edit)
+ProjectionStep ==
+ /\ phase = "input" /\ phase' = "projected"
+ /\ rejected' = ProjectionBad
+ /\ projected' = IF ProjectionBad \/ target.content = "omitted" THEN <<>> ELSE <<target.content>>
+ /\ outstanding' = IF ProjectionBad \/ target.actualResult THEN {} ELSE {"c1"}
+ /\ UNCHANGED <<target, mode, metadata, reused, canonical, selectedCalls,
+      selectedResults, native, cut, plans, executed, failed, blocking, overlay>>
+ProjectionNext == ProjectionStep \/ Plan \/ (phase = "planned" /\ UNCHANGED vars)
+ProjectionSpec == ProjectionInit /\ [][ProjectionNext]_vars
+ProjectionSource == phase # "input" /\ ~rejected =>
+ target.source = "selected" /\ target.identity = "same"
+ProjectionEditProvenance == phase # "input" /\ ~rejected /\ target.content = "edited" => target.edit
+ProjectionRawRecovery == target.actualResult => plans = {}
+ProjectionReject == phase # "input" /\ ProjectionBad => rejected /\ projected = <<>> /\ plans = {}
 
 =============================================================================

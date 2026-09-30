@@ -6,15 +6,15 @@ import { pathToFileURL } from "node:url";
 import { resolveExternalPi } from "../../src/external-pi.mjs";
 
 const officialEntries = {
-  "dist/index.js": "82cb4ea864f3d8816c06bc8f2f2d9a8d82d883297af179dc69d287d042834844",
+  "dist/index.js": "5482298b995db935f7b96f5d6056fa1c36ac6fc80456be594ef65b83c62b0d30",
   "dist/cli.js": "8189b66abc4f9f431dbb70941dcba690d76d040de1fbfff212886be35a53639d",
-  "dist/bundle/index.js": "ef91447930bcf6a6e9b51ae28f859755c7eaa573607c5a75ee86526084d3d67c",
-  "dist/bundle/cli.js": "e6d7fcf36a239cf3746e67ddf4222081ac01a601b85a3ee688bdfe9c161d754c"
+  "dist/bundle/index.js": "df1f4c36758e3d339d42c6caebb2fca1d9f415de658d56b7b1fa6a9a808f0aa5",
+  "dist/bundle/cli.js": "e79626f2dd6f94aa45d30f3fa63cd84319a6eefcd150b353cfaf274366926774"
 };
 
 export async function acceptedNativeRuntime() {
   const command = process.env.PI_HARNESS_PI_COMMAND, module = process.env.PI_HARNESS_PI_MODULE;
-  assert(command && module, "Use explicit stock 0.85.1 CLI/SDK test seams");
+  assert(command && module, "Use explicit stock 0.99.1 CLI/SDK test seams");
   const paths = await resolveExternalPi();
   const [cli, sdk] = await Promise.all([realpath(command), realpath(module)]);
   assert.equal(sdk, paths.sdk, "Use the selected public SDK entry, not another module");

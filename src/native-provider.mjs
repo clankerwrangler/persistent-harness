@@ -80,7 +80,7 @@ function callIds(call) {
   return parts;
 }
 // Deliberately not transformMessages(): it manufactures missing tool outputs.
-function replay(model, messages, grammar) {
+function replay(api, model, messages, grammar, { codex, anchorsAdditions, convert } = {}) {
   const input = [], identities = new Map();
   for (const msg of messages) for (const block of msg.role === "assistant" ? msg.content : []) {
     if (block.type !== "toolCall") continue;
@@ -88,8 +88,16 @@ function replay(model, messages, grammar) {
     if (identities.has(block.id) && !equal(identities.get(block.id), ids)) fail("ambiguous_replay_call_id");
     identities.set(block.id, ids);
   }
-  for (const msg of messages) {
-    if (msg.role === "user") input.push({ role: "user", content: inputContent(msg.content) });
+  for (const [index, msg] of messages.entries()) {
+    if (msg.role === "system") {
+      // Public stock helpers own checkpoint/delta semantics. Only wire placement
+      // stays here because transforming native history would synthesize results.
+      if (index > 0 && anchorsAdditions && msg.toolsAdded?.length)
+        input.push({ type: "additional_tools", role: "developer", tools: convert(msg.toolsAdded) });
+      const text = index === 0 ? api.getSystemMessageText(msg) : api.renderSystemMessageUpdate(msg);
+      if (text && (index > 0 || !codex))
+        input.push({ role: model.reasoning && model.compat?.supportsDeveloperRole !== false ? "developer" : "system", content: text });
+    } else if (msg.role === "user") input.push({ role: "user", content: inputContent(msg.content) });
     else if (msg.role === "toolResult") {
       const [callId] = identities.get(msg.toolCallId) ?? callIds({ ...msg, id: msg.toolCallId });
       const content = inputContent(msg.content);
@@ -128,22 +136,31 @@ function replay(model, messages, grammar) {
 }
 function buildBody(api, responsesApi, model, context, options) {
   const codex = model.api === "openai-codex-responses";
-  const tools = responsesApi.convertResponsesTools(context.tools ?? [], {
-    supportsStrictMode: model.compat?.supportsStrictMode ?? codex,
-    supportsOpenAIGrammarTools: model.compat?.supportsOpenAIGrammarTools ?? false,
-    strict: codex ? null : false,
-  });
+  context = api.resolveTranscript(api.normalizeContext(context), model.compat?.supportsMidConvoSystemMessages);
+  const { requestTools, anchorsAdditions } = api.resolveTranscriptTools(context.messages, model.compat?.supportsAdditionalTools);
   const grammar = new Map();
-  tools.forEach((tool, index) => {
-    const source = context.tools[index];
-    if (tool.type === "custom") grammar.set(tool.name, Object.keys(source.parameters.properties)[0]);
-    if (source.async === true && model.compat?.supportsAsyncTools === true) tool.async = true;
-  });
+  const convert = definitions => {
+    const tools = responsesApi.convertResponsesTools(definitions, {
+      supportsStrictMode: model.compat?.supportsStrictMode ?? codex,
+      supportsOpenAIGrammarTools: model.compat?.supportsOpenAIGrammarTools ?? false,
+      strict: codex ? null : false,
+    });
+    tools.forEach((tool, index) => {
+      const source = definitions[index];
+      if (tool.type === "custom") grammar.set(tool.name, Object.keys(source.parameters.properties)[0]);
+      if (source.async === true && model.compat?.supportsAsyncTools === true) tool.async = true;
+    });
+    return tools;
+  };
+  convert(api.getDeclaredTools(context.messages));
+  const definitions = convert(api.getCurrentTools(context.messages));
+  const tools = convert(requestTools);
   if (new Set(tools.map((tool) => tool.name)).size !== tools.length) fail("duplicate_tool_name");
-  const input = replay(model, context.messages, grammar);
-  if (!codex && context.systemPrompt) input.unshift({ role: model.reasoning && model.compat?.supportsDeveloperRole !== false ? "developer" : "system", content: context.systemPrompt });
+  const input = replay(api, model, context.messages, grammar, { codex, anchorsAdditions, convert });
+  const initial = api.getInitialSystemMessage(context.messages);
+  const systemPrompt = initial ? api.getSystemMessageText(initial) : "";
   const body = { model: model.id, stream: true, store: false, input, tools,
-    ...(codex ? { instructions: context.systemPrompt || "You are a helpful assistant.", text: { verbosity: options.textVerbosity ?? "low" }, parallel_tool_calls: true,
+    ...(codex ? { instructions: systemPrompt || "You are a helpful assistant.", text: { verbosity: options.textVerbosity ?? "low" }, parallel_tool_calls: true,
       include: ["reasoning.encrypted_content"], tool_choice: options.toolChoice ?? "auto" } : {}) };
   if (options.cacheRetention !== "none" && options.sessionId) body.prompt_cache_key = options.sessionId;
   if (options.maxTokens !== undefined) body.max_output_tokens = Math.max(16, options.maxTokens);
@@ -156,7 +173,7 @@ function buildBody(api, responsesApi, model, context, options) {
     if (model.thinkingLevelMap?.[level] !== null) body.reasoning = { effort, ...(effort !== "none" ? { summary: options.reasoningSummary ?? "auto" } : {}) };
     body.include = ["reasoning.encrypted_content"];
   }
-  return { body: Object.assign(body, model.samplingParams, options.samplingParams), grammar, definitions: clone(tools) };
+  return { body: Object.assign(body, model.samplingParams, options.samplingParams), grammar, definitions: clone(definitions) };
 }
 function endpoint(model) {
   const base = model.baseUrl.replace(/\/+$/, "");
@@ -322,11 +339,11 @@ export function createNativeProviderAdapter({ api, responsesApi, modelRuntime, t
         if (full.previous_response_id !== undefined) fail("use_previousResponseId_option_with_full_context");
         const opted = new Map();
         if (model.compat?.supportsAsyncTools === true && full.model === model.id) {
-          for (const tool of context.tools ?? []) {
-            const advertised = (full.tools ?? []).filter((candidate) => candidate.name === tool.name);
-            const expected = definitions.find((definition) => definition.name === tool.name);
-            if (tool.async === true && advertised.length === 1 && advertised[0].async === true &&
-                advertised[0].type === expected.type && equal(advertised[0].parameters, expected.parameters) && equal(advertised[0].format, expected.format)) opted.set(tool.name, expected.type);
+          const declarations = [...(full.tools ?? []), ...full.input.filter(item => item.type === "additional_tools").flatMap(item => item.tools ?? [])];
+          for (const expected of definitions) {
+            const advertised = declarations.filter(candidate => candidate.name === expected.name);
+            if (expected.async === true && advertised.length === 1 && advertised[0].async === true &&
+                advertised[0].type === expected.type && equal(advertised[0].parameters, expected.parameters) && equal(advertised[0].format, expected.format)) opted.set(expected.name, expected.type);
           }
         }
         providerTools = (full.tools ?? []).some((tool) => !["function", "custom"].includes(tool.type));
@@ -541,7 +558,7 @@ export function createNativeProviderAdapter({ api, responsesApi, modelRuntime, t
               if (nonempty(rawResponseId)) entry.retired.responses.add(rawResponseId);
               for (const id of itemIds.keys()) entry.retired.items.add(id);
               for (const id of callIds.keys()) entry.retired.calls.add(id);
-              entry.chain = { id: output.responseId, template: clone(template(full)), baseline: [...full.input, ...replay(model, [output], grammar)] };
+              entry.chain = { id: output.responseId, template: clone(template(full)), baseline: [...full.input, ...replay(api, model, [output], grammar)] };
               if (!options.sessionId || options.cacheRetention === "none" || !nonempty(rawResponseId)) disconnect();
               else {
                 entry.idleTimer = setTimeout(() => { if (connection === entry) disconnect(); }, limits.cacheTtlMs);

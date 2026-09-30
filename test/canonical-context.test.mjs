@@ -20,7 +20,7 @@ after(() => {
 
 const sdkEntry = process.env.PI_HARNESS_PI_MODULE;
 assert(sdkEntry && path.isAbsolute(sdkEntry), "Set PI_HARNESS_PI_MODULE to the exact STOCK dist/index.js");
-const { buildSessionContext, convertToLlm, SessionManager } = await import(pathToFileURL(sdkEntry));
+const { buildSessionProjection, convertToLlm, SessionManager } = await import(pathToFileURL(sdkEntry));
 const aiPackage = findPackageJSON("@earendil-works/pi-ai", pathToFileURL(sdkEntry));
 const { transformMessages } = await import(pathToFileURL(path.join(path.dirname(aiPackage), "dist/api/transform-messages.js")));
 const model = { api: "openai-responses", provider: "fixture", id: "fixture", name: "fixture",
@@ -43,7 +43,7 @@ const messageEntry = (id, parentId, message) => ({ type: "message", id, parentId
 function chain(messages) {
   return messages.map((message, i) => messageEntry(`e${i}`, i ? `e${i - 1}` : null, message));
 }
-const input = (entries, mode = "native", leafId = entries.at(-1)?.id ?? null) => ({ entries, leafId, mode, buildSessionContext });
+const input = (entries, mode = "native", leafId = entries.at(-1)?.id ?? null) => ({ entries, leafId, mode, buildSessionProjection });
 const project = (entries, mode, leafId) => projectCanonicalContext(input(entries, mode, leafId));
 function rejects(entries, code, mode = "native", leafId) {
   assert.throws(() => project(entries, mode, leafId), error => error instanceof CanonicalContextError && error.code === code);
@@ -254,7 +254,7 @@ test("selected summary metadata, rich roles, images, and kept compaction remain 
   entries.push({ type: "compaction", id: "compact", parentId: "custom", timestamp, summary: "compaction bytes",
     firstKeptEntryId: "e1", tokensBefore: 99, usage, details: { cumulative: ["two"] }, fromHook: true,
     provenance: { summary: "source" } });
-  const before = JSON.stringify(entries), plain = buildSessionContext(entries, "compact").messages;
+  const before = JSON.stringify(entries), plain = buildSessionProjection(entries, "compact").messages;
   const projected = project(entries).messages;
   assert.deepEqual(projected.map(m => m.role), plain.map(m => m.role));
   assert.deepEqual(projected.slice(1, 3), plain.slice(1, 3));
@@ -267,14 +267,14 @@ test("selected summary metadata, rich roles, images, and kept compaction remain 
   assert.equal(JSON.stringify(entries), before);
 });
 
-test("repeated compactions preserve the latest summary and older kept summaries with metadata", () => {
+test("repeated compactions preserve only the stock latest summary with source metadata", () => {
   const entries = chain([user(), user("kept")]);
   entries.push({ type: "compaction", id: "c1", parentId: "e1", timestamp, summary: "same",
     tokensBefore: 1, firstKeptEntryId: "e1", details: { generation: 1 } });
   entries.push({ type: "compaction", id: "c2", parentId: "c1", timestamp, summary: "same",
     tokensBefore: 1, firstKeptEntryId: "e1", details: { generation: 2 } });
   assert.deepEqual(project(entries).messages.filter(m => m.role === "compactionSummary").map(m => m.details),
-    [{ generation: 2 }, { generation: 1 }]);
+    [{ generation: 2 }]);
 });
 
 test("signature amendments validate and overlay selected history before compaction pruning", () => {
@@ -353,7 +353,7 @@ test("effective firstKept ignores unused retainedTail extras with exact public h
       summary: "summary", firstKeptEntryId, tokensBefore: 10, retainedTail };
     const selected = [...entries, compact], before = JSON.stringify(selected);
     const projection = project(selected);
-    assert.deepEqual(projection.messages, buildSessionContext(selected, "compact").messages);
+    assert.deepEqual(projection.messages, buildSessionProjection(selected, "compact").messages);
     assert(!projection.messages.some(message => Object.hasOwn(message, "retainedTail")));
     assert.equal(projection.outstanding.length, 1);
     assert.equal(projection.outstanding[0].toolCallId, "pending");
@@ -377,7 +377,7 @@ test("effective retained-only or invalid firstKept fails visibly instead of drop
     rejects(all, "ERR_CONTEXT_COMPACTION", "native", "later");
     assert.deepEqual(project(all, "native", "e0").messages, [entries[0].message]);
     // The SDK silently omits an unsupported kept range; the adapter never does.
-    assert.equal(buildSessionContext(all, "compact").messages.length, 1);
+    assert.equal(buildSessionProjection(all, "compact").messages.length, 1);
   }
 });
 
@@ -392,14 +392,14 @@ test("superseded pruned checkpoint semantics never block a valid effective first
     const later = messageEntry("later", latest.id, user("later"));
     const all = [original, old, kept, latest, later], before = JSON.stringify(all);
     const projection = project(all);
-    assert.deepEqual(projection.messages, buildSessionContext(all, later.id).messages);
+    assert.deepEqual(projection.messages, buildSessionProjection(all, later.id).messages);
     assert.deepEqual(projection.outstanding, []);
     assert.deepEqual(projectCanonicalBranch({ entries: all, leafId: later.id }).entries, all);
     assert.equal(JSON.stringify(all), before);
   }
 });
 
-test("older kept checkpoints retain summaries but their anchors and tails are not effective", () => {
+test("older kept checkpoint summaries, anchors and tails are not effective", () => {
   for (const oldAnchor of [undefined, "missing", "sibling"]) {
     const original = messageEntry("original", null, user("original"));
     const old = { type: "compaction", id: "old", parentId: original.id, timestamp, summary: "old summary",
@@ -409,12 +409,12 @@ test("older kept checkpoints retain summaries but their anchors and tails are no
       summary: "latest summary", tokensBefore: 40, firstKeptEntryId: old.id };
     const all = [original, old, kept, latest], before = JSON.stringify(all);
     const projection = project(all);
-    const oracle = buildSessionContext(all, latest.id).messages;
+    const oracle = buildSessionProjection(all, latest.id).messages;
     assert.deepEqual(projection.messages, oracle.map(message => message.summary === old.summary ? { ...message, usage } : message));
-    assert.deepEqual(projection.messages.map(message => message.role), ["compactionSummary", "compactionSummary", "user"]);
+    assert.deepEqual(projection.messages.map(message => message.role), ["compactionSummary", "user"]);
     assert.equal(JSON.stringify(all), before);
     old.summary = null;
-    rejects(all, "ERR_CONTEXT_COMPACTION");
+    assert.deepEqual(project(all).messages, projection.messages);
   }
 });
 
@@ -449,7 +449,7 @@ test("canonical branch validation never defaults to another leaf or repairs malf
   rejects(cycle, "ERR_CONTEXT_BRANCH_CYCLE");
   const missing = structuredClone(entries); missing[0].parentId = "missing";
   rejects(missing, "ERR_CONTEXT_BRANCH_MISSING");
-  assert.throws(() => projectCanonicalContext({ entries, mode: "native", buildSessionContext }), { code: "ERR_CONTEXT_LEAF" });
+  assert.throws(() => projectCanonicalContext({ entries, mode: "native", buildSessionProjection }), { code: "ERR_CONTEXT_LEAF" });
   rejects(entries, "ERR_CONTEXT_MODE", "other");
 });
 
@@ -480,13 +480,13 @@ test("injected helper failures and invalid results never fall back to raw or ano
     [() => { throw new Error("private helper error"); }, "ERR_CONTEXT_HELPER_FAILED"],
     [() => Promise.resolve({ messages: [] }), "ERR_CONTEXT_HELPER_RESULT"],
     [() => ({ messages: "wrong" }), "ERR_CONTEXT_HELPER_RESULT"],
-    [() => ({ messages: [assistant("wrong", [call("other")])] }), "ERR_CONTEXT_CALL_PROJECTION"],
-    [() => ({ messages: [{ ...result("x"), isError: true }] }), "ERR_CONTEXT_RESULT_PROJECTION"],
-  ]) assert.throws(() => projectCanonicalContext({ ...input(entries), buildSessionContext: helper }), { code });
+    [() => { const message = assistant("wrong", [call("other")]); return { entries: [{ sourceEntry: entries[0], messages: [message] }], messages: [message] }; }, "ERR_CONTEXT_CALL_PROJECTION"],
+    [() => { const message = { ...result("x"), isError: true }; return { entries: [{ sourceEntry: entries[1], messages: [message] }], messages: [message] }; }, "ERR_CONTEXT_RESULT_PROJECTION"],
+  ]) assert.throws(() => projectCanonicalContext({ ...input(entries), buildSessionProjection: helper }), { code });
   const snapshot = JSON.stringify(entries);
-  projectCanonicalContext({ ...input(entries), buildSessionContext: copied => {
+  projectCanonicalContext({ ...input(entries), buildSessionProjection: copied => {
     copied[0].message.content[0].arguments.code = "mutated clone";
-    return { messages: [] };
+    return { entries: [], messages: [] };
   } });
   assert.equal(JSON.stringify(entries), snapshot);
 });
@@ -508,7 +508,7 @@ test("STOCK SessionManager reopen preserves canonical file bytes through project
     const file = path.join(root, `session-${legacy}.jsonl`);
     await writeFile(file, bytes, { flag: "wx", mode: 0o600 });
     const manager = SessionManager.open(file, root);
-    const arguments_ = { entries: manager.getEntries(), leafId: manager.getLeafId(), buildSessionContext, mode: "native" };
+    const arguments_ = { entries: manager.getEntries(), leafId: manager.getLeafId(), buildSessionProjection, mode: "native" };
     const projection = projectCanonicalContext(arguments_);
     assert.equal(projection.outstanding[0].toolCallId, "call_target");
     assert.equal(JSON.parse(projection.messages[0].content[0].thinkingSignature).encrypted_content, "fixture-encryption");
@@ -536,7 +536,7 @@ test("exhaustive bounded STOCK compaction/missing-result matrix preserves known 
         const expectedMissing = ["a", "b"].filter((id, i) => !(answerMask & (1 << i)));
         assert.deepEqual(projection.outstanding.map(o => o.toolCallId), expectedMissing);
         assert.deepEqual(planUnknownRecovery({ ...input(entries, mode), timestamp: 0 }).map(r => r.toolCallId), expectedMissing);
-        const expected = buildSessionContext(entries, "compact").messages;
+        const expected = buildSessionProjection(entries, "compact").messages;
         assert.equal(projection.messages.length, expected.length);
         for (const id of ["a", "b"]) {
           const actual = projection.messages.filter(m => m.role === "toolResult" && m.toolCallId === id);
@@ -594,14 +594,14 @@ test("archive lifetime strings do not cap the detached branch or small effective
   assert.equal(entries[3].data.nested.preserved, true);
   for (const mode of ["native", "ordinary"]) {
     let helperCalls = 0;
-    const projection = projectCanonicalContext({ ...input(entries, mode), buildSessionContext: (copied, leaf) => {
+    const projection = projectCanonicalContext({ ...input(entries, mode), buildSessionProjection: (copied, leaf) => {
       helperCalls++;
       assert.notEqual(copied[3].data, entries[3].data);
       copied[3].data.nested.preserved = false;
-      return buildSessionContext(copied, leaf);
+      return buildSessionProjection(copied, leaf);
     } });
     assert.equal(helperCalls, 1, "the second archive copy must not restore the lifetime limit");
-    assert.deepEqual(projection.messages, buildSessionContext(entries, "compact").messages);
+    assert.deepEqual(projection.messages, buildSessionProjection(entries, "compact").messages);
     assert.deepEqual(projection.outstanding.map(c => [c.toolCallId, c.retainedInContext]), [["call_target", false]]);
     assert.deepEqual(planUnknownRecovery({ ...input(entries, mode), timestamp: 1 }).map(r => r.toolCallId), ["call_target"]);
     assert.equal(entries[3].data.nested.preserved, true);
@@ -663,9 +663,9 @@ test("final materialized view retains aggregate string bounds including summary 
   const entries = Array.from({ length: 17 }, (_, i) => ({ type: "branch_summary", id: `summary-${i}`,
     parentId: i ? `summary-${i - 1}` : null, timestamp, fromId: "fixture", summary: "small", details: { payload } }));
   let helperCalls = 0;
-  assert.throws(() => projectCanonicalContext({ ...input(entries), buildSessionContext: (copied, leaf) => {
+  assert.throws(() => projectCanonicalContext({ ...input(entries), buildSessionProjection: (copied, leaf) => {
     helperCalls++;
-    const context = buildSessionContext(copied, leaf);
+    const context = buildSessionProjection(copied, leaf);
     assert(context.messages.every(message => !message.details));
     return context;
   } }), { code: "ERR_CONTEXT_DATA_LIMIT" });
@@ -684,9 +684,9 @@ test("final materialized view jointly bounds pruned outstanding and diagnostic i
   entries.push(messageEntry("kept", entries.at(-1).id, user("small")));
   entries.push({ type: "compaction", id: "compact", parentId: "kept", timestamp, summary: "small", firstKeptEntryId: "kept", tokensBefore: 1 });
   let helperCalls = 0;
-  assert.throws(() => projectCanonicalContext({ ...input(entries), buildSessionContext: (copied, leaf) => {
+  assert.throws(() => projectCanonicalContext({ ...input(entries), buildSessionProjection: (copied, leaf) => {
     helperCalls++;
-    return buildSessionContext(copied, leaf);
+    return buildSessionProjection(copied, leaf);
   } }), { code: "ERR_CONTEXT_DATA_LIMIT" });
   assert.equal(helperCalls, 1, "tiny messages must not hide archive-sized diagnostic/unknown-call identifiers");
 });
@@ -695,10 +695,10 @@ test("final materialized view jointly bounds pruned outstanding and diagnostic i
 function budgetProcess(body) {
   const code = `import assert from "node:assert/strict";
     const { projectCanonicalContext, projectCanonicalBranch, getCanonicalContextStringCodeUnits, CANONICAL_CONTEXT_LIMITS } = await import(${JSON.stringify(new URL("../src/canonical-context.mjs", import.meta.url).href)});
-    const { buildSessionContext } = await import(${JSON.stringify(pathToFileURL(sdkEntry).href)});
+    const { buildSessionProjection } = await import(${JSON.stringify(pathToFileURL(sdkEntry).href)});
     const key = "PI_HARNESS_CONTEXT_STRING_CODE_UNITS";
     const stamp = "2026-01-01T00:00:00Z";
-    const project = (entries, helper = buildSessionContext, mode = "native") => projectCanonicalContext({ entries, leafId: entries.at(-1)?.id ?? null, buildSessionContext: helper, mode });
+    const project = (entries, helper = buildSessionProjection, mode = "native") => projectCanonicalContext({ entries, leafId: entries.at(-1)?.id ?? null, buildSessionProjection: helper, mode });
     ${body}
     console.log(JSON.stringify({ passed: true }));`;
   const env = { ...process.env };
@@ -743,7 +743,7 @@ test("configured materialized copies preserve large content and details in both 
       process.env[key] = "201326592";
       const result = project(entries, (copied, leaf) => {
         process.env[key] = "67108864";
-        return buildSessionContext(copied, leaf);
+        return buildSessionProjection(copied, leaf);
       }, mode);
       assert.deepEqual(result.messages, entries.map(entry => entry.message));
       assert.deepEqual(result.outstanding, []);
@@ -755,7 +755,7 @@ test("configured materialized copies preserve large content and details in both 
     process.env[key] = "201326592";
     assert.equal(project(entries, (copied, leaf) => {
       process.env[key] = "invalid-after-capture";
-      return buildSessionContext(copied, leaf);
+      return buildSessionProjection(copied, leaf);
     }).messages.length, 19);
     assert.throws(() => getCanonicalContextStringCodeUnits(), { code: "ERR_CONTEXT_BUDGET_CONFIG" });
   `);
@@ -771,7 +771,7 @@ test("configured final view still bounds metadata and cannot borrow a later sett
     assert.throws(() => project(summaries, (copied, leaf) => {
       helpers++;
       process.env[key] = "268435456";
-      return buildSessionContext(copied, leaf);
+      return buildSessionProjection(copied, leaf);
     }), { code: "ERR_CONTEXT_DATA_LIMIT" });
     assert.equal(helpers, 1);
     assert.equal(project(summaries).messages.length, 33);
@@ -940,9 +940,9 @@ test("duplicate IDs and STOCK helper tampering remain rejected before omission",
   entries.push(messageEntry("duplicate", "e2", structuredClone(entries[2].message)));
   rejects(entries, "ERR_CONTEXT_DUPLICATE_CALL_ID");
   const valid = failedSuffix();
-  assert.throws(() => projectCanonicalContext({ ...input(valid), buildSessionContext: (selected, leaf) => {
-    const view = buildSessionContext(selected, leaf); view.messages[2].content[0].arguments = { tampered: true }; return view;
-  } }), e => e.code === "ERR_CONTEXT_CALL_PROJECTION");
+  assert.throws(() => projectCanonicalContext({ ...input(valid), buildSessionProjection: (selected, leaf) => {
+    const view = buildSessionProjection(selected, leaf); view.messages[2].content[0].arguments = { tampered: true }; return view;
+  } }), e => e.code === "ERR_CONTEXT_SOURCE_PROJECTION");
 });
 
 test("mixed failed blocks preserve late signature indexes and outstanding admitted recovery", () => {
@@ -1020,15 +1020,13 @@ test("consistent explicit provider identity and valid pre-output retry retain th
 test("canonical result veto survives an effective helper result cut and old validation gates", () => {
   const entries = failedSuffix();
   entries.push(messageEntry("completed", "e2", { ...result("call_wait|fc_wait"), toolName: "wait_for_ipython" }));
-  const view = projectCanonicalContext({ ...input(entries, "ordinary"), buildSessionContext: (selected, leaf) => {
-    const context = buildSessionContext(selected, leaf);
-    context.messages = context.messages.filter(m => m.role !== "toolResult" || m.toolCallId !== "call_wait|fc_wait");
-    return context;
-  } });
+  entries.push({ type: "context_edit", id: "omit-result", parentId: "completed", timestamp,
+    targetId: "completed", replacement: null });
+  const view = project(entries, "ordinary");
   assert.equal(view.diagnostics.some(d => d.code === "UNADMITTED_CALL_OMITTED"), false);
   assert(view.diagnostics.some(d => d.code === "RESULT_PRUNED"));
   assert(view.diagnostics.some(d => d.code === "ORDINARY_ASSISTANT_NOT_REPLAYABLE"));
-  entries.at(-1).message.toolName = "wrong";
+  entries.find(entry => entry.id === "completed").message.toolName = "wrong";
   rejects(entries, "ERR_CONTEXT_RESULT_NAME");
 });
 
@@ -1044,4 +1042,57 @@ test("unsent attempts require not_sent outcome and no response identity", () => 
     report.attempts = [earlier, latest];
     assert.equal(project(entries).diagnostics.some(d => d.code === "UNADMITTED_CALL_OMITTED"), outcome === "not_sent" && responseId === undefined);
   }
+});
+
+
+test("stock context edits preserve canonical identity, branch selection, images and recovery", () => {
+  const manager = SessionManager.inMemory("/synthetic");
+  manager.appendMessage(user());
+  const callId = manager.appendMessage(assistant("a", [call("edited")]));
+  const resultId = manager.appendMessage(result("edited"));
+  const originalLeaf = manager.getLeafId();
+  manager.appendContextEdit(resultId, { content: [{ type: "text", text: "edited result" }, image] });
+  const edited = projectCanonicalContext(input(manager.getEntries(), "native", manager.getLeafId()));
+  assert.deepEqual(edited.messages, buildSessionProjection(manager.getEntries(), manager.getLeafId()).messages);
+  assert.equal(edited.messages.at(-1).content[0].text, "edited result");
+  assert.deepEqual(edited.messages.at(-1).content[1], image);
+  assert.equal(edited.outstanding.length, 0);
+  assert.equal(manager.getEntry(resultId).message.content[0].text, "REAL_edited");
+  assert.equal(projectCanonicalContext(input(manager.getEntries(), "native", originalLeaf)).messages.at(-1).content[0].text, "REAL_edited");
+  manager.appendContextEdit(resultId, null);
+  assert.equal(projectCanonicalContext(input(manager.getEntries(), "native", manager.getLeafId())).messages.some(m => m.role === "toolResult"), false);
+  assert.deepEqual(planUnknownRecovery({ ...input(manager.getEntries(), "native", manager.getLeafId()), timestamp: 1 }), []);
+  manager.branch(callId);
+  manager.appendContextEdit(callId, { content: [{ type: "text", text: "display replacement" }] });
+  const hidden = projectCanonicalContext(input(manager.getEntries(), "native", manager.getLeafId()));
+  assert.equal(hidden.outstanding.length, 1, "an edit never proves execution or completion");
+  assert.equal(hidden.outstanding[0].retainedInContext, false);
+});
+
+test("projected content requires selected source and active edit proof; identity cannot be edited", () => {
+  const entries = chain([assistant("a", [call("c")]), result("c")]);
+  for (const mutate of [
+    view => { view.entries[1].sourceEntry = { ...view.entries[1].sourceEntry, id: "foreign" }; },
+    view => { view.entries[1].messages[0].content[0].text = "unproven"; },
+  ]) assert.throws(() => projectCanonicalContext({ ...input(entries), buildSessionProjection: (copied, leaf) => {
+    const view = structuredClone(buildSessionProjection(copied, leaf)); mutate(view);
+    view.messages = view.entries.flatMap(entry => entry.messages); return view;
+  } }), e => ["ERR_CONTEXT_SOURCE_PROJECTION", "ERR_CONTEXT_RESULT_PROJECTION"].includes(e.code));
+  const manager = SessionManager.inMemory("/synthetic");
+  const a = manager.appendMessage(entries[0].message);
+  manager.appendContextEdit(a, { content: [call("forged")] });
+  assert.throws(() => projectCanonicalContext(input(manager.getEntries(), "native", manager.getLeafId())), { code: "ERR_CONTEXT_CALL_PROJECTION" });
+});
+
+test("stock checkpoint system messages and summary metadata retain exact source provenance", () => {
+  const entries = chain([user("kept"), assistant("a", [{ type: "text", text: "answer" }])]);
+  const systemMessage = { role: "system", content: "checkpoint", sections: { policy: "synthetic" }, timestamp: 2 };
+  entries.push({ type: "compaction", id: "compact", parentId: "e1", timestamp, firstKeptEntryId: "e0",
+    summary: "same text", tokensBefore: 2, systemMessage, details: { source: "compaction" } });
+  const actual = projectCanonicalContext(input(entries));
+  const expected = buildSessionProjection(entries, "compact").messages;
+  assert.deepEqual(actual.messages[0], systemMessage);
+  assert.deepEqual(actual.messages.slice(2), expected.slice(2));
+  assert.equal(actual.messages[1].details.source, "compaction");
+  assert.equal(actual.messages[0].details, undefined);
 });

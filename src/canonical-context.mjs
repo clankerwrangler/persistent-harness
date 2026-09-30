@@ -250,54 +250,54 @@ function validateCompactions(selected) {
   // unused retainedTail extra is not context, an admission, or a recovery result.
   requireThat(identifier(effective.firstKeptEntryId) && kept >= 0 && kept <= latest,
     "ERR_CONTEXT_COMPACTION");
-  for (let i = kept; i <= latest; i++) {
-    const entry = selected[i];
-    if (entry.type !== "compaction") continue;
-    // Older kept compactions contribute summaries, not their own kept ranges.
-    // Superseded compactions before this span have no context semantics to check.
-    requireThat(typeof entry.summary === "string" && Number.isFinite(entry.tokensBefore)
-      && entry.tokensBefore >= 0, "ERR_CONTEXT_COMPACTION");
-  }
+  // Stock 0.99 projects only the latest checkpoint, even if an older one lies
+  // in its retained range. Obsolete summary fields are not model context.
+  requireThat(typeof effective.summary === "string" && Number.isFinite(effective.tokensBefore)
+    && effective.tokensBefore >= 0, "ERR_CONTEXT_COMPACTION");
 }
 
-// STOCK converts summary entries to messages but omits entry-level metadata.
-// Match backwards because kept branch summaries are a suffix of the selected
-// path. This also distinguishes repeated identical summaries after compaction.
-function preserveSummaryMetadata(messages, selected) {
-  let before = selected.length;
-  const leadingCompaction = messages[0]?.role === "compactionSummary"
-    ? selected.findLastIndex(entry => entry.type === "compaction") : -1;
-  for (let i = messages.length - 1; i >= 0; i--) {
-    const message = messages[i];
-    const type = message.role === "branchSummary" ? "branch_summary"
-      : message.role === "compactionSummary" ? "compaction" : null;
-    if (!type) continue;
-    let match = -1;
-    const limit = type === "compaction" && i === 0 ? selected.length : before;
-    for (let j = limit - 1; j >= 0; j--) {
-      if (j === leadingCompaction && i !== 0) continue;
-      if (i === 0 && leadingCompaction !== -1 && j !== leadingCompaction) continue;
-      const entry = selected[j];
-      const raw = entry.type === "message" && isDeepStrictEqual(entry.message, message);
-      const generated = entry.type === type && entry.summary === message.summary
-        && Date.parse(entry.timestamp) === message.timestamp
-        && (type === "branch_summary" ? entry.fromId === message.fromId : entry.tokensBefore === message.tokensBefore);
-      if (raw || generated) {
-        match = j;
-        break;
-      }
-    }
-    requireThat(match !== -1, "ERR_CONTEXT_SUMMARY_SOURCE");
-    const source = selected[match];
-    before = match;
-    if (source.type === "message") continue;
-    for (const [key, value] of Object.entries(source)) {
-      if (!["type", "id", "parentId", "timestamp", "summary", "fromId", "tokensBefore", "firstKeptEntryId", "retainedTail"].includes(key)) {
+// Stock owns branch-local edit application and checkpoint expansion. Preserve
+// entry metadata using its public source provenance, not summary-text matching.
+function projectStockContext(context, selected, stringCodeUnits) {
+  requireThat(isRecord(context) && Array.isArray(context.entries) && Array.isArray(context.messages), "ERR_CONTEXT_HELPER_RESULT");
+  const sources = copyArchive(context.entries.map(entry => entry.sourceEntry)).entries;
+  const groups = copyData(context.entries.map(entry => entry.messages), { stringCodeUnits });
+  requireThat(groups.every(Array.isArray), "ERR_CONTEXT_HELPER_RESULT");
+  const messages = groups.flat();
+  requireThat(isDeepStrictEqual(messages, context.messages), "ERR_CONTEXT_HELPER_RESULT");
+  const byId = new Map(selected.map(entry => [entry.id, entry]));
+  const seen = new Set(), provenance = new WeakMap();
+  for (const source of sources) {
+    requireThat(!seen.has(source.id) && isDeepStrictEqual(source, byId.get(source.id)), "ERR_CONTEXT_SOURCE_PROJECTION");
+    seen.add(source.id);
+  }
+  const edited = new Set(sources.filter(entry => entry.type === "context_edit").map(entry => entry.targetId));
+  groups.forEach((group, index) => {
+    const source = sources[index];
+    for (const message of group) {
+      provenance.set(message, { source, edited: edited.has(source.id) });
+      const generated = source.type === "compaction" && message.role === "compactionSummary"
+        || source.type === "branch_summary" && message.role === "branchSummary";
+      if (!generated) continue;
+      for (const [key, value] of Object.entries(source)) {
+        if (["type", "id", "parentId", "timestamp", "summary", "fromId", "tokensBefore", "firstKeptEntryId", "retainedTail", "systemMessage"].includes(key)) continue;
         requireThat(!Object.hasOwn(message, key) || isDeepStrictEqual(message[key], value), "ERR_CONTEXT_SUMMARY_CONFLICT");
         Object.defineProperty(message, key, { value, enumerable: true, writable: true, configurable: true });
       }
     }
-  }
+  });
+  return { messages, provenance };
+}
+
+function sameProjectedMessage(record, canonical, provenance) {
+  const proof = provenance.get(record.message);
+  if (!canonical || proof?.source.id !== canonical.entryId) return false;
+  if (!proof.edited) return isDeepStrictEqual(record.message, canonical.message);
+  const { content: projectedContent, ...projectedEnvelope } = record.message;
+  const { content: canonicalContent, ...canonicalEnvelope } = canonical.message;
+  // Edits may change content, never source identity or native-call provenance.
+  return isDeepStrictEqual(projectedEnvelope, canonicalEnvelope)
+    && (!record.call || isDeepStrictEqual(record.call, canonical.call));
 }
 
 function identity(record, retainedInContext) {
@@ -459,7 +459,7 @@ export function projectCanonicalBranch({ entries, leafId } = {}) {
 
 /**
  * Read-only selected-branch projection. entries excludes the session header;
- * leafId is explicit (null means the empty branch). buildSessionContext is the
+ * leafId is explicit (null means the empty branch). buildSessionProjection is the
  * synchronous public STOCK helper, not a SessionManager method bound elsewhere.
  *
  * New signature data: {version:1, messageEntryId, messageId, contentIndex,
@@ -470,28 +470,24 @@ export function projectCanonicalBranch({ entries, leafId } = {}) {
  * outstanding includes compaction-pruned unanswered native calls. The owner
  * must gate ordinary handback on outstanding and all blocking diagnostics.
  */
-export function projectCanonicalContext({ entries, leafId, buildSessionContext, mode } = {}) {
+export function projectCanonicalContext({ entries, leafId, buildSessionProjection, mode } = {}) {
   const stringCodeUnits = getCanonicalContextStringCodeUnits();
   requireThat(mode === "native" || mode === "ordinary", "ERR_CONTEXT_MODE");
-  requireThat(typeof buildSessionContext === "function", "ERR_CONTEXT_HELPER");
+  requireThat(typeof buildSessionProjection === "function", "ERR_CONTEXT_HELPER");
   const { entries: selected, diagnostics } = projectCanonicalBranch({ entries, leafId });
   const canonical = indexMessages(selected.filter(entry => entry.type === "message")
     .map(entry => ({ message: entry.message, entryId: entry.id })));
   let context;
-  try { context = buildSessionContext(copyArchive(selected).entries, leafId); }
+  try { context = buildSessionProjection(copyArchive(selected).entries, leafId); }
   catch { throw new CanonicalContextError("ERR_CONTEXT_HELPER_FAILED"); }
-  requireThat(isRecord(context) && Array.isArray(context.messages), "ERR_CONTEXT_HELPER_RESULT");
-  let messages = copyData(context.messages, { stringCodeUnits });
+  let { messages, provenance } = projectStockContext(context, selected, stringCodeUnits);
   let retained = indexMessages(messages.map(message => ({ message })));
   for (const [id, record] of retained.calls) {
-    requireThat(canonical.calls.has(id) && isDeepStrictEqual(record.message, canonical.calls.get(id).message),
-      "ERR_CONTEXT_CALL_PROJECTION");
+    requireThat(sameProjectedMessage(record, canonical.calls.get(id), provenance), "ERR_CONTEXT_CALL_PROJECTION");
   }
   for (const [id, record] of retained.results) {
-    requireThat(canonical.results.has(id) && isDeepStrictEqual(record.message, canonical.results.get(id).message),
-      "ERR_CONTEXT_RESULT_PROJECTION");
+    requireThat(sameProjectedMessage(record, canonical.results.get(id), provenance), "ERR_CONTEXT_RESULT_PROJECTION");
   }
-  preserveSummaryMetadata(messages, selected);
   // Validate STOCK provenance and overlay canonical signatures BEFORE omitting
   // any block. The canonical index and error envelopes remain untouched.
   omitUnadmittedCalls(messages, canonical, selected, diagnostics);

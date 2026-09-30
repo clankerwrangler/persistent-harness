@@ -12,13 +12,13 @@ import { createActorStreamPlanner } from "../src/actor-stream.mjs";
 import { projectCanonicalContext } from "../src/canonical-context.mjs";
 
 // Resolve the explicit stock graph, with the harness's directly pinned WebSocket dependency.
-const { sdk: { ModelRuntime, buildSessionContext, convertToLlm }, api, responsesApi, paths } = await loadExternalPi();
+const { sdk: { ModelRuntime, buildSessionProjection, convertToLlm }, api, responsesApi, paths } = await loadExternalPi();
 const apiPackageFile = findPackageJSON(pathToFileURL(paths.api));
 const apiPackage = JSON.parse(await readFile(apiPackageFile, "utf8"));
 assert.equal(apiPackage.name, "@earendil-works/pi-ai");
-assert.equal(apiPackage.version, "0.85.1");
+assert.equal(apiPackage.version, "0.99.1");
 const apiExport = apiPackage.exports["./api/*"].import;
-assert.equal(apiExport, "./dist/api/*.js", "stock 0.85.1 public API wildcard export");
+assert.equal(apiExport, "./dist/api/*.js", "stock 0.99.1 public API wildcard export");
 const codexApiUrl = new URL(apiExport.replace("*", "openai-codex-responses"), pathToFileURL(apiPackageFile));
 const syntheticKey = `fixture.${Buffer.from(JSON.stringify({ "https://api.openai.com/auth": { chatgpt_account_id: "fixture-account" } })).toString("base64url")}.fixture`;
 const tool = { name: "ipython", description: "fixture", async: true, parameters: { type: "object", properties: { code: { type: "string" } }, required: ["code"] } };
@@ -861,7 +861,7 @@ test("adapter-produced interrupted ordinary suffix is excluded from both next-re
   assert.equal(Object.hasOwn(failed.content[0], "providerCallId"), false, "partial parser call has compound identity only");
   assert.equal(failed.content[0].async, undefined);
   for (const mode of ["native", "ordinary"]) {
-    const projected = projectCanonicalContext({ entries, leafId: entries.at(-1).id, mode, buildSessionContext });
+    const projected = projectCanonicalContext({ entries, leafId: entries.at(-1).id, mode, buildSessionProjection });
     assert.equal(JSON.stringify(entries), canonicalBytes);
     assert.deepEqual(projected.outstanding, []);
     assert.equal(projected.diagnostics.some(d => d.severity === "blocking"), false);
@@ -878,4 +878,53 @@ test("adapter-produced interrupted ordinary suffix is excluded from both next-re
     assert.equal(JSON.stringify(wire).includes("No result provided"), false);
   }
   assert.equal(requests.length, 3, "only fixture-injected offline requests");
+});
+
+
+test("stock transcript checkpoints replay without losing native call identities", async t => {
+  let body;
+  const instance = await adapter(t, { fetch: async (_url, init) => { body = JSON.parse(init.body); return response([complete()]); } });
+  const transcript = { messages: [
+    { role: "system", content: "checkpoint", toolsAdded: [tool], timestamp: 0 },
+    { role: "user", content: "retained", timestamp: 1 },
+    { role: "system", content: "updated", sections: { policy: "synthetic" }, timestamp: 2 },
+  ] };
+  const output = await collect(instance.stream({ ...model, compat: { ...model.compat, supportsMidConvoSystemMessages: true } }, transcript));
+  assert.equal(output.message.stopReason, "stop", output.message.errorMessage);
+  assert.equal(body.instructions, "checkpoint");
+  assert.deepEqual(body.tools.map(t => t.name), [tool.name]);
+  assert.equal(body.input.at(-1).role, "developer");
+  assert.equal(body.input.at(-1).content, api.renderSystemMessageUpdate(transcript.messages.at(-1)));
+});
+
+
+for (const supportsMidConvoSystemMessages of [true, false]) test(`public stock system and tool replay parity, mid-system=${supportsMidConvoSystemMessages}`, async t => {
+  const selected = { ...model, compat: { ...model.compat, supportsMidConvoSystemMessages, supportsAdditionalTools: true } };
+  const transcript = { messages: [
+    { role: "system", content: "initial", sections: { policy: "old" }, timestamp: 0 },
+    { role: "user", content: "question", timestamp: 1 },
+    { role: "system", content: "delta", sections: { policy: "new" }, toolsAdded: [tool], timestamp: 2 },
+  ] };
+  const codex = await import(codexApiUrl.href);
+  let stockBody, body;
+  await codex.stream(selected, transcript, { apiKey: syntheticKey, transport: "sse", fetch: networkDenied,
+    onPayload(value) { stockBody = copied(value); throw new Error("stop before network"); } }).result();
+  const instance = await adapter(t, { fetch: async (_url, init) => { body = JSON.parse(init.body); return response(frames()); } }, selected);
+  const result = await collect(instance.stream(selected, transcript));
+  assert.equal(result.message.stopReason, "toolUse");
+  assert.equal(result.events.filter(event => instance.nativeCompletion(event)).length, 1, "in-place declarations can authorize a raw native completion");
+  assert.equal(body.instructions, stockBody.instructions);
+  const stripNative = value => JSON.parse(JSON.stringify(value, (key, item) => key === "async" ? undefined : item));
+  assert.deepEqual(stripNative(body.input), stockBody.input);
+  assert.deepEqual(stripNative(body.tools), stockBody.tools ?? []);
+  for (const change of ["remove-marker", "duplicate", "remove-tool", "schema"]) {
+    const denied = await collect(instance.stream(selected, transcript, { onPayload(value) {
+      const declarations = supportsMidConvoSystemMessages ? value.input.find(item => item.type === "additional_tools").tools : value.tools;
+      if (change === "remove-marker") delete declarations[0].async;
+      if (change === "duplicate") declarations.push({ ...declarations[0] });
+      if (change === "remove-tool") declarations.length = 0;
+      if (change === "schema") declarations[0].parameters = { type: "object", properties: {} };
+    } }));
+    assert.equal(denied.events.some(event => instance.nativeCompletion(event)), false, change);
+  }
 });

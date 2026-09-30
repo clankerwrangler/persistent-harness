@@ -33,7 +33,7 @@ const { sdk, api } = await loadExternalPi();
 const prior = { provider: "openai-codex", id: "gpt-6-astra", name: "Prior catalog fixture", api: "openai-codex-responses",
   baseUrl: "https://fixture.invalid", reasoning: true, input: ["text"], contextWindow: 128000, maxTokens: 4096,
   cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 } };
-const target = { ...prior, id: "gpt-6.1-sol", name: "Refreshed catalog fixture" };
+const target = { ...prior, id: "gpt-catalog-refresh-fixture", name: "Refreshed catalog fixture" };
 const notify = (warnings) => (message, type) => warnings.push({ message, type });
 function worker(models, warnings = []) {
   return new SDKWorker({ models, session: { model: prior, sessionManager: {}, subscribe: () => () => {} },
@@ -59,7 +59,9 @@ test("public Pi refresh connects picker, search, and stale exact-pin admission w
   const oldIds = pickerRuntime.getModels("openai-codex").map((model) => model.id);
   let requests = 0;
   globalThis.fetch = async (input, options) => {
-    assert.equal(String(input), "https://pi.dev/api/models/providers/openai-codex");
+    const url = new URL(input);
+    assert.equal(url.origin + url.pathname, "https://pi.dev/api/models/providers/openai-codex");
+    assert.equal(url.searchParams.get("types"), "chat,image,classifier");
     assert.equal(new Headers(options.headers).has("authorization"), false);
     requests++;
     return new Response(JSON.stringify([prior, target]), { headers: { "last-modified": new Date().toUTCString(), etag: '"fixture"' } });
@@ -73,8 +75,8 @@ test("public Pi refresh connects picker, search, and stale exact-pin admission w
   assert.equal(picker.session.model, prior, "catalog browsing does not select a model");
   assert.equal(pickerRuntime.getModel(prior.provider, prior.id).contextWindow, 200000, "models.json overrides survive refresh");
 
-  const found = await handlers(new sdk.ModelRegistry(searchRuntime))["rlm.find_models"]({ query: "gpt-6.1-sol" });
-  assert.deepEqual(found.models.map((model) => `${model.provider}/${model.id}`), ["openai-codex/gpt-6.1-sol"]);
+  const found = await handlers(new sdk.ModelRegistry(searchRuntime))["rlm.find_models"]({ query: "gpt-catalog-refresh-fixture" });
+  assert.deepEqual(found.models.map((model) => `${model.provider}/${model.id}`), ["openai-codex/gpt-catalog-refresh-fixture"]);
   assert.equal(found.warning, undefined);
 
   globalThis.fetch = denied;
@@ -82,8 +84,8 @@ test("public Pi refresh connects picker, search, and stale exact-pin admission w
   await handlers(new sdk.ModelRegistry(pinRuntime), [], (params) => {
     policy = resolveChildLaunchPolicy({ request: { ...params, skillCatalog: [] }, parent: { kind: "root", depth: 0 } });
     return { accepted: true };
-  })["rlm.spawn"]({ prompt: "Synthetic admission only", model: "openai-codex/gpt-6.1-sol", thinkingLevel: "high" });
-  assert.deepEqual(policy.model.resolved, { provider: "openai-codex", id: "gpt-6.1-sol" });
+  })["rlm.spawn"]({ prompt: "Synthetic admission only", model: "openai-codex/gpt-catalog-refresh-fixture", thinkingLevel: "high" });
+  assert.deepEqual(policy.model.resolved, { provider: "openai-codex", id: "gpt-catalog-refresh-fixture" });
   assert.equal(policy.model.source, "explicit");
 
   process.env.PI_OFFLINE = "1";
@@ -124,4 +126,23 @@ test("catalog call sites pass the stock deadline and surface safe cached warning
     }
     assert.equal(deadlines.length, 12); assert(deadlines.every((ms) => ms === 15_000));
   } finally { timeoutMock.mock.restore(); }
+});
+
+
+test("accepted stock graph exposes exact Codex Sol through picker and exact-pin policy offline", async () => {
+  const credentials = new api.InMemoryCredentialStore();
+  await credentials.modify("openai-codex", () => ({ type: "oauth", access: "synthetic-unused", refresh: "synthetic-unused", expires: Date.now() + 3600000 }));
+  const runtime = await sdk.ModelRuntime.create({ credentials, modelsStore: new api.InMemoryModelsStore(), modelsPath: null,
+    refreshOnCreate: false, allowModelNetwork: false });
+  process.env.PI_OFFLINE = "1";
+  try {
+    const sol = runtime.getModel("openai-codex", "gpt-6.1-sol");
+    assert(sol); assert.equal(sol.api, "openai-codex-responses");
+    assert(projectAvailableModels(await runtime.getAvailable()).some(m => m.provider === sol.provider && m.id === sol.id));
+    let policy;
+    await handlers(new sdk.ModelRegistry(runtime), [], params => {
+      policy = resolveChildLaunchPolicy({ request: { ...params, skillCatalog: [] }, parent: { kind: "root", depth: 0 } }); return { accepted: true };
+    })["rlm.spawn"]({ prompt: "Synthetic admission only", model: "openai-codex/gpt-6.1-sol", thinkingLevel: "high" });
+    assert.deepEqual(policy.model.resolved, { provider: "openai-codex", id: "gpt-6.1-sol" });
+  } finally { delete process.env.PI_OFFLINE; }
 });

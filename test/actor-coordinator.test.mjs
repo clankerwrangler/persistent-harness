@@ -4,7 +4,7 @@ import { mkdtemp, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { ActorCoordinator } from "../src/actor-coordinator.mjs";
-import { createCompactionDriver } from "../src/actor-compaction.mjs";
+import { createCompactionDriver, createCompactionPreparationCapture } from "../src/actor-compaction.mjs";
 import { projectVisibleMessage } from "../src/conversation-projection.mjs";
 const { loadExternalPi } = await import("../src/external-pi.mjs");
 const { sdk, api, core } = await loadExternalPi();
@@ -45,7 +45,12 @@ async function fixture(t, { prepareRequest, script, retry, compaction, compactio
       pi.on("session_start", () => pi.setActiveTools(["hold"]));
     }] });
   await active.reload();
-  const empty = { getExtensions: () => ({ extensions: [], errors: [], runtime: sdk.createExtensionRuntime() }) };
+  const capture = createCompactionPreparationCapture();
+  const dormant = new sdk.DefaultResourceLoader({ cwd: root, agentDir: path.join(root, "agent"), settingsManager: settings,
+    noExtensions: true, noSkills: true, noPromptTemplates: true, noThemes: true, noContextFiles: true,
+    extensionFactories: [capture.factory] });
+  await dormant.reload();
+  const empty = { getExtensions: () => dormant.getExtensions() };
   for (const name of ["getSkills", "getPrompts", "getThemes", "getAgentsFiles", "getSystemPrompt", "getSystemPromptSource", "getAppendSystemPrompt", "getAppendSystemPromptSources", "extendResources", "reload"]) empty[name] = active[name].bind(active);
   const manager = sdk.SessionManager.inMemory(root);
   const { session } = await sdk.createAgentSession({ cwd: root, agentDir: path.join(root, "agent"), model: models.getModel(model.provider, model.id), modelRuntime: models, settingsManager: settings, sessionManager: manager, resourceLoader: empty, tools: [] });
@@ -54,7 +59,7 @@ async function fixture(t, { prepareRequest, script, retry, compaction, compactio
     basePromptOptions: { contextFiles: [], cwd: root }, isProjectTrusted: () => false, compactionDriver });
   await coor.start(); await runner.emit({ type: "session_start", reason: "startup" });
   t.after(async () => { held.resolve(); await coor.close(); await rm(root, { recursive: true, force: true }); });
-  return { coor, requests, events, manager, held, toolStarted, runs: () => runs };
+  return { coor, requests, events, manager, held, toolStarted, capture, runs: () => runs };
 }
 
 test("ordinary input keeps real result barrier and compatible canonical events", async t => {
@@ -83,7 +88,7 @@ for (const outcome of ["success", "failure", "abort"]) test(`compaction ${outcom
     f.manager.appendMessage({ role: "user", content: `${word} question `.repeat(1000), timestamp: 1 });
     f.manager.appendMessage(f.coor.assistant([{ type: "text", text: `${word} answer `.repeat(1000) }], usage(), "stop"));
   }
-  f.coor.compactionDriver = createCompactionDriver({ sdk, core, runner: f.coor.runner, session: f.coor.session, models: f.coor.models, publish: event => f.events.push(event) });
+  f.coor.compactionDriver = createCompactionDriver({ sdk, core, runner: f.coor.runner, session: f.coor.session, models: f.coor.models, capture: f.capture, publish: event => f.events.push(event) });
   const original = structuredClone(f.manager.getEntries());
   const compacting = f.coor.compact();
   const completed = compacting.then(() => null, error => error);

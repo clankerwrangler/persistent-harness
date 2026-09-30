@@ -4,12 +4,12 @@ import { access, readFile, realpath, stat } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
-export const STOCK_PI_VERSION = "0.85.1";
+export const STOCK_PI_VERSION = "0.99.1";
 const AGENT = "@earendil-works/pi-coding-agent";
 const AI = "@earendil-works/pi-ai";
 const CORE = "@earendil-works/pi-agent-core";
 const OFFICIAL_BUNDLE_ENTRY = "dist/bundle/index.js";
-const OFFICIAL_BUNDLE_SHA256 = "ef91447930bcf6a6e9b51ae28f859755c7eaa573607c5a75ee86526084d3d67c";
+const OFFICIAL_BUNDLE_SHA256 = "df1f4c36758e3d339d42c6caebb2fca1d9f415de658d56b7b1fa6a9a808f0aa5";
 const inside = (root, target) => target === root || target.startsWith(`${root}${path.sep}`);
 
 async function commandPath(command, env, cwd) {
@@ -108,7 +108,7 @@ export async function resolveExternalPi({ env = process.env, cwd = process.cwd()
   }
   let sdk = await publicEntry(agent);
   if (configured && entry !== agent.directory && entry !== sdk) {
-    // Upstream 0.85.1 ships this alternate build of the same public root SDK.
+    // Upstream 0.99.1 ships this alternate build of the same public root SDK.
     // It is not an export-map subpath: require explicit selection and its official entry bytes.
     if (entry !== path.join(agent.directory, OFFICIAL_BUNDLE_ENTRY)) throw new Error("Unsupported explicit Pi SDK entry");
     const digest = createHash("sha256").update(await readFile(entry)).digest("hex");

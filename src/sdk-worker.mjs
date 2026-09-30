@@ -119,9 +119,14 @@ export function toWorkerRpcEvent(event) {
   return { type: "message_update", usage: event.usage ?? (partial ?? event.message)?.usage, assistantMessageEvent: delta };
 }
 
-function dormantResources(sdk, resources) {
-  const empty = { extensions: [], errors: [], runtime: sdk.createExtensionRuntime() };
-  const wrapper = { getExtensions: () => empty };
+async function dormantResources(sdk, resources, { cwd, agentDir, settings, capture }) {
+  const loader = new sdk.DefaultResourceLoader({ cwd, agentDir, settingsManager: settings,
+    noExtensions: true, noSkills: true, noPromptTemplates: true, noThemes: true, noContextFiles: true,
+    extensionFactories: [{ name: "compaction-preparation", factory: capture.factory }] });
+  await loader.reload();
+  const loaded = loader.getExtensions();
+  if (loaded.errors.length) throw new Error("Stock compaction preparation hook failed to load");
+  const wrapper = { getExtensions: () => loaded };
   for (const name of ["getSkills", "getPrompts", "getThemes", "getAgentsFiles", "getSystemPrompt", "getSystemPromptSource",
     "getAppendSystemPrompt", "getAppendSystemPromptSources", "extendResources"]) {
     wrapper[name] = (...args) => resources[name](...args);
@@ -167,7 +172,7 @@ export class SDKWorker {
   getMessages() {
     const manager = this.session.sessionManager;
     return this.projectContext({ entries: manager.getEntries(), leafId: manager.getLeafId(),
-      buildSessionContext: this.sdk.buildSessionContext, mode: "ordinary" }).messages;
+      buildSessionProjection: this.sdk.buildSessionProjection, mode: "ordinary" }).messages;
   }
   async mutate(operation) {
     if (this.coordinator.isBusy || !this.session.isIdle) throw new Error("Actor must be idle for this operation");
@@ -387,8 +392,10 @@ export async function bootstrapSDKWorker({ argv = [], cwd = process.cwd(), env =
     const resolved = sdk.resolveCliModel({ cliProvider: options.provider, cliModel: options.model, modelRuntime: models });
     if (resolved.error) throw new Error(resolved.error);
     const scope = await sdk.resolveModelScopeWithDiagnostics(options.models ?? settings.getEnabledModels() ?? [], models);
+    const capture = (await import("./actor-compaction.mjs")).createCompactionPreparationCapture();
+    const dormant = await dormantResources(sdk, resources, { cwd, agentDir, settings, capture });
     const result = await sdk.createAgentSession({ cwd, agentDir, modelRuntime: models, settingsManager: settings,
-      sessionManager: manager, resourceLoader: dormantResources(sdk, resources),
+      sessionManager: manager, resourceLoader: dormant,
       model: resolved.model, thinkingLevel: options.thinking ?? resolved.thinkingLevel,
       scopedModels: scope.scopedModels, tools: options.tools, excludeTools: options.excludeTools,
       customTools: runner.getAllRegisteredTools().map(({ definition }) => definition),
@@ -407,7 +414,7 @@ export async function bootstrapSDKWorker({ argv = [], cwd = process.cwd(), env =
       contextFiles: resources.getAgentsFiles().agentsFiles, skills: resources.getSkills().skills,
     });
     const nativeAdapter = createNativeAdapter({ api, responsesApi, modelRuntime: models, transportOptions: { WebSocket } });
-    const compactionDriver = createCompactionDriver({ sdk, core, runner, session, models, lifecycle, publish: emit });
+    const compactionDriver = createCompactionDriver({ sdk, core, runner, session, models, capture, lifecycle, publish: emit });
     const navigationDriver = createNavigationDriver({ sdk, core, runner, session, models, lifecycle, publish: emit });
     const coordinator = new Coordinator({ session, sdk, api, core, models, nativeAdapter, projectContext, planRecovery, lifecycle, compactionDriver, navigationDriver,
       runner, resources, publish: emit, basePromptOptions, onTiming,

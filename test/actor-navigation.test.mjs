@@ -103,7 +103,7 @@ for (const kind of ["user", "custom"]) for (const prior of [false, true]) test(`
   const result = await f.navigate(ids.input, { summarize: false });
   assert.equal(result.cancelled, false); assert.equal(result.editorText, kind === "custom" ? " exact custom " : " exact input ");
   assert.equal(f.manager.getLeafId(), ids.parent); assert.deepEqual(f.manager.getEntries(), original);
-  assert.deepEqual(f.worker.session.messages, f.manager.buildSessionContext().messages);
+  assert.deepEqual(f.worker.session.messages, f.manager.buildSessionProjection().messages);
   assert.equal(JSON.stringify(f.worker.session.messages).includes("abandoned"), false);
   assert.deepEqual([before, after, commits, f.requests.length], [1, 1, 1, 0]);
   assert.equal((await stat(file)).ino, inode); assert.deepEqual(await readFile(file), bytes);
