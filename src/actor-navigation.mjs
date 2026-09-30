@@ -119,7 +119,7 @@ export function createNavigationDriver({ sdk, core, runner, session, models, lif
         appended.push(manager.getEntry(id));
       }
       session.agent.state.messages = projectCanonicalContext({ entries: manager.getEntries(), leafId: manager.getLeafId(),
-        buildSessionContext: sdk.buildSessionContext, mode: "native" }).messages;
+        buildSessionProjection: sdk.buildSessionProjection, mode: "native" }).messages;
       outcome = { editorText: prepared.editorText, cancelled: false, summaryEntry };
       for (const entry of appended) await publish({ type: "entry_appended", entry });
       await runner.emit({ type: "session_tree", newLeafId: manager.getLeafId(), oldLeafId,

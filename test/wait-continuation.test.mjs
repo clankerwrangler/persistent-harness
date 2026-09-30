@@ -9,7 +9,7 @@ import { loadExternalPi } from "../src/external-pi.mjs";
 import { createNativeProviderAdapter } from "../src/native-provider.mjs";
 import { projectCanonicalContext } from "../src/canonical-context.mjs";
 
-// One explicitly selected stock 0.85.1 public SDK/API/core graph; no install fallback.
+// One explicitly selected stock 0.99.1 public SDK/API/core graph; no install fallback.
 const { sdk, api, core, responsesApi } = await loadExternalPi();
 process.env.PI_HARNESS_ACTOR_ID = "wait-private-fixture";
 process.env.PI_HARNESS_ACTOR_TOKEN = "private-fixture-not-a-credential";

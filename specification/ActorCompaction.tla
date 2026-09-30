@@ -3,65 +3,70 @@ EXTENDS Naturals, FiniteSets
 CONSTANTS Entries
 \* flights/queued track driver-owned default summary requests; custom hook computation is abstract.
 VARIABLES phase, aborted, sameLeaf, hook, pending, cut, kept, writes,
-          source, instructions, beforeEvent, terminal, effects, canonical, noticeFailure, flights, abortedProvider, queued, instructionRole
+          source, instructions, beforeEvent, terminal, effects, canonical, noticeFailure, flights, abortedProvider, queued, instructionRole, captured
 vars == <<phase, aborted, sameLeaf, hook, pending, cut, kept, writes,
-          source, instructions, beforeEvent, terminal, effects, canonical, noticeFailure, flights, abortedProvider, queued, instructionRole>>
+          source, instructions, beforeEvent, terminal, effects, canonical, noticeFailure, flights, abortedProvider, queued, instructionRole, captured>>
 Init == /\ phase = "prepare" /\ aborted = FALSE /\ sameLeaf = TRUE
         /\ hook \in {"default", "custom", "cancel", "error"}
         /\ pending \in {0, 1, 2} /\ cut \in {1, 2, 3}
         /\ kept = {} /\ writes = 0 /\ source = "none"
         /\ instructions = FALSE /\ beforeEvent = FALSE /\ terminal = 0
-        /\ effects = 0 /\ canonical = Entries /\ noticeFailure \in BOOLEAN /\ flights = 0 /\ abortedProvider \in BOOLEAN /\ queued = 0 /\ instructionRole = "none"
-Interrupt == /\ phase \in {"prepare", "diagnostic", "hook", "summary", "validate"}
+        /\ effects = 0 /\ canonical = Entries /\ noticeFailure \in BOOLEAN /\ flights = 0 /\ abortedProvider \in BOOLEAN /\ queued = 0 /\ instructionRole = "none" /\ captured = FALSE
+Interrupt == /\ phase \in {"prepare", "capture", "diagnostic", "hook", "summary", "validate"}
              /\ ~aborted /\ aborted' = TRUE
              /\ UNCHANGED <<phase, sameLeaf, hook, pending, cut, kept, writes, source,
-                            instructions, beforeEvent, terminal, effects, canonical, noticeFailure, flights, abortedProvider, queued, instructionRole>>
+                            instructions, beforeEvent, terminal, effects, canonical, noticeFailure, flights, abortedProvider, queued, instructionRole, captured>>
 Move == /\ phase \in {"diagnostic", "hook", "summary", "validate"} /\ sameLeaf
         /\ sameLeaf' = FALSE
         /\ UNCHANGED <<phase, aborted, hook, pending, cut, kept, writes, source,
-                       instructions, beforeEvent, terminal, effects, canonical, noticeFailure, flights, abortedProvider, queued, instructionRole>>
-Fail == /\ phase \in {"prepare", "diagnostic", "hook", "summary", "validate"}
+                       instructions, beforeEvent, terminal, effects, canonical, noticeFailure, flights, abortedProvider, queued, instructionRole, captured>>
+Fail == /\ phase \in {"prepare", "capture", "diagnostic", "hook", "summary", "validate"}
         /\ (aborted \/ ~sameLeaf \/ (phase = "diagnostic" /\ pending # 0) \/ (phase = "hook" /\ hook \in {"cancel", "error"}) \/
             (phase = "summary" /\ source = "default" /\ abortedProvider))
         /\ phase' = "done" /\ terminal' = 1 /\ flights' = 0 /\ queued' = 0
         /\ UNCHANGED <<aborted, sameLeaf, hook, pending, cut, kept, writes, source,
-                       instructions, beforeEvent, effects, canonical, noticeFailure, abortedProvider, instructionRole>>
-Prepare == /\ phase = "prepare" /\ ~aborted /\ sameLeaf
+                       instructions, beforeEvent, effects, canonical, noticeFailure, abortedProvider, instructionRole, captured>>
+Capture == /\ phase = "prepare" /\ ~aborted /\ sameLeaf
+           /\ phase' = "capture" /\ captured' = TRUE
+           /\ UNCHANGED <<aborted, sameLeaf, hook, pending, cut, kept, writes, source,
+                 instructions, beforeEvent, terminal, effects, canonical, noticeFailure,
+                 flights, abortedProvider, queued, instructionRole>>
+Prepare == /\ phase = "capture" /\ ~aborted /\ sameLeaf
            /\ kept' = {e \in Entries : e >= IF pending = 0 THEN cut ELSE
                                IF pending < cut THEN pending ELSE cut}
            /\ phase' = "diagnostic"
            /\ UNCHANGED <<aborted, sameLeaf, hook, pending, cut, writes, source,
-                          instructions, beforeEvent, terminal, effects, canonical, noticeFailure, flights, abortedProvider, queued, instructionRole>>
+                          instructions, beforeEvent, terminal, effects, canonical, noticeFailure, flights, abortedProvider, queued, instructionRole, captured>>
 Diagnostic == /\ phase = "diagnostic" /\ ~aborted /\ sameLeaf /\ pending = 0
               /\ instructions' = TRUE /\ instructionRole' = "user" /\ phase' = "hook"
               /\ UNCHANGED <<aborted, sameLeaf, hook, pending, cut, kept, writes, source,
-                             beforeEvent, terminal, effects, canonical, noticeFailure, flights, abortedProvider, queued>>
+                             beforeEvent, terminal, effects, canonical, noticeFailure, flights, abortedProvider, queued, captured>>
 Hook == /\ phase = "hook" /\ ~aborted /\ sameLeaf
         /\ hook \in {"default", "custom"} /\ beforeEvent' = TRUE
         /\ source' = hook /\ phase' = "summary" /\ queued' = IF hook = "default" THEN 2 ELSE 0
         /\ UNCHANGED <<aborted, sameLeaf, hook, pending, cut, kept, writes,
-                       instructions, terminal, effects, canonical, noticeFailure, flights, abortedProvider, instructionRole>>
+                       instructions, terminal, effects, canonical, noticeFailure, flights, abortedProvider, instructionRole, captured>>
 Summarize == /\ phase = "summary" /\ ~aborted /\ sameLeaf /\ phase' = "validate" /\ queued = 0 /\ flights = 0
              /\ (source # "default" \/ ~abortedProvider)
              /\ UNCHANGED <<aborted, sameLeaf, hook, pending, cut, kept, writes, source,
-                            instructions, beforeEvent, terminal, effects, canonical, noticeFailure, flights, abortedProvider, queued, instructionRole>>
+                            instructions, beforeEvent, terminal, effects, canonical, noticeFailure, flights, abortedProvider, queued, instructionRole, captured>>
 Commit == /\ phase = "validate" /\ ~aborted /\ sameLeaf
           /\ writes' = 1 /\ phase' = "notify"
           /\ UNCHANGED <<aborted, sameLeaf, hook, pending, cut, kept, source,
-                         instructions, beforeEvent, terminal, effects, canonical, noticeFailure, flights, abortedProvider, queued, instructionRole>>
+                         instructions, beforeEvent, terminal, effects, canonical, noticeFailure, flights, abortedProvider, queued, instructionRole, captured>>
 Notify == /\ phase = "notify" /\ phase' = "done" /\ terminal' = 1
           /\ UNCHANGED <<aborted, sameLeaf, hook, pending, cut, kept, writes, source,
-                         instructions, beforeEvent, effects, canonical, noticeFailure, flights, abortedProvider, queued, instructionRole>>
+                         instructions, beforeEvent, effects, canonical, noticeFailure, flights, abortedProvider, queued, instructionRole, captured>>
 StartSummary == /\ phase = "summary" /\ source = "default" /\ ~aborted /\ sameLeaf
                 /\ queued > 0 /\ flights = 0 /\ flights' = 1 /\ queued' = queued - 1
                 /\ UNCHANGED <<phase, aborted, sameLeaf, hook, pending, cut, kept, writes,
                   source, instructions, beforeEvent, terminal, effects, canonical, noticeFailure,
-                  abortedProvider, instructionRole>>
+                  abortedProvider, instructionRole, captured>>
 FinishSummary == /\ phase = "summary" /\ flights = 1 /\ flights' = 0
                  /\ UNCHANGED <<phase, aborted, sameLeaf, hook, pending, cut, kept, writes,
                   source, instructions, beforeEvent, terminal, effects, canonical, noticeFailure,
-                  abortedProvider, queued, instructionRole>>
-Next == StartSummary \/ FinishSummary \/ Interrupt \/ Move \/ Fail \/ Prepare \/ Diagnostic \/ Hook \/ Summarize \/ Commit \/ Notify
+                  abortedProvider, queued, instructionRole, captured>>
+Next == Capture \/ StartSummary \/ FinishSummary \/ Interrupt \/ Move \/ Fail \/ Prepare \/ Diagnostic \/ Hook \/ Summarize \/ Commit \/ Notify
 Spec == Init /\ [][Next]_vars
 OneWriter == writes \in 0..1
 CanonicalUnchanged == canonical = Entries
@@ -77,4 +82,6 @@ SingleProviderFlight == flights \in 0..1
 InstructionsNotElevated == instructions => instructionRole = "user"
 CustomHookSkipsDefaultProvider == source = "custom" => flights = 0 /\ queued = 0
 NoUnansweredCompaction == writes = 1 => pending = 0
+StockCaptureOnly == phase = "capture" => writes = 0 /\ effects = 0 /\ flights = 0 /\ ~beforeEvent
+CaptureBeforeActiveHooks == beforeEvent => captured
 =============================================================================

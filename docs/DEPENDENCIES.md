@@ -2,22 +2,24 @@
 
 ## Unmodified Pi
 
-Supported version: `@earendil-works/pi-coding-agent@0.85.1`, upstream repository `https://github.com/earendil-works/pi`, revision `d981de1229ef899957bbe968bc8dcda02a21f477`.
+Supported version: `@earendil-works/pi-coding-agent@0.99.1`, upstream repository `https://github.com/earendil-works/pi`, revision `d86654abb8862e201933517d6f1fce9f88dd117f`.
 
 Install it outside the harness checkout. For example:
 
 ```sh
 export PI_PREFIX="$HOME/.local/share/persistent-harness/pi"
-npm install --prefix "$PI_PREFIX" --ignore-scripts --no-audit --no-fund @earendil-works/pi-coding-agent@0.85.1
+npm install --prefix "$PI_PREFIX" --save-exact --ignore-scripts --no-audit --no-fund @earendil-works/pi-coding-agent@0.99.1
 export PI_HARNESS_PI_COMMAND="$PI_PREFIX/node_modules/@earendil-works/pi-coding-agent/dist/bundle/cli.js"
 export PI_HARNESS_PI_MODULE="$PI_PREFIX/node_modules/@earendil-works/pi-coding-agent/dist/bundle/index.js"
 ```
 
+Pi requires Node 22.19 or later; this harness requires Node 24 or later.
+
 Use one matching installed graph, not an SDK from another Pi installation. Use absolute file paths for both variables. The harness's session helper expects an SDK file, not a package directory or file URL.
 
-The optional explicit bundled SDK is an upstream-shipped alternate root artifact, not an npm export-map subpath. It exposes the same public named SDK APIs in this version. The resolver pins its entry SHA-256 to `ef91447930bcf6a6e9b51ae28f859755c7eaa573607c5a75ee86526084d3d67c`. This entry check is not a whole-install integrity guarantee. `dist/index.js` is also supported; set both command and SDK to their adjacent `dist/cli.js` and `dist/index.js` paths for that graph. A command-only or package-directory resolver chooses the normal public main entry, not the bundle implicitly.
+The optional explicit bundled SDK is an upstream-shipped alternate root artifact, not an npm export-map subpath. It exposes the same public named SDK APIs in this version. The resolver pins its entry SHA-256 to `df1f4c36758e3d339d42c6caebb2fca1d9f415de658d56b7b1fa6a9a808f0aa5`. This entry check is not a whole-install integrity guarantee. `dist/index.js` is also supported; set both command and SDK to their adjacent `dist/cli.js` and `dist/index.js` paths for that graph. A command-only or package-directory resolver chooses the normal public main entry, not the bundle implicitly.
 
-No Pi patch, replaced module, private engine method, or custom Pi build is required. The worker hosts the public `ExtensionRunner`, `SessionManager`, and `ModelRuntime` APIs. Pin 0.85.1 rather than assuming later SDK versions preserve these seams.
+No Pi patch, replaced module, private engine method, or custom Pi build is required. The worker hosts the public `ExtensionRunner`, `SessionManager`, and `ModelRuntime` APIs. Pin 0.99.1 rather than assuming later SDK versions preserve these seams.
 
 ## Python and skills
 
@@ -56,7 +58,7 @@ The zero-argument `getCanonicalContextStringCodeUnits()` export in `src/canonica
 export PI_HARNESS_ACTOR_EXTENSIONS='["/absolute/path/to/extension/index.ts"]'
 ```
 
-The supervisor loads its harness first, then explicit extensions in order, removing duplicate paths. Automatic extension discovery is disabled for actors. A configured extension runs in the active coordinator runner; the separate SDK service runtime remains extension-empty so it cannot start competing work. Compaction and navigation use the active runner's hooks under the coordinator's service lease.
+The supervisor loads its harness first, then explicit extensions in order, removing duplicate paths. Automatic extension discovery is disabled for actors. A configured extension runs in the active coordinator runner; the separate SDK service runtime loads only the harness's preparation-only compaction hook, which always cancels before inference or a write. Compaction and navigation use the active runner's hooks under the coordinator's service lease.
 
 No external extension is bundled, downloaded, or installed by this setting. Maintain its source and dependencies separately and verify compatibility with the pinned Pi and canonical history formats before activation. Custom compaction handlers receive composed caller and namespace instructions in `event.customInstructions` and must include them in their own summary request.
 

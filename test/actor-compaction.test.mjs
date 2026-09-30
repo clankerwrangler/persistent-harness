@@ -7,7 +7,7 @@ import net from "node:net";
 import http from "node:http";
 import https from "node:https";
 import { loadExternalPi } from "../src/external-pi.mjs";
-import { prepareActorCompaction, createCompactionDriver } from "../src/actor-compaction.mjs";
+import { prepareActorCompaction, createCompactionDriver, createCompactionPreparationCapture } from "../src/actor-compaction.mjs";
 
 const temporary = await mkdtemp(path.join(os.tmpdir(), "actor-compaction-test-"));
 const savedEnv = { ...process.env };
@@ -39,7 +39,7 @@ const assistant = (text, extra = {}) => ({ role: "assistant", content: [{ type: 
   usage: usage(), ...extra });
 const settings = { enabled: true, reserveTokens: 256, keepRecentTokens: 20 };
 
-async function fixture(t, { before, streamSimple, keep = 20, persist = false, retry = { enabled: false } } = {}) {
+async function fixture(t, { before, streamSimple, keep = 20, persist = false, retry = { enabled: false }, captureOnly = false } = {}) {
   const cwd = await mkdtemp(path.join(temporary, "case-"));
   const agentDir = path.join(cwd, "agent"); await mkdir(agentDir);
   const manager = persist ? sdk.SessionManager.create(cwd, path.join(cwd, "sessions")) : sdk.SessionManager.inMemory(cwd);
@@ -58,10 +58,11 @@ async function fixture(t, { before, streamSimple, keep = 20, persist = false, re
     }),
   });
   const observed = [], emitted = [];
+  const capture = createCompactionPreparationCapture();
   const settingsManager = sdk.SettingsManager.inMemory({ compaction: { ...settings, keepRecentTokens: keep }, retry });
   const resources = new sdk.DefaultResourceLoader({ cwd, agentDir, settingsManager,
     noExtensions: true, noSkills: true, noPromptTemplates: true, noThemes: true, noContextFiles: true,
-    extensionFactories: [{ name: "oracle", factory: pi => {
+    extensionFactories: captureOnly ? [{ name: "capture", factory: capture.factory }] : [{ name: "oracle", factory: pi => {
       pi.on("session_before_compact", async (event, ctx) => { observed.push(structuredClone({ ...event, signal: undefined }));
         return before ? before(event, ctx) : { cancel: true }; });
       pi.on("session_compact_failed", event => emitted.push(event));
@@ -74,7 +75,7 @@ async function fixture(t, { before, streamSimple, keep = 20, persist = false, re
   await session.bindExtensions({});
   session.subscribe(event => emitted.push(event));
   t.after(() => session.dispose());
-  return { session, manager, models, requests, observed, emitted, resources };
+  return { session, manager, models, requests, observed, emitted, resources, capture };
 }
 
 function addOrdinary(manager) {
@@ -129,6 +130,19 @@ function addScenario(manager, name) {
     imageResult.content.push({ type: "image", mimeType: "image/png", data: "c3ludGhldGlj" });
     manager.appendMessage(imageResult);
   }
+  if (name === "edited") {
+    const target = manager.getBranch().find(entry => entry.type === "message" && entry.message.role === "toolResult");
+    manager.appendContextEdit(target.id, { content: [{ type: "text", text: "edited evidence" }] });
+  }
+  if (name === "omitted") {
+    const target = manager.getBranch().find(entry => entry.type === "message" && entry.message.role === "assistant");
+    manager.appendContextEdit(target.id, null);
+  }
+  if (name === "checkpoint") {
+    manager.appendMessage({ role: "system", content: "checkpoint instructions", toolsAdded: [], timestamp: 1 });
+    manager.appendMessage(user("after checkpoint ".repeat(80)));
+    manager.appendMessage(assistant("after checkpoint answer ".repeat(80)));
+  }
   if (name === "trailing") manager.appendMessage(user("trail ".repeat(80)));
   if (name === "failed") manager.appendMessage(assistant("failed", { stopReason: "error", usage: usage(900) }));
   if (name === "noUsage") {
@@ -138,20 +152,19 @@ function addScenario(manager, name) {
 }
 
 test("capture multi-compaction, split-turn, files and trailing usage public preparation oracle", async t => {
-  for (const name of ["ordinary", "multi", "multi2", "files", "trailing", "failed", "noUsage", "imageResult"])
+  for (const name of ["ordinary", "multi", "multi2", "files", "trailing", "failed", "noUsage", "imageResult", "edited", "omitted", "checkpoint"])
     for (const keep of [20, 300, 100000]) {
       const f = await fixture(t, { keep }); addScenario(f.manager, name);
       await f.session.compact().catch(error => assert.match(error.message, /cancel|abort|compact/i));
       const p = f.observed[0]?.preparation;
       const branch = f.manager.getBranch();
-      const actual = prepareActorCompaction({ sdk, core, entries: f.manager.getEntries(), leafId: f.manager.getLeafId(),
-        settings: { ...settings, keepRecentTokens: keep } }).preparation;
+      const actual = (await prepareActorCompaction({ sdk, session: f.session, capture: { read: async () => p } })).preparation;
       assert.deepEqual(actual, p, `${name} keep=${keep}`);
     }
 });
 
 async function driverFixture(t, { hooks = () => {}, lifecycle = {}, ...options } = {}) {
-  const f = await fixture(t, options);
+  const f = await fixture(t, { ...options, captureOnly: true });
   const bus = sdk.createEventBus();
   const resources = new sdk.DefaultResourceLoader({ cwd: f.manager.getCwd(), agentDir: process.env.PI_CODING_AGENT_DIR,
     settingsManager: f.session.settingsManager, noExtensions: true, noSkills: true, noPromptTemplates: true,
@@ -174,7 +187,7 @@ async function driverFixture(t, { hooks = () => {}, lifecycle = {}, ...options }
   const notifications = [];
   runner.setUIContext({ ...runner.getUIContext(), notify: (message, level) => notifications.push({ message, level }) }, "rpc");
   const published = [];
-  const driver = createCompactionDriver({ sdk, core, runner, session: f.session, models: f.models, lifecycle,
+  const driver = createCompactionDriver({ sdk, core, runner, session: f.session, models: f.models, capture: f.capture, lifecycle,
     publish: event => published.push(event) });
   const controller = new AbortController();
   const coordinator = { manager: f.manager, session: f.session };
@@ -262,7 +275,7 @@ test("native signatures overlay selected branch and earliest pending turn remain
   f.manager.appendMessage(user("later ".repeat(100)));
   f.manager.appendMessage(assistant("later ".repeat(100)));
   const original = structuredClone(f.manager.getEntries());
-  const prepared = prepareActorCompaction({ sdk, core, entries: original, leafId: f.manager.getLeafId(), settings });
+  const prepared = await prepareActorCompaction({ sdk, session: f.session, capture: f.capture });
   assert.equal(prepared.preparation.firstKeptEntryId, pendingTurn);
   assert.equal(prepared.outstanding.length, 1);
   assert.match(prepared.branchEntries.find(e => e.id === call).message.content[0].thinkingSignature, /fixture-encryption/);
@@ -273,7 +286,7 @@ test("native signatures overlay selected branch and earliest pending turn remain
   const settled = structuredClone(f.manager.getEntries());
   const answer = await f.run({ automatic: true });
   assert.equal(answer.firstKeptEntryId, pendingTurn);
-  assert.equal(f.manager.buildSessionContext().messages.some(m => m.role === "assistant" && m.id === "native-message"), true);
+  assert.equal(f.manager.buildSessionProjection().messages.some(m => m.role === "assistant" && m.id === "native-message"), true);
   assert.equal(JSON.stringify(f.requests).includes("native-pending"), false, "pending turn was retained, not sent to default summarizer");
   assert.deepEqual(f.manager.getEntries().slice(0, -1), settled);
 });
@@ -363,7 +376,7 @@ test("split summary starts are serialized and queued aborts never dispatch provi
       starts++; active++; maximum = Math.max(maximum, active);
       assert.equal(context.messages.at(-1).role, "user");
       assert.equal(context.messages.at(-1).content, "diagnostic");
-      assert.doesNotMatch(context.systemPrompt, /diagnostic/);
+      assert.doesNotMatch(api.getCurrentSystemPrompt(context.messages), /diagnostic/);
       const stream = api.createAssistantMessageEventStream();
       let finished = false;
       const finish = stopReason => {

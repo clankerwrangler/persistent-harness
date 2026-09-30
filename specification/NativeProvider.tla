@@ -1,5 +1,5 @@
 --------------------------- MODULE NativeProvider ---------------------------
-EXTENDS Naturals, FiniteSets
+EXTENDS Naturals, FiniteSets, Sequences
 CONSTANT Items
 VARIABLES phase, flight, transport, request, sentModel, model, advertised,
           returned, rawComplete, rawIds, receipts, seen, retries, attempts,
@@ -140,4 +140,31 @@ ReasoningCipherSticky == reasoningOriginal.body # "none" /\ reasoningOriginal.ci
                         => reasoningFinal.cipher = reasoningOriginal.cipher
 IncompleteStreamUnknown == failureKind = "stream_incomplete" => unknown /\ retired /\ flight = 0 /\ ~terminal
 Spec == Init /\ [][Next]_vars
+
+\* Public stock transcript normalization surrounds, never rewrites, native history.
+TranscriptInit ==
+ /\ phase = "input" /\ flight = 0 /\ transport \in {"mid-system", "collapsed"}
+ /\ request \in {<<"call", "system-update", "result">>, <<"call", "system-update">>}
+ /\ sentModel = "none" /\ model = "selected" /\ advertised = {} /\ returned = {}
+ /\ rawComplete = {} /\ rawIds = {} /\ receipts = {} /\ seen = FALSE
+ /\ retries = 0 /\ attempts = 0 /\ reconnectSafe = FALSE /\ terminal = FALSE
+ /\ ordinary = {} /\ sent = FALSE /\ created = FALSE /\ unknown = FALSE /\ retired = FALSE
+ /\ rawKind = [i \in Items |-> "none"] /\ successfulResponses = {} /\ successfulItems = {}
+ /\ itemResponse = [i \in Items |-> 0] /\ itemStatus = [i \in Items |-> "none"]
+ /\ reasoningOriginal = [body |-> "none", cipher |-> "absent"]
+ /\ reasoningFinal = reasoningOriginal /\ failureKind = "none"
+NativeHistory(seq) == SelectSeq(seq, LAMBDA item: item # "system-update")
+TranscriptStep ==
+ /\ phase = "input" /\ phase' = "wire"
+ /\ returned' = IF transport = "mid-system" THEN request ELSE NativeHistory(request)
+ /\ advertised' = {"stock-current-tools"} /\ sentModel' = model
+ /\ UNCHANGED <<flight, transport, request, model, rawComplete, rawIds, receipts,
+       seen, retries, attempts, reconnectSafe, terminal, ordinary, sent, created,
+       unknown, retired, rawKind, successfulResponses, successfulItems, itemResponse,
+       itemStatus, reasoningOriginal, reasoningFinal, failureKind>>
+TranscriptSpec == TranscriptInit /\ [][TranscriptStep]_vars
+TranscriptNativeUnchanged == phase = "wire" => NativeHistory(returned) = NativeHistory(request)
+TranscriptStockPlacement == phase = "wire" /\ transport = "mid-system" => returned = request
+TranscriptStockTools == phase = "wire" => advertised = {"stock-current-tools"} /\ sentModel = model
+
 =============================================================================
