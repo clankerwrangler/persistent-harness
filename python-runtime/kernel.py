@@ -26,7 +26,7 @@ from IPython.core.formatters import BaseFormatter, DisplayFormatter
 from IPython.core.displaypub import DisplayPublisher
 from IPython.core.history import HistoryOutput
 
-from _persistent_harness import SkillProxy, bootstrap_skills, configure_control
+from _persistent_harness import SkillProxy, bootstrap_skills, configure_control, _execution_id
 
 PROTOCOL_VERSION = 1
 SNAPSHOT_VERSION = 1
@@ -1011,7 +1011,11 @@ while True:
             if checkpoint is not None and not valid_namespace_checkpoint(checkpoint):
                 raise ValueError("invalid namespace checkpoint")
             namespace_checkpoint = checkpoint
-            result = shell.run_cell(command.get("code", ""), store_history=True)
+            cell_token = _execution_id.set(command_id)
+            try:
+                result = shell.run_cell(command.get("code", ""), store_history=True)
+            finally:
+                _execution_id.reset(cell_token)
             error = result.error_before_exec or result.error_in_exec
             emit({
                 "type": "done",

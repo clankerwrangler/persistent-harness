@@ -754,7 +754,7 @@ ${catalog.diagnostics.map((item) => item.error).join("\n")}`);
       ? { version: 1, sessionId: ACTOR_ID, toolCallId, actorGeneration: ACTOR_GENERATION }
       : undefined;
     const result = await activeKernel.execute(code, {
-      signal, onUpdate, namespaceCheckpoint, checkpointInBackground: Boolean(namespaceCheckpoint),
+      signal, onUpdate, toolContext: ctx, namespaceCheckpoint, checkpointInBackground: Boolean(namespaceCheckpoint),
       onCheckpoint: (outcome) => {
         owner?.onCheckpoint?.(toolCallId, outcome);
         if (outcome.ok) return;
@@ -902,6 +902,7 @@ ${catalog.diagnostics.map((item) => item.error).join("\n")}`);
   const ipythonTool = {
     name: "ipython",
     label: "IPython",
+    exposure: "model-only",
     description: "Execute Python in this session's persistent IPython namespace. Use skill? for full skill instructions.",
     promptSnippet: "Execute Python in the persistent namespace; use skill? to inspect any skill's SKILL.md.",
     promptGuidelines: [
@@ -949,6 +950,7 @@ ${catalog.diagnostics.map((item) => item.error).join("\n")}`);
   pi.registerTool({
     name: "wait_for_ipython",
     label: "Wait for Python",
+    exposure: "model-only",
     description: "Wait for prior Python calls to settle. Make this the last tool call of the current response. When it returns, read the original Python results and continue.",
     parameters: { type: "object", properties: {}, required: [], additionalProperties: false },
     executionMode: "sequential",
