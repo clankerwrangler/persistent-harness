@@ -515,7 +515,10 @@ export class ActorCoordinator {
       let result, isError = false;
       const registered = this.runner.getAllRegisteredTools().find(item => item.definition.name === call.name && this.activeTools.has(call.name));
       const tool = registered?.definition;
-      const messages = this.projectedMessages();
+      // Tool execution owns an admitted, still-pending parent. Its public session
+      // view is not a provider request; ordinary replay readiness applies only
+      // after the real result exists, not before dispatch can produce it.
+      const messages = this.manager.buildSessionProjection().messages;
       const issuer = this.manager.getBranch().map(entry => entry.message).findLast(message => message?.role === "assistant"
         && message.content.some(part => part.type === "toolCall" && part.id === call.id));
       this.toolDispatch.open(call.id, executionController.signal, issuer, messages);
