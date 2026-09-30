@@ -34,7 +34,8 @@ async function sourceFile(root, entries, tail = "") {
 test("fork_context is strict at host, policy, and protocol before admission side effects", async () => {
   let leaf = "at-call"; const calls = [];
   const handlers = createHostHandlers({ cwd: "/tmp", getManifest: () => ({ skills: [] }),
-    getContext: () => ({ model, modelRegistry: { getAvailable: () => [model] }, sessionManager: { getLeafId: () => leaf } }),
+    getContext: () => ({ model, modelRegistry: { getAvailable: () => [model], getError: () => undefined,
+      refresh: async () => ({ errors: new Map(), aborted: false }) }, sessionManager: { getLeafId: () => leaf } }),
     getClient: () => ({ isConnected: true, connectedSession: { depth: 0 }, limits: { maxDepth: 2 },
       request: async (type, params) => { calls.push({ type, params }); leaf = "later"; return { admission: {} }; } }) });
   for (const invalid of [null, 0, 1, "true", [], {}]) {

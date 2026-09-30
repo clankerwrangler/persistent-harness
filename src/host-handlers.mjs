@@ -1128,6 +1128,12 @@ export function createHostHandlers({ cwd, getClient, getContext = () => undefine
           throw new Error("parent context fork boundary is unavailable");
         }
       }
+      let catalogWarning;
+      try {
+        const result = await context.modelRegistry.refresh({ allowNetwork: false, signal: AbortSignal.timeout(15_000) });
+        if (result.aborted || result.errors.size || context.modelRegistry.getError()) catalogWarning = "Model catalog reload failed; using cached models.";
+      } catch { catalogWarning = "Model catalog reload failed; using cached models."; }
+      if (catalogWarning) context.ui?.notify(catalogWarning, "warning");
       const models = context.modelRegistry.getAvailable().map((model) => ({
         provider: model.provider,
         id: model.id,
@@ -1173,6 +1179,12 @@ export function createHostHandlers({ cwd, getClient, getContext = () => undefine
       const value = requireRecord(payload, "rlm.find_models payload");
       const supported = new Set(["query", "limit"]);
       for (const key of Object.keys(value)) if (!supported.has(key)) throw new Error(`unsupported find_models option: ${key}`);
+      let warning;
+      try {
+        const result = await context.modelRegistry.refresh({ signal: AbortSignal.timeout(15_000) });
+        if (result.aborted || result.errors.size || context.modelRegistry.getError()) warning = "Model catalog refresh failed; showing cached models.";
+      } catch { warning = "Model catalog refresh failed; showing cached models."; }
+      if (warning) context.ui?.notify(warning, "warning");
       const models = context.modelRegistry.getAvailable().map((model) => ({
         provider: model.provider,
         id: model.id,
@@ -1189,6 +1201,7 @@ export function createHostHandlers({ cwd, getClient, getContext = () => undefine
       }
       return {
         models: findModels(models, value.query ?? "", value.limit ?? 50, preferred),
+        ...(warning ? { warning } : {}),
       };
     },
 
