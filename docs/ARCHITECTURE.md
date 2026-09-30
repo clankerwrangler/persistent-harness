@@ -1,5 +1,9 @@
 # Architecture and protocol
 
+## Pi integration
+
+Reuse stock Pi capabilities through public APIs and supported extension points before adding harness implementations. Add minimal integration code only for demonstrated gaps; do not maintain a parallel system for behavior Pi already owns.
+
 ## Owners
 
 - `HarnessSupervisor` owns admission, actor generations, durable queues, family scope, schedules, process completion, and local client routing.
