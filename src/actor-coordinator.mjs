@@ -235,9 +235,7 @@ export class ActorCoordinator {
         const content = item.images.length ? [{ type: "text", text: item.message }, ...item.images] : item.message;
         const message = { role: "user", content, timestamp: Date.now(), ...(item.messageId ? { id: item.messageId } : {}) };
         await this.emit({ type: "message_start", message, messageId: message.id }); await this.commit(message);
-        const prepared = await this.promptCapture.prepare(this.runner, item.message, item.images, this.baseOptions());
-        this.runPrompt = prepared.systemPrompt; this.runPromptOptions = clone(prepared.systemPromptOptions);
-        for (const extra of prepared?.messages ?? []) this.manager.appendCustomMessageEntry(extra.customType, extra.content, extra.display, extra.details);
+        await this.preparePrompt(item.message, item.images);
       } else {
         const message = item.message;
         this.manager.appendCustomMessageEntry(message.customType, message.content, message.display, message.details);
@@ -246,6 +244,11 @@ export class ActorCoordinator {
       this.revision++; this.naturalStop = false;
     }
     return selected.length;
+  }
+  async preparePrompt(prompt, images) {
+    const prepared = await this.promptCapture.prepare(this.runner, prompt, images, this.baseOptions());
+    this.runPrompt = prepared.systemPrompt; this.runPromptOptions = clone(prepared.systemPromptOptions);
+    for (const extra of prepared?.messages ?? []) this.manager.appendCustomMessageEntry(extra.customType, extra.content, extra.display, extra.details);
   }
   async recover() {
     if (this.recoveryDone) return;
@@ -419,6 +422,9 @@ export class ActorCoordinator {
       return { committed, calls, nativeBatch };
     };
     try {
+      // Custom-only runs have no user admission to prepare their prompt. Run the
+      // public hook once with neutral input, never as a synthetic user message.
+      if (this.runPromptOptions === undefined) await this.preparePrompt("", []);
       let prompt, preparedOptions;
       do {
         preparedOptions = this.runPromptOptions;

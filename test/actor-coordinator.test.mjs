@@ -347,3 +347,57 @@ test("input delivered during owner preparation cannot leave prompt additions one
   assert.equal(f.requests[0].messages.find(message => message.role === "system").content, "PROMPT_LATEST\nOWNER_2");
   assert.match(JSON.stringify(f.requests[0].messages), /LATEST/);
 });
+
+for (const deliverAs of ["steer", "followUp"]) test(`custom ${deliverAs} starts with a fresh neutral prompt without user admission`, async t => {
+  const hooks = []; let inputs = 0, commands = 0;
+  const f = await fixture(t, { script: () => [{ type: "text", text: "DONE" }], hooks: pi => {
+    pi.on("input", () => { inputs++; });
+    pi.registerCommand("not-a-user-command", { description: "Admission sentinel", handler: async () => { commands++; } });
+  }, promptExtensions: [pi => pi.on("before_agent_start", event => {
+    hooks.push({ prompt: event.prompt, images: event.images });
+    event.systemPromptOptions.sections.fixture = `FRESH_${hooks.length}`;
+    return { ...(event.prompt ? { systemPrompt: `FORCED_${event.prompt}` } : {}),
+      message: { customType: "fixture.prompt", content: `INJECTED_${hooks.length}`, display: false } };
+  })] });
+  const custom = () => f.coor.sendCustom({ customType: "fixture.family", content: "/not-a-user-command family data", display: true }, { triggerTurn: true, deliverAs });
+  await custom(); await wait(f.coor.waitForIdle(), "initial custom run did not settle");
+  assert.equal(inputs, 0); assert.equal(commands, 0);
+  assert.equal(f.manager.getBranch().filter(e => e.type === "message" && e.message.role === "user").length, 0);
+  await f.coor.submit("USER"); await wait(f.coor.waitForIdle(), "user run did not settle");
+  await custom(); await wait(f.coor.waitForIdle(), "idle custom run did not settle");
+  assert.deepEqual(hooks, [{ prompt: "", images: [] }, { prompt: "USER", images: [] }, { prompt: "", images: [] }]);
+  const prompts = f.requests.map(request => request.messages.find(message => message.role === "system").content);
+  assert.match(prompts[0], /FRESH_1/); assert.equal(prompts[1], "FORCED_USER");
+  assert.match(prompts[2], /FRESH_3/); assert(!prompts[2].includes("FORCED_USER")); assert(!prompts[2].includes("FRESH_1"));
+  assert.equal(inputs, 1); assert.equal(commands, 0);
+  assert.deepEqual(f.manager.getBranch().filter(e => e.type === "message" && e.message.role === "user").map(e => e.message.content), ["USER"]);
+  assert.deepEqual(f.manager.getBranch().filter(e => e.type === "custom_message" && e.customType === "fixture.prompt").map(e => e.content), ["INJECTED_1", "INJECTED_2", "INJECTED_3"]);
+});
+
+test("mixed queued input uses the real user preparation without an extra neutral hook", async t => {
+  const hooks = [];
+  const f = await fixture(t, { script: () => [{ type: "text", text: "DONE" }],
+    promptExtensions: [pi => pi.on("before_agent_start", event => { hooks.push(event.prompt); })] });
+  await f.coor.withServiceMutation(async () => {
+    await f.coor.sendCustom({ customType: "fixture.family", content: "FAMILY", display: true }, { triggerTurn: true });
+    await f.coor.submit("USER");
+  });
+  await wait(f.coor.waitForIdle(), "mixed input did not settle");
+  assert.deepEqual(hooks, ["USER"]); assert.equal(f.requests.length, 1);
+});
+
+test("custom-started tool continuations and family follow-ups reuse preparation but real steering refreshes it", async t => {
+  const hooks = [];
+  const f = await fixture(t, { promptExtensions: [pi => pi.on("before_agent_start", event => {
+    hooks.push(event.prompt);
+    return { message: { customType: "fixture.prompt", content: `INJECTED_${hooks.length}`, display: false } };
+  })] });
+  await f.coor.sendCustom({ customType: "fixture.family", content: "START", display: true }, { triggerTurn: true });
+  await wait(f.toolStarted.promise, "custom tool continuation did not start");
+  await f.coor.submit("STEER", "steer");
+  await f.coor.sendCustom({ customType: "fixture.family", content: "FOLLOW", display: true }, { triggerTurn: true, deliverAs: "followUp" });
+  f.held.resolve(); await wait(f.coor.waitForIdle(), "custom continuations did not settle");
+  assert.equal(f.requests.length, 3); assert.equal(f.runs(), 1);
+  assert.deepEqual(hooks, ["", "STEER"]);
+  assert.deepEqual(f.manager.getBranch().filter(e => e.type === "custom_message" && e.customType === "fixture.prompt").map(e => e.content), ["INJECTED_1", "INJECTED_2"]);
+});
