@@ -20,7 +20,7 @@ HarnessClient.prototype.request = async (type, params) => {
     store.completeActorInput(params.inputId, actorId, Date.parse(params.deliveredAt), params.entryId);
     return { accepted: true };
   }
-  if (type === "flush_actor_inputs") return { flushed: true };
+  if (type === "flush_actor_inputs") return { flushed: true, fastMode: false };
   return {};
 };
 

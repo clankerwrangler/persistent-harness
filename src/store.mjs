@@ -21,6 +21,8 @@ function publicLaunch(value) {
   return {
     model: launch.model,
     thinking: launch.thinking,
+    fastMode: launch.fastMode === true,
+    fastModeSupported: launch.fastModeSupported === true,
     ...(launch.contextFork ? { contextFork: launch.contextFork } : {}),
     capabilityIds: Array.isArray(launch.capabilities) ? launch.capabilities.map((item) => item.id) : [],
   };
@@ -437,7 +439,7 @@ export class HarnessStore {
         actor_generation, launch_json, created_at, updated_at, last_activity_at)
       VALUES (?, ?, ?, ?, ?, ?, 'root', ?, NULL, 0, 'inactive', 0, 'starting', ?, 1, ?, ?, ?, ?)
     `).run(id, shortSessionId(id), params.sessionFile ?? null, params.cwd, params.repositoryRoot ?? null,
-      name, GLOBAL_ROOT_FAMILY_ID, actorToken, JSON.stringify(params.launch ?? {}), now, now, now);
+      name, GLOBAL_ROOT_FAMILY_ID, actorToken, JSON.stringify({ ...params.launch, fastMode: false }), now, now, now);
     return id;
   }
 
@@ -467,7 +469,7 @@ export class HarnessStore {
         repository_root = ?, display_name = ?, launch_json = coalesce(?, launch_json), updated_at = ? WHERE id = ?`)
         .run(params.sessionFile ?? null, params.cwd ?? existing.cwd,
           params.repositoryRoot ?? existing.repository_root, name,
-          params.launch == null ? null : JSON.stringify(params.launch), now, existing.id);
+          params.launch == null ? null : JSON.stringify({ ...params.launch, fastMode: parseJson(existing.launch_json, {}).fastMode === true }), now, existing.id);
       this.#db.exec("COMMIT");
       return { session: this.#mappedSession(existing.id), created: false };
     } catch (error) { this.#db.exec("ROLLBACK"); throw error; }
@@ -491,7 +493,7 @@ export class HarnessStore {
         VALUES (?, ?, ?, ?, ?, ?, 'child', ?, ?, ?, 'inactive', 0, 'starting', ?, 1, ?, ?, ?, ?)
       `).run(sessionId, shortSessionId(sessionId), sessionFile ?? null, policy.cwd ?? parent.cwd,
         policy.repositoryRoot ?? parent.repository_root, displayName, parent.family_id, parentId, depth,
-        actorToken, JSON.stringify({ ...policy, depth }), now, now, now);
+        actorToken, JSON.stringify({ ...policy, depth, fastMode: false }), now, now, now);
       this.#db.prepare("INSERT INTO children(session_id) VALUES (?)").run(sessionId);
       const taskId = randomUUID();
       this.#db.prepare("INSERT INTO child_tasks(id, child_id, kind, prompt, state, created_at, history_peer_name, history_entry_id) VALUES (?, ?, 'initial', ?, 'queued', ?, ?, NULL)")
@@ -607,12 +609,36 @@ export class HarnessStore {
         resolved: { provider: selection.provider, id: selection.model }, source: launch.model?.source ?? "settings" };
       if (!currentThinking) launch.thinking = { requested: launch.thinking?.requested ?? null,
         resolved: selection.thinkingLevel, source: launch.thinking?.source ?? "settings" };
-      if (!currentModel || !currentThinking) {
+      if (!currentModel || !currentThinking || launch.fastModeSupported !== (selection.fastModeSupported === true) || typeof launch.fastMode !== "boolean") {
+        launch.fastMode = launch.fastMode === true;
+        launch.fastModeSupported = selection.fastModeSupported === true;
         this.#db.prepare("UPDATE sessions SET launch_json = ?, updated_at = ? WHERE id = ?")
           .run(JSON.stringify(launch), now, sessionId);
       }
       this.#db.exec("COMMIT");
       return this.getActorLaunch(sessionId);
+    } catch (error) { this.#db.exec("ROLLBACK"); throw error; }
+  }
+
+  // One canonical row read at the provider-request sampling boundary.
+  getSessionFastMode(sessionId) {
+    const row = this.#db.prepare("SELECT launch_json, lifecycle FROM sessions WHERE id = ?").get(sessionId);
+    if (!row || row.lifecycle === "deleted") throw new Error("session does not exist");
+    return parseJson(row.launch_json, {}).fastMode === true;
+  }
+
+  updateSessionFastMode(sessionId, enabled, expected, now = Date.now()) {
+    if (typeof enabled !== "boolean" || typeof expected !== "boolean") throw new TypeError("fastMode must be boolean");
+    this.#db.exec("BEGIN IMMEDIATE");
+    try {
+      const row = this.#sessionRow(sessionId);
+      if (!row || row.lifecycle === "deleted") throw new Error("session does not exist");
+      const launch = parseJson(row.launch_json, {});
+      if ((launch.fastMode === true) !== expected) throw new Error("session Fast preference changed concurrently");
+      launch.fastMode = enabled;
+      this.#db.prepare("UPDATE sessions SET launch_json = ?, updated_at = ? WHERE id = ?")
+        .run(JSON.stringify(launch), now, sessionId);
+      this.#db.exec("COMMIT");
     } catch (error) { this.#db.exec("ROLLBACK"); throw error; }
   }
 
@@ -627,6 +653,7 @@ export class HarnessStore {
       }
       launch.model = { requested: `${selection.provider}/${selection.model}`, resolved: { provider: selection.provider, id: selection.model }, source: "explicit" };
       launch.thinking = { requested: selection.thinkingLevel, resolved: selection.thinkingLevel, source: "explicit" };
+      launch.fastModeSupported = selection.fastModeSupported === true;
       this.#db.prepare("UPDATE sessions SET launch_json = ?, updated_at = ? WHERE id = ?")
         .run(JSON.stringify(launch), now, sessionId);
       if (Number.isSafeInteger(selection.contextWindow) && selection.contextWindow > 0) {

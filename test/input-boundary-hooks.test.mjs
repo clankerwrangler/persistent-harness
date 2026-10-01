@@ -61,7 +61,7 @@ test("request preparation waits for the final queue barrier while internal recei
   assert.equal(f.sent.length, 1); assert.equal(f.sent[0].payload.customType, "persistent-harness-input");
   assert(f.requests.some(({ type }) => type === "accept_actor_input"));
   assert.equal(finished, false, "the receipt callback does not bypass or release the model-request barrier");
-  release.resolve({ flushed: true });
+  release.resolve({ flushed: true, fastMode: false });
   assert.match((await prepared).systemPrompt, /base prompt/);
 });
 
@@ -82,7 +82,7 @@ test("context-admitted family messages free durable pending capacity while nativ
     return { ...message, relationship: "parent", senderName: "sender", senderShortId: "short", senderDepth: 0 };
   };
   const first = queue("consumed");
-  const f = await fixture(t, () => ({}), (messageId) => ({ message: store.acknowledgeMessage(messageId, "boundary-fixture") }));
+  const f = await fixture(t, () => ({ fastMode: false }), (messageId) => ({ message: store.acknowledgeMessage(messageId, "boundary-fixture") }));
   f.hooks.get("agent_start")();
   const receive = async (message) => {
     f.client.emit("event", { event: "message_available", data: { message, deliverAs: message.deliveryMode === "follow_up" ? "follow_up" : "steer" } });
@@ -112,7 +112,7 @@ test("a lost family acknowledgement is retried on redelivery without another con
   store.recordMessageSenderEntry("sender", { messageId: message.messageId, entryId: "sender-entry", peerId: "boundary-fixture", relationship: "child", body: message.body });
   store.markMessageDelivered(message.messageId, "boundary-fixture");
   let attempts = 0;
-  const f = await fixture(t, () => ({}), (messageId) => {
+  const f = await fixture(t, () => ({ fastMode: false }), (messageId) => {
     attempts += 1; if (attempts === 1) throw new Error("simulated acknowledgement transport loss");
     return { message: store.acknowledgeMessage(messageId, "boundary-fixture") };
   });
@@ -129,7 +129,7 @@ test("a lost family acknowledgement is retried on redelivery without another con
 
 
 test("retry branch command rejects busy actors without mutating the session", async (t) => {
-  const f = await fixture(t, () => ({}));
+  const f = await fixture(t, () => ({ fastMode: false }));
   let navigations = 0;
   f.ctx.navigateTree = async () => { navigations += 1; };
   const entries = structuredClone(f.entries);
@@ -139,7 +139,7 @@ test("retry branch command rejects busy actors without mutating the session", as
 });
 
 test("retry branch command awaits canonical navigation for an idle actor", async (t) => {
-  const f = await fixture(t, () => ({}));
+  const f = await fixture(t, () => ({ fastMode: false }));
   f.ctx.isIdle = () => true;
   f.entries.push({ id: "input", parentId: null, type: "custom_message" },
     { id: "answer", parentId: "input", type: "message", message: { role: "assistant" } });
@@ -154,4 +154,15 @@ test("retry branch command awaits canonical navigation for an idle actor", async
   assert.equal(finished, false); assert.equal(leaf, "answer");
   release(); await command;
   assert.equal(leaf, null); assert.equal(finished, true);
+});
+
+test("request preparation samples the canonical Fast preference and rejects missing preference replies", async t => {
+  let fastMode = false;
+  const f = await fixture(t, () => ({ flushed: true, fastMode }));
+  const off = await f.owner.prepareRequest(request, f.ctx);
+  fastMode = true;
+  const on = await f.owner.prepareRequest(request, f.ctx);
+  assert.equal(off.fastMode, false); assert.equal(on.fastMode, true);
+  fastMode = undefined;
+  await assert.rejects(f.owner.prepareRequest(request, f.ctx), /inference preferences are unavailable/);
 });

@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import http from "node:http";
 import { once } from "node:events";
+import { zstdDecompressSync } from "node:zlib";
 import { findPackageJSON } from "node:module";
 import { readFile } from "node:fs/promises";
 import WebSocket, { WebSocketServer } from "ws";
@@ -9,10 +10,11 @@ import { pathToFileURL } from "node:url";
 import { loadExternalPi } from "../src/external-pi.mjs";
 import { createNativeProviderAdapter } from "../src/native-provider.mjs";
 import { createActorStreamPlanner } from "../src/actor-stream.mjs";
+import { streamSessionRequest } from "../src/fast-mode.mjs";
 import { projectCanonicalContext } from "../src/canonical-context.mjs";
 
 // Resolve the explicit stock graph, with the harness's directly pinned WebSocket dependency.
-const { sdk: { ModelRuntime, buildSessionProjection, convertToLlm }, api, responsesApi, paths } = await loadExternalPi();
+const { sdk: { ModelRuntime, buildSessionProjection, convertToLlm }, api, responsesApi, simpleOptions, paths } = await loadExternalPi();
 const apiPackageFile = findPackageJSON(pathToFileURL(paths.api));
 const apiPackage = JSON.parse(await readFile(apiPackageFile, "utf8"));
 assert.equal(apiPackage.name, "@earendil-works/pi-ai");
@@ -36,11 +38,11 @@ function frames(item = callItem(), id = "resp_original") { return [created(id), 
 function encoded(events, delimiter = "\n") { return events.map((event) => `event: ignored${delimiter}data: ${JSON.stringify(event)}${delimiter}${delimiter}`).join(""); }
 function response(events) { return new Response(encoded(events), { headers: { "content-type": "text/event-stream" } }); }
 function networkDenied() { throw new Error("unexpected_network"); }
-async function runtime(t, selected = model) {
+async function runtime(t, selected = model, providerApi = { stream() { throw new Error("fixture_fallback_not_scripted"); }, streamSimple() { throw new Error("fixture_fallback_not_scripted"); } }) {
   const result = await ModelRuntime.create({ credentials: new api.InMemoryCredentialStore(), modelsStore: new api.InMemoryModelsStore(), modelsPath: null,
     refreshOnCreate: false, allowModelNetwork: false });
   result.registerNativeProvider(api.createProvider({ id: selected.provider, models: [selected], auth: { apiKey: { name: "fixture", resolve: async () => ({ auth: { apiKey: syntheticKey, headers: { "x-auth-fixture": "auth" } } }) } },
-    api: { stream() { throw new Error("fixture_fallback_not_scripted"); }, streamSimple() { throw new Error("fixture_fallback_not_scripted"); } } }));
+    api: providerApi }));
   return result;
 }
 async function adapter(t, transportOptions = {}, selected = model) {
@@ -928,3 +930,44 @@ for (const supportsMidConvoSystemMessages of [true, false]) test(`public stock s
     assert.equal(denied.events.some(event => instance.nativeCompletion(event)), false, change);
   }
 });
+
+for (const provider of ["openai-codex", "openai"]) for (const id of ["gpt-6-astra", "gpt-6.1-sol"]) {
+  for (const route of ["native", "stock"]) test(`Fast tier reaches ${route} ${provider}/${id} payload AND accounting`, async t => {
+    const selected = { ...model, provider, id, api: provider === "openai" ? "openai-responses" : "openai-codex-responses" };
+    const stock = await import(new URL(apiExport.replace("*", selected.api), pathToFileURL(apiPackageFile)).href);
+    const stockModels = await runtime(t, selected, stock);
+    let body; const bodies = [];
+    const fetch = async (_url, init) => {
+      const bytes = new Headers(init.headers).get("content-encoding") === "zstd" ? zstdDecompressSync(init.body).toString("utf8") : init.body;
+      body = JSON.parse(bytes); bodies.push(body); return response([created(), complete()]);
+    };
+    const instance = await adapter(t, { fetch }, selected);
+    const run = async serviceTier => {
+      const options = { ...(serviceTier ? { serviceTier } : {}), transport: "sse" };
+      const result = await collect(route === "native" ? instance.stream(selected, context, options)
+        : streamSessionRequest(stockModels, selected, context, { ...options, fetch, sessionId: "fixed", reasoning: "high",
+          transformHeaders(headers) { assert.equal(headers["x-auth-fixture"], "auth"); return headers; } }, { api, simpleOptions }));
+      assert.equal(result.message.stopReason, "stop", result.message.errorMessage);
+      assert.equal(body.service_tier, serviceTier);
+      assert.equal(body.model, id); assert.equal(result.message.provider, provider);
+      return result.message.usage.cost;
+    };
+    const ordinary = await run(undefined), priority = await run("priority");
+    assert(ordinary.total > 0);
+    const stripTier = ({ service_tier, ...rest }) => rest;
+    assert.deepEqual(stripTier(bodies[1]), stripTier(bodies[0]), "Fast preserves ordinary wire options except service tier");
+    for (const field of ["input", "output", "cacheRead", "cacheWrite", "total"]) {
+      assert.equal(priority[field], ordinary[field] * 2, `${field} priority multiplier`);
+    }
+    // Codex can report default even after priority was requested. Both adapters
+    // use the request tier in this response case, not payload injection alone.
+    if (provider === "openai-codex") {
+      const fetchDefault = async () => response([complete("resp_default", [], { service_tier: "default" })]);
+      const defaultAdapter = await adapter(t, { fetch: fetchDefault }, selected);
+      const stream = route === "native" ? defaultAdapter.stream(selected, context, { serviceTier: "priority", transport: "sse" })
+        : streamSessionRequest(stockModels, selected, context, { serviceTier: "priority", transport: "sse", fetch: fetchDefault }, { api, simpleOptions });
+      const result = await stream.result();
+      assert.equal(result.stopReason, "stop", result.errorMessage); assert.deepEqual(result.usage.cost, priority);
+    }
+  });
+}

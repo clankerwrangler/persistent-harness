@@ -47,7 +47,7 @@ const requestTypes = new Set([
   "request_attention", "resolve_attention", "list_notifications", "get_notification", "read_notification", "claim_notification_delivery", "record_notification_delivery",
   "stop_child", "revive_child", "delete_child",
   "create_root", "list_sessions", "rename_session", "subscribe_session", "unsubscribe_session", "subscribe_root_output", "unsubscribe_root_output",
-  "submit_input", "respond_extension_ui", "get_session_inference", "set_session_inference", "get_actor_state", "get_actor_entries", "get_visible_messages", "get_visible_image", "compact_session", "restart_kernel", "abort_session",
+  "submit_input", "respond_extension_ui", "get_session_inference", "set_session_inference", "set_session_fast_mode", "get_actor_state", "get_actor_entries", "get_visible_messages", "get_visible_image", "compact_session", "restart_kernel", "abort_session",
   "get_skill_runtime_plan", "provision_skill_runtime",
   "stop_session", "revive_session", "delete_session", "get_liveness", "get_status", "get_usage", "shutdown_daemon",
 ]);
@@ -199,11 +199,18 @@ function extensionUiResponse(params) {
 }
 const INFERENCE_LEVELS = new Set(["off", "minimal", "low", "medium", "high", "xhigh", "max"]);
 function thinkingLevel(value, path) { const level = string(value, path, 16); if (!INFERENCE_LEVELS.has(level)) throw new ProtocolError("invalid_request", `${path} is unsupported`); return level; }
-function inferenceSelection(value, path) { const item = record(value, path); exact(item, new Set(["provider", "model", "thinkingLevel"]), path); return {
+function inferenceSelection(value, path) { const item = record(value, path); exact(item, new Set(["provider", "model", "thinkingLevel", "fastMode"]), path); return {
+  ...(item.fastMode === undefined ? {} : { fastMode: bool(item.fastMode, `${path}.fastMode`) }),
   provider: string(item.provider, `${path}.provider`, 128), model: string(item.model, `${path}.model`, 256), thinkingLevel: thinkingLevel(item.thinkingLevel, `${path}.thinkingLevel`) }; }
 function setInference(params) { const { value, sessionId } = sessionIdParam(params, ["provider", "model", "thinkingLevel", "expected"]); return { sessionId,
   provider: string(value.provider, "params.provider", 128), model: string(value.model, "params.model", 256),
   thinkingLevel: thinkingLevel(value.thinkingLevel, "params.thinkingLevel"), expected: inferenceSelection(value.expected, "params.expected") }; }
+function setFastMode(params) {
+  const { value, sessionId } = sessionIdParam(params, ["fastMode", "expected"]);
+  const expected = inferenceSelection(value.expected, "params.expected");
+  bool(expected.fastMode, "params.expected.fastMode");
+  return { sessionId, fastMode: bool(value.fastMode, "params.fastMode"), expected };
+}
 function visibleMessages(params) {
   const { value, sessionId } = sessionIdParam(params, ["before", "limit"]);
   const before = value.before === undefined ? undefined : string(value.before, "params.before", 2048);
@@ -377,7 +384,7 @@ const validators = new Map([
   ["spawn_child", spawnChild], ["stop_child", childSelector], ["revive_child", childSelector], ["delete_child", childSelector],
   ["create_root", createRoot], ["rename_session", renameSession], ["subscribe_session", subscribe], ["subscribe_root_output", subscribeRootOutput], ["unsubscribe_root_output", empty],
   ["unsubscribe_session", (p) => sessionIdParam(p)], ["submit_input", submit], ["respond_extension_ui", extensionUiResponse],
-  ["get_session_inference", (p) => ({ sessionId: sessionIdParam(p).sessionId })], ["set_session_inference", setInference],
+  ["get_session_inference", (p) => ({ sessionId: sessionIdParam(p).sessionId })], ["set_session_inference", setInference], ["set_session_fast_mode", setFastMode],
   ["get_actor_state", (p) => sessionIdParam(p)], ["get_actor_entries", entries], ["get_visible_messages", visibleMessages], ["get_visible_image", visibleImage], ["compact_session", (p) => sessionIdParam(p)], ["restart_kernel", (p) => sessionIdParam(p)], ["abort_session", (p) => sessionIdParam(p)],
   ["get_skill_runtime_plan", empty], ["provision_skill_runtime", provisionSkillRuntime],
   ["stop_session", (p) => sessionIdParam(p)], ["revive_session", (p) => sessionIdParam(p)], ["delete_session", (p) => sessionIdParam(p)],
