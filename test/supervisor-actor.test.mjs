@@ -1464,7 +1464,28 @@ test("Fast mutation is serialized, durable before acknowledgement, target-scoped
   let names = 0;
   const create = async () => (await client.request("create_root", { cwd: root, repositoryRoot: null, name: `Fast-${++names}`, provider: "openai-codex", model: "gpt-6-astra", thinkingLevel: "off" })).admission.sessionId;
   const id = await create(), otherId = await create();
+  assert.equal(supervisor.store.getSession(id).familyId, supervisor.store.getSession(otherId).familyId);
+  const navigatorEvents = [];
+  client.on("event", frame => { if (frame.event === "navigator_changed") navigatorEvents.push(frame.data); });
+  const child = (parentId, sessionId, supported = true) => {
+    const parent = supervisor.store.getActorLaunch(parentId);
+    return supervisor.store.createChild(parentId, { sessionId, sessionFile: path.join(root, `${sessionId}.jsonl`), actorToken: sessionId,
+      policy: { ...parent.launch, depth: parent.depth + 1, name: sessionId,
+        model: { resolved: supported ? { provider: "openai-codex", id: "gpt-6-astra" } : { provider: "fixture", id: "ordinary" } } } }).session;
+  };
+  child(id, "fast-child"); child("fast-child", "fast-grandchild"); child(id, "ordinary-child", false);
+  const childInitial = await client.request("get_session_inference", { sessionId: "fast-child" });
+  assert.equal(childInitial.fastModeRootSessionId, id); assert.equal(childInitial.selection.fastMode, false);
+  const childLaunch = supervisor.store.getActorLaunch("fast-child");
+  const childClient = new HarnessClient({ socketPath, heartbeatMs: 0 });
+  await childClient.start({ registrationType: "register_actor", sessionId: "fast-child", sessionFile: childLaunch.sessionFile,
+    cwd: childLaunch.cwd, repositoryRoot: childLaunch.repositoryRoot, actorToken: childLaunch.actorToken, actorGeneration: childLaunch.actorGeneration });
+  t.after(() => childClient.stop());
+  const priorChildSample = await childClient.request("flush_actor_inputs", {});
+  for (const fastMode of [false, true]) await assert.rejects(client.request("set_session_fast_mode", {
+    sessionId: "fast-child", fastMode, expected: childInitial.selection }), error => error.code === "invalid_request");
   const initial = await client.request("get_session_inference", { sessionId: id });
+  assert.equal(initial.fastModeRootSessionId, id);
   assert.equal(initial.fastModeSupported, true); assert.equal(initial.selection.fastMode, false);
   const actor = actors.find(actor => actor.session.sessionId === id), launch = supervisor.store.getActorLaunch(id);
   const actorClient = new HarnessClient({ socketPath, heartbeatMs: 0 });
@@ -1478,6 +1499,18 @@ test("Fast mutation is serialized, durable before acknowledgement, target-scoped
   const on = concurrent.find(x => x.status === "fulfilled").value;
   assert.equal(on.selection.fastMode, true); assert.equal(supervisor.store.getSessionFastMode(otherId), false);
   assert.equal((await actorClient.request("flush_actor_inputs", {})).fastMode, true);
+  assert.equal(on.fastModeRootSessionId, id);
+  assert.equal(priorChildSample.fastMode, false);
+  assert.equal((await childClient.request("flush_actor_inputs", {})).fastMode, true);
+  assert.equal(supervisor.store.getSession("fast-child").actorGeneration, childLaunch.actorGeneration);
+  for (const childId of ["fast-child", "fast-grandchild", "ordinary-child"]) {
+    const snapshot = await client.request("get_session_inference", { sessionId: childId });
+    assert.equal(snapshot.selection.fastMode, true); assert.equal(snapshot.fastModeRootSessionId, id);
+    assert.equal(snapshot.fastModeSupported, childId !== "ordinary-child");
+  }
+  await eventually(() => navigatorEvents.some(event => event.reason === "inference_changed"
+    && [id, "fast-child", "fast-grandchild", "ordinary-child"].every(sessionId => event.sessions.some(session =>
+      session.sessionId === sessionId && session.launch.fastMode === true && session.launch.fastModeRootSessionId === id))));
   assert.equal(supervisor.store.getSession(id).actorGeneration, launch.actorGeneration);
   const writes = t.mock.method(supervisor.store, "updateSessionFastMode", () => { throw new Error("injected persistence failure"); });
   await assert.rejects(toggle(false, on.selection), /injected persistence failure/); writes.mock.restore();
@@ -1488,9 +1521,14 @@ test("Fast mutation is serialized, durable before acknowledgement, target-scoped
   assert.equal(supervisor.store.getSessionFastMode(id), true); actor.failRead = false; actor.busy = false;
   const unsupported = await client.request("set_session_inference", { sessionId: id, provider: "fixture", model: "ordinary", thinkingLevel: "off", expected: on.selection });
   assert.equal(unsupported.selection.fastMode, true); assert.equal(unsupported.fastModeSupported, false);
-  await assert.rejects(toggle(true, unsupported.selection), error => error.code === "unsupported_inference");
+  assert.equal((await toggle(true, unsupported.selection)).changed, false, "unsupported roots retain family control");
   const cleared = await toggle(false, unsupported.selection);
   assert.equal(cleared.selection.fastMode, false); assert.equal(cleared.fastModeSupported, false);
+  assert.equal((await childClient.request("flush_actor_inputs", {})).fastMode, false);
+  const enabledByUnsupportedRoot = await toggle(true, cleared.selection);
+  assert.equal(enabledByUnsupportedRoot.fastModeSupported, false); assert.equal(enabledByUnsupportedRoot.selection.fastMode, true);
+  assert.equal((await childClient.request("flush_actor_inputs", {})).fastMode, true);
+  assert.equal((await client.request("get_session_inference", { sessionId: "fast-grandchild" })).selection.fastMode, true);
   const oldExpected = { ...cleared.selection }; delete oldExpected.fastMode;
   await assert.rejects(toggle(true, oldExpected), /fastMode/);
 });

@@ -11,8 +11,7 @@ Init == /\ durable = [s \in Sessions |-> FALSE]
         /\ costTier = tier /\ activeTier = tier /\ view = durable
         /\ readOK = [s \in Sessions |-> FALSE]
         /\ route = [s \in Sessions |-> "simple"]
-Set(s, enabled) == /\ ~enabled \/ supported[s]
-                   /\ durable' = [durable EXCEPT ![s] = enabled]
+Set(s, enabled) == /\ durable' = [durable EXCEPT ![s] = enabled]
                    /\ UNCHANGED <<supported, phase, sampled, tier, costTier, activeTier, view, readOK, route>>
 Refresh(s) == /\ view' = [view EXCEPT ![s] = durable[s]]
               /\ UNCHANGED <<durable, supported, phase, sampled, tier, costTier, activeTier, readOK, route>>

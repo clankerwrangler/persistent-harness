@@ -1024,7 +1024,8 @@ export class HarnessSupervisor {
     if (!session || session.lifecycle === "deleted") throw requestFailure("not_found", "session does not exist");
     const busy = Boolean(state?.isStreaming || state?.isCompacting || Number(state?.pendingMessageCount) > 0
       || ["working", "delegating"].includes(session.activity) || this.store.hasPendingSessionWork(sessionId));
-    return { selection: { provider: current.provider, model: current.id, thinkingLevel: state.thinkingLevel, fastMode: session.launch?.fastMode === true },
+    return { selection: { provider: current.provider, model: current.id, thinkingLevel: state.thinkingLevel, fastMode: session.launch?.fastMode ?? null },
+      fastModeRootSessionId: session.launch?.fastModeRootSessionId ?? null,
       fastModeSupported: supportsFastMode(state.model) && current.fastModeSupported, models, busy, telemetry: this.store.getSessionTelemetry(sessionId) };
   }
 
@@ -1034,23 +1035,29 @@ export class HarnessSupervisor {
   }
 
   async #setSessionFastMode(params) {
+    const preference = this.store.getSessionFastModePreference(params.sessionId);
+    if (preference.fastModeRootSessionId !== params.sessionId) {
+      throw requestFailure("invalid_request", "only the root session can change family Fast mode");
+    }
     const actor = await this.#ensureActorReady(params.sessionId);
     // Read only the target actor, not the provider catalog or unrelated sessions.
     const state = await actor.worker.request("get_state");
     const session = this.store.getSession(params.sessionId);
     if (!session || session.lifecycle === "deleted") throw requestFailure("not_found", "session does not exist");
+    if (session.launch?.fastModeRootSessionId !== params.sessionId) {
+      throw requestFailure("invalid_request", "only the root session can change family Fast mode");
+    }
     const selection = { provider: state?.model?.provider, model: state?.model?.id,
-      thinkingLevel: state?.thinkingLevel, fastMode: session.launch?.fastMode === true };
+      thinkingLevel: state?.thinkingLevel, fastMode: session.launch?.fastMode ?? null };
     if (Object.keys(selection).some(key => selection[key] !== params.expected[key])) {
       throw requestFailure("stale_inference", "session inference selection changed; refresh and try again");
     }
     const fastModeSupported = supportsFastMode(state.model);
-    if (params.fastMode && !fastModeSupported) throw requestFailure("unsupported_inference", "Fast is unavailable for this model");
     const changed = selection.fastMode !== params.fastMode;
     if (changed) this.store.updateSessionFastMode(params.sessionId, params.fastMode, selection.fastMode);
     // The durable receipt is authoritative. No post-commit actor RPC can turn success into failure.
     this.#broadcastNavigator("inference_changed");
-    return { selection: { ...selection, fastMode: params.fastMode }, fastModeSupported, changed };
+    return { selection: { ...selection, fastMode: params.fastMode }, fastModeRootSessionId: params.sessionId, fastModeSupported, changed };
   }
 
   async #setSessionInference(params) {
