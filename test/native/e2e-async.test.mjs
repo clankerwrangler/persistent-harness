@@ -926,3 +926,61 @@ for (const [nativeAsync, modelId] of [[true, "gpt-6-astra"], [false, "gpt-6-astr
   assert.equal(f.requests.length, 4);
   for (const body of f.requests) assert.equal(body.model, modelId);
 });
+
+
+test("family Fast reaches an already resident real child on its next request and survives revival", { timeout: 120_000 }, async t => {
+  const entered = deferred(), release = deferred(); t.after(() => release.resolve());
+  const childRequests = [];
+  const f = await fixture(t, body => {
+    const last = body.input.at(-1);
+    if (last?.role === "user" && text(last).includes("SPAWN_FAST_CHILD")) {
+      return { calls: [{ id: "spawn-fast-child", code: "await rlm('FAST_CHILD_INITIAL', name='fast-child', model='openai-codex/gpt-6-astra')" }] };
+    }
+    if (last?.role === "user" && /FAST_CHILD_(INITIAL|HELD|NEXT|REVIVED)/.test(text(last))) {
+      childRequests.push(body);
+      if (text(last).includes("FAST_CHILD_HELD")) return { writeResponse: async (response, id) => {
+        entered.resolve(); await release.promise; respond(response, id, { answer: "CHILD_NOT_ABORTED" });
+      } };
+      return { answer: "CHILD_SETTLED" };
+    }
+    return { answer: "PARENT_SETTLED" };
+  });
+  await submitAndSettle(f, "SPAWN_FAST_CHILD");
+  const [child] = f.supervisor.store.listChildren(f.sessionId);
+  assert(child);
+  const idle = async () => {
+    const deadline = Date.now() + 30_000;
+    while (f.supervisor.store.getSession(child.sessionId).activity !== "idle" || f.supervisor.store.hasPendingSessionWork(child.sessionId)) {
+      if (Date.now() >= deadline) throw new Error("child did not settle");
+      await new Promise(resolve => setTimeout(resolve, 20));
+    }
+  };
+  await idle();
+  await f.client.request("subscribe_session", { selector: child.sessionId });
+  const generation = f.supervisor.store.getSession(child.sessionId).actorGeneration;
+  const childSubmit = message => f.client.request("submit_input", { sessionId: child.sessionId, message, behavior: "auto" });
+  const inference = () => f.client.request("get_session_inference", { sessionId: f.sessionId });
+  await childSubmit("FAST_CHILD_HELD"); await bounded(entered.promise, "child request held");
+  assert.equal(childRequests.at(-1).service_tier, undefined);
+  const rootSelection = (await inference()).selection;
+  await f.client.request("set_session_fast_mode", { sessionId: f.sessionId, fastMode: true, expected: rootSelection });
+  assert.equal(childRequests.at(-1).service_tier, undefined, "already dispatched request is immutable");
+  assert.equal(f.supervisor.store.getSession(child.sessionId).actorGeneration, generation);
+  const since = f.log.frames.length; release.resolve();
+  await f.log.waitFrame(frame => frame.event === "actor_event" && frame.data.sessionId === child.sessionId
+    && frame.data.event.type === "agent_settled", "held child settled", since);
+  const submitChildAndSettle = async message => {
+    const since = f.log.frames.length; await childSubmit(message);
+    await f.log.waitFrame(frame => frame.event === "actor_event" && frame.data.sessionId === child.sessionId
+      && frame.data.event.type === "agent_settled", "child next request settled", since);
+  };
+  await submitChildAndSettle("FAST_CHILD_NEXT");
+  assert.equal(childRequests.at(-1).service_tier, "priority");
+  assert.equal(f.supervisor.store.getSession(child.sessionId).actorGeneration, generation);
+  await f.client.request("stop_session", { sessionId: child.sessionId });
+  await f.client.request("subscribe_session", { selector: child.sessionId });
+  await submitChildAndSettle("FAST_CHILD_REVIVED");
+  assert.equal(childRequests.at(-1).service_tier, "priority");
+  assert.equal(childRequests.length, 4);
+  assert.equal((await f.client.request("get_session_inference", { sessionId: child.sessionId })).fastModeRootSessionId, f.sessionId);
+});

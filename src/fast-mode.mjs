@@ -1,4 +1,4 @@
-// Fast is a session preference, not a model alias or a reasoning level.
+// Fast is a root-owned family preference, not a model alias or a reasoning level.
 export function supportsFastMode(model) {
   return ["gpt-6-astra", "gpt-6.1-sol"].includes(model?.id)
     && ((model.provider === "openai-codex" && model.api === "openai-codex-responses")

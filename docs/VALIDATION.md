@@ -8,7 +8,7 @@ npm run test:package-load
 npm test
 ```
 
-The tests use isolated temporary state, fake providers, and local processes. For offline real-worker checks, set `PI_HARNESS_PYTHON` to an existing compatible interpreter and `PI_HARNESS_AUTO_INSTALL=0`. Use a private `HOME` and `PI_CODING_AGENT_DIR`; never point a test at running service state or live credentials.
+The tests use isolated temporary state, fake providers, and local processes. All supervisor tests, including fake-worker tests, need private `HOME` and `PI_CODING_AGENT_DIR`: a temporary database alone does not isolate transcripts or background notifications. The default background directory is `$PI_CODING_AGENT_DIR/state/background-jobs` (otherwise `$HOME/.pi/agent/state/background-jobs`); any explicit `backgroundJobsDirectory` must also be test-private. Never point tests at running service state or live credentials. For offline real-worker checks, set `PI_HARNESS_PYTHON` to an existing compatible interpreter and `PI_HARNESS_AUTO_INSTALL=0`.
 
 The managed-runtime test explicitly exercises actual managed reuse and dependency rebuild, not the interpreter override. An optional `PI_HARNESS_TEST_MANAGED_SEED` can contain only cached `bin/uv-0.12.3`, `python/cpython-3.12.12-linux-x86_64-gnu`, and package `cache/` prerequisites. The test copies that seed into its temporary runtime, denies Node fetch, and uses `UV_OFFLINE=1`. Do not supply completed environments, sessions, credentials, or kernel state as the seed. Without cached prerequisites, managed provisioning needs its documented downloads.
 
@@ -56,10 +56,20 @@ The `RecursiveSessionDeletion-*.cfg` configurations cover root and direct-child 
 
 `CanonicalContext.projection` covers selected-source provenance and content edits without changing raw admission or recovery. `ActorCompaction` includes the always-cancel stock preparation stage before active hooks. `NativeProvider.transcript` preserves native history through stock system-message normalization. Tests cover source rejection, branch-local edits, checkpoint/image retention, public preparation capture with no provider/write/UI effects, async span retention, and in-place tool declarations with native opt-in proof.
 
-`SessionFastMode` covers durable per-session defaults, unsupported-model gating,
-request-time sampling, immutable active tiers, and matching wire/accounting tiers.
-The detailed-stream invariant records the pinned stock simple-option filtering
-boundary. Store/control tests check reattach, independent children, concurrent
+`DescendantTraversal` checks deduplicated expansion over finite parent graphs,
+including cycles, deleted intermediates, and working-node subsets. It verifies
+termination, at-most-once expansion, and exclusion of the queried session from
+its own descendant count. A bounded subprocess regression checks cycle-member
+session projections without risking a hung test runner and preserves acyclic and
+deleted-intermediate counts.
+
+`FamilyFastMode` covers two independent roots sharing a family label, a child and
+grandchild, root-only preference writes regardless of root model support,
+missing/deleted ancestors, legacy absent-field default-off versus malformed
+preference failure, retained/new/resident actors, and immutable request samples.
+`SessionFastMode` covers own-model eligibility and matching wire/accounting tiers; its detailed-stream invariant records the pinned stock simple-option
+filtering boundary. Store/control tests also check malformed and bounded ancestry,
+legacy child-local flags, unknown metadata, navigator refresh, revival, concurrent
 expected-selection writes, busy actors, and precommit RPC/persistence failures.
 Native and stock adapter tests use synthetic credentials and mocked transport to
 check payload, reasoning/option parity, and tier-aware estimated cost; real-worker

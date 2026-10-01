@@ -49,27 +49,47 @@ The protocol retains session creation, subscription, input admission, stop/reviv
 ### Session inference controls
 
 `get_session_inference` returns `selection` (`provider`, `model`, `thinkingLevel`,
-`fastMode`), `fastModeSupported`, available models, busy state, and telemetry.
+`fastMode`), `fastModeRootSessionId`, `fastModeSupported`, available models, busy
+state, and telemetry. `selection.fastMode` is the effective root preference;
+`fastModeSupported` describes only the selected session's model. Public session
+metadata exposes the same values as `launch.fastMode`,
+`launch.fastModeRootSessionId`, and `launch.fastModeSupported`. Unknown metadata
+stays null; a model label does not establish support.
+
 `set_session_fast_mode` is an authenticated client-only mutation with
 `{sessionId, fastMode, expected}`. Its expected selection must include all four
 selection fields. Stale selections are rejected. Existing model/thinking mutations
 still accept expectations without `fastMode`.
 
-Fast is a durable session preference, defaulting to false for every new root and
-child. It neither changes model/reasoning identity nor propagates to children.
-Fast applies to conversation inference; automatic and manual compaction keep
-their independent existing provider behavior.
-Enablement currently requires exact `gpt-6-astra` or `gpt-6.1-sol` identity with
-`openai-codex` / `openai-codex-responses` or `openai` / `openai-responses`. Other
-models retain a saved preference without applying it; clients may clear it there
-but cannot enable Fast on an unsupported model. Fast requests priority service,
-which can use more allowance or incur higher cost; it does not guarantee latency.
+Fast is a durable root-owned family preference, defaulting to false for a new
+root. A retained root's valid launch object with no `fastMode` property also
+resolves to false, without a migration or backfill. A malformed launch or a
+present nonboolean preference remains unknown. Only the root session can change
+it, including when its own model does not support Fast. Child-target writes
+return `invalid_request`, including no-ops.
+Existing child-local flags remain stored but are not used. Fast does not change
+model/reasoning identity; automatic and manual compaction retain their independent
+existing provider behavior.
 
-The existing authenticated actor queue flush returns one canonical preference
-sample during request preparation. A successful mutation affects the next sample,
-including on an already resident actor; it does not interrupt an in-flight request.
-Preference-read failure blocks that request rather than silently using a cached
-value. Native requests receive `options.serviceTier = "priority"`. Pi 0.99.1's
+Conversation requests apply Fast only to exact `gpt-6-astra` or `gpt-6.1-sol`
+identity with `openai-codex` / `openai-codex-responses` or
+`openai` / `openai-responses`. Unsupported descendants keep ordinary inference
+while supported descendants use the root preference. Fast requests priority
+service, which can use more allowance or incur higher cost; it does not guarantee
+latency.
+
+One bounded ancestry resolver follows validated parent edges to the depth-0 root
+for controls, session/navigator metadata, and authenticated request preparation.
+It never selects a root by `familyId`: independent roots can share that label.
+Missing, deleted, cyclic, malformed, or over-64-edge ancestry projects unknown
+metadata and blocks preference sampling rather than selecting another root.
+
+The existing authenticated actor queue flush returns one canonical root preference
+sample during request preparation. Root changes affect the next request of every
+existing, new, retained, or revived descendant, including already resident actors.
+Already sampled requests remain immutable. Preference-read failure blocks that
+request rather than silently using a cached value. Native requests receive
+`options.serviceTier = "priority"`. Pi 0.99.1's
 stock `streamSimple` discards that option, so supported Fast stock requests use
 public simple-option/reasoning helpers and `ModelRuntime.stream`; ordinary requests
 keep `streamSimple`. Provider serialization and cost accounting both receive the
