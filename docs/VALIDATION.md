@@ -55,3 +55,14 @@ The `RecursiveSessionDeletion-*.cfg` configurations cover root and direct-child 
 `ModelCatalogRefresh` models the catalog call integration: a 15-second abort signal, delegated browsing policy, local-only pin admission, unchanged model selection, and visible cached fallback. Pi owns refresh concurrency, cache, TTL, and transport behavior; this model does not reimplement or prove them. The catalog integration test uses stock Pi with synthetic credentials, isolated metadata, and mocked public catalog responses to check picker/search visibility, stale-actor exact pins, offline use, and safe warnings.
 
 `CanonicalContext.projection` covers selected-source provenance and content edits without changing raw admission or recovery. `ActorCompaction` includes the always-cancel stock preparation stage before active hooks. `NativeProvider.transcript` preserves native history through stock system-message normalization. Tests cover source rejection, branch-local edits, checkpoint/image retention, public preparation capture with no provider/write/UI effects, async span retention, and in-place tool declarations with native opt-in proof.
+
+`SessionFastMode` covers durable per-session defaults, unsupported-model gating,
+request-time sampling, immutable active tiers, and matching wire/accounting tiers.
+The detailed-stream invariant records the pinned stock simple-option filtering
+boundary. Store/control tests check reattach, independent children, concurrent
+expected-selection writes, busy actors, and precommit RPC/persistence failures.
+Native and stock adapter tests use synthetic credentials and mocked transport to
+check payload, reasoning/option parity, and tier-aware estimated cost; real-worker
+loopback tests cover streaming toggles, subsequent requests, reattachment, and
+clearing Fast. These are offline checks, not live service-tier eligibility,
+latency, or billing guarantees.

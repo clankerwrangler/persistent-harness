@@ -771,9 +771,9 @@ test("selected-session inference changes replace only an idle actor and serializ
   const targetFamily = () => family.filter((actor) => actor.session.sessionId === id);
   const initialGeneration = supervisor.store.getSession(id).actorGeneration;
   const first = await client.request("get_session_inference", { sessionId: id });
-  assert.deepEqual(first.selection, { provider: "fake", model: "alpha", thinkingLevel: "off" });
+  assert.deepEqual(first.selection, { provider: "fake", model: "alpha", thinkingLevel: "off", fastMode: false });
   assert.deepEqual(first.models[0], { provider: "fake", id: "alpha", name: "Alpha", reasoning: true,
-    thinkingLevels: ["off", "minimal", "low", "medium", "high", "xhigh"], contextWindow: 200000 });
+    thinkingLevels: ["off", "minimal", "low", "medium", "high", "xhigh"], contextWindow: 200000, fastModeSupported: false });
   assert.doesNotMatch(JSON.stringify(first), /must-not-leak|authorization|baseUrl|apiKey/);
   targetFamily()[0].busy = true;
   await assert.rejects(client.request("set_session_inference", { sessionId: id, provider: "fake", model: "beta", thinkingLevel: "off",
@@ -793,7 +793,7 @@ test("selected-session inference changes replace only an idle actor and serializ
   supervisor.store.markMessageDelivered(pendingMessage.messageId, id); supervisor.store.acknowledgeMessage(pendingMessage.messageId, id);
   const changed = await client.request("set_session_inference", { sessionId: id, provider: "fake", model: "beta", thinkingLevel: "off",
     expected: first.selection });
-  assert.equal(changed.changed, true); assert.deepEqual(changed.selection, { provider: "fake", model: "beta", thinkingLevel: "off" });
+  assert.equal(changed.changed, true); assert.deepEqual(changed.selection, { provider: "fake", model: "beta", thinkingLevel: "off", fastMode: false });
   assert.equal(supervisor.store.getSession(id).actorGeneration, initialGeneration + 1); assert.equal(targetFamily()[0].isRunning, false);
   failNextStart = true;
   await assert.rejects(client.request("set_session_inference", { sessionId: id, provider: "fake", model: "alpha", thinkingLevel: "high",
@@ -1433,4 +1433,64 @@ test("abnormal child exit durably queues a sanitized direct-parent message", asy
   await new Promise(resolve => setTimeout(resolve,1500));
   assert.equal(second.events.length,1);
   assert.equal(supervisor.store.listMessages().length,1);
+});
+
+class FastPiActor extends FakePiActor {
+  busy = false;
+  failRead = false;
+  selected() { return { ...this.session.launch.model.resolved, api: this.session.launch.model.resolved.provider === "openai-codex" ? "openai-codex-responses" : "fixture-api" }; }
+  async start() { this.isRunning = true; return { sessionId: this.session.sessionId, model: this.selected(), thinkingLevel: "off", sessionFile: this.session.sessionFile }; }
+  async request(type) {
+    this.requests.push(type);
+    if (type === "get_state") { if (this.failRead) throw new Error("injected state read failure");
+      return { model: this.selected(), thinkingLevel: "off", isStreaming: this.busy, isCompacting: false, pendingMessageCount: 0 }; }
+    if (type === "get_available_models") return { models: [
+      { provider: "openai-codex", api: "openai-codex-responses", id: "gpt-6-astra", name: "Astra", reasoning: false, contextWindow: 32000 },
+      { provider: "fixture", api: "fixture-api", id: "ordinary", name: "Ordinary", reasoning: false, contextWindow: 32000 },
+    ] };
+    if (type === "get_entries") return { entries: [] };
+    throw new Error(`unexpected Fast actor RPC ${type}`);
+  }
+}
+
+test("Fast mutation is serialized, durable before acknowledgement, target-scoped, and independent of actor streaming", async t => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "harness-fast-control-"));
+  const socketPath = path.join(root, "run", "supervisor.sock"), actors = [];
+  const supervisor = new HarnessSupervisor({ socketPath, databasePath: path.join(root, "state.sqlite"), pidPath: path.join(root, "pid"), actorInactivityMs: 0,
+    actorFactory: options => { const actor = new FastPiActor(options); actors.push(actor); return actor; },
+    processIdentityFactory: async pid => ({ version: 1, pid, processGroup: pid, startTime: "fake", ownerToken: "fake" }), processTerminator: async () => ({ terminated: true }) });
+  await supervisor.start(); t.after(async () => { await supervisor.stop(); await rm(root, { recursive: true, force: true }); });
+  const client = new HarnessClient({ socketPath, heartbeatMs: 0 }); await client.start({ registrationType: "register_client", clientInstanceId: "fast-control" }); t.after(() => client.stop());
+  let names = 0;
+  const create = async () => (await client.request("create_root", { cwd: root, repositoryRoot: null, name: `Fast-${++names}`, provider: "openai-codex", model: "gpt-6-astra", thinkingLevel: "off" })).admission.sessionId;
+  const id = await create(), otherId = await create();
+  const initial = await client.request("get_session_inference", { sessionId: id });
+  assert.equal(initial.fastModeSupported, true); assert.equal(initial.selection.fastMode, false);
+  const actor = actors.find(actor => actor.session.sessionId === id), launch = supervisor.store.getActorLaunch(id);
+  const actorClient = new HarnessClient({ socketPath, heartbeatMs: 0 });
+  await actorClient.start({ registrationType: "register_actor", sessionId: id, sessionFile: launch.sessionFile, cwd: launch.cwd, repositoryRoot: launch.repositoryRoot, actorToken: launch.actorToken, actorGeneration: launch.actorGeneration }); t.after(() => actorClient.stop());
+  const toggle = (fastMode, expected) => client.request("set_session_fast_mode", { sessionId: id, fastMode, expected });
+  await assert.rejects(actorClient.request("set_session_fast_mode", { sessionId: otherId, fastMode: true, expected: initial.selection }), /not available to actors/);
+  actor.busy = true;
+  const concurrent = await Promise.allSettled([toggle(true, initial.selection), toggle(true, initial.selection)]);
+  assert.equal(concurrent.filter(x => x.status === "fulfilled").length, 1);
+  assert.equal(concurrent.find(x => x.status === "rejected").reason.code, "stale_inference");
+  const on = concurrent.find(x => x.status === "fulfilled").value;
+  assert.equal(on.selection.fastMode, true); assert.equal(supervisor.store.getSessionFastMode(otherId), false);
+  assert.equal((await actorClient.request("flush_actor_inputs", {})).fastMode, true);
+  assert.equal(supervisor.store.getSession(id).actorGeneration, launch.actorGeneration);
+  const writes = t.mock.method(supervisor.store, "updateSessionFastMode", () => { throw new Error("injected persistence failure"); });
+  await assert.rejects(toggle(false, on.selection), /injected persistence failure/); writes.mock.restore();
+  assert.equal((await actorClient.request("flush_actor_inputs", {})).fastMode, true);
+  await assert.rejects(actorClient.request("flush_actor_inputs", { sessionId: otherId }), /params.sessionId is not supported/);
+  actor.failRead = true;
+  await assert.rejects(toggle(false, on.selection), /injected state read failure/);
+  assert.equal(supervisor.store.getSessionFastMode(id), true); actor.failRead = false; actor.busy = false;
+  const unsupported = await client.request("set_session_inference", { sessionId: id, provider: "fixture", model: "ordinary", thinkingLevel: "off", expected: on.selection });
+  assert.equal(unsupported.selection.fastMode, true); assert.equal(unsupported.fastModeSupported, false);
+  await assert.rejects(toggle(true, unsupported.selection), error => error.code === "unsupported_inference");
+  const cleared = await toggle(false, unsupported.selection);
+  assert.equal(cleared.selection.fastMode, false); assert.equal(cleared.fastModeSupported, false);
+  const oldExpected = { ...cleared.selection }; delete oldExpected.fastMode;
+  await assert.rejects(toggle(true, oldExpected), /fastMode/);
 });

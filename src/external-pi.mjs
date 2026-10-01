@@ -122,16 +122,17 @@ export async function resolveExternalPi({ env = process.env, cwd = process.cwd()
     api: await publicEntry(ai),
     core: await publicEntry(core),
     responsesApi: await publicEntry(ai, "./api/openai-responses-shared"),
+    simpleOptions: await publicEntry(ai, "./api/simple-options"),
   };
 }
 
 export async function loadExternalPi(options) {
   const paths = await resolveExternalPi(options);
-  const [sdk, api, core, responsesApi] = await Promise.all(
-    [paths.sdk, paths.api, paths.core, paths.responsesApi].map((entry) => import(pathToFileURL(entry).href)),
+  const [sdk, api, core, responsesApi, simpleOptions] = await Promise.all(
+    [paths.sdk, paths.api, paths.core, paths.responsesApi, paths.simpleOptions].map((entry) => import(pathToFileURL(entry).href)),
   );
   for (const name of ["createAgentSession", "SessionManager", "ModelRuntime", "ExtensionRunner", "createExtensionRuntime"]) {
     if (typeof sdk[name] !== "function") throw new Error(`Stock Pi public API is unavailable: ${name}`);
   }
-  return { sdk, api, core, responsesApi, paths };
+  return { sdk, api, core, responsesApi, simpleOptions, paths };
 }
