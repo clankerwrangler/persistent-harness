@@ -38,18 +38,40 @@ export function createCompactionPreparationCapture() {
   };
 }
 
+/** A manual refresh may replace only the current summary, without discarding any
+ * of its selected tail. Public projection owns the anchor; no synthetic entry or
+ * persistent setting change is needed when stock cut selection has nothing new.
+ */
+function prepareManualRefresh(sdk, session, branchEntries, leafId) {
+  const projection = sdk.buildSessionProjection(branchEntries, leafId);
+  const previous = projection.entries[0]?.sourceEntry;
+  const anchor = projection.entries[1]?.sourceEntry;
+  if (previous?.type !== "compaction" || typeof previous.summary !== "string"
+      || !previous.summary.trim() || !anchor?.id) return undefined;
+  const details = !previous.fromHook && previous.details;
+  const paths = value => Array.isArray(value) ? value.filter(path => typeof path === "string") : [];
+  return {
+    firstKeptEntryId: anchor.id, previousSummary: previous.summary,
+    messagesToSummarize: [], turnPrefixMessages: [], isSplitTurn: false,
+    tokensBefore: projection.messages.reduce((sum, message) => sum + sdk.estimateTokens(message), 0),
+    fileOps: { read: new Set(paths(details?.readFiles)), written: new Set(), edited: new Set(paths(details?.modifiedFiles)) },
+    settings: session.settingsManager.getCompactionSettings(session.model),
+  };
+}
+
 /** Stock owns edits, cut selection, usage invalidation and file tracking. Only the
  * harness's native async call/result span may require an earlier retained turn.
  */
-export async function prepareActorCompaction({ sdk, session, capture }) {
+export async function prepareActorCompaction({ sdk, session, capture, reason }) {
   const manager = session.sessionManager, leafId = manager.getLeafId();
   const original = clone(manager.getEntries());
   const { entries: branchEntries, diagnostics } = projectCanonicalBranch({ entries: original, leafId });
   const projection = projectCanonicalContext({ entries: branchEntries, leafId, buildSessionProjection: sdk.buildSessionProjection, mode: "native" });
   const outstanding = projection.outstanding;
   check(outstanding.every(call => call.retainedInContext), "ERR_COMPACTION_PENDING_ALREADY_PRUNED");
-  const preparation = await capture.read(session);
+  let preparation = await capture.read(session);
   check(session.isIdle && manager.getLeafId() === leafId && isDeepStrictEqual(manager.getEntries(), original), "ERR_COMPACTION_STALE_SNAPSHOT");
+  if (!preparation && reason === "manual") preparation = prepareManualRefresh(sdk, session, branchEntries, leafId);
   const base = { branchEntries, diagnostics, outstanding, preparation };
   if (!preparation) return base;
   const projected = sdk.buildSessionProjection(branchEntries, leafId).entries;
@@ -124,7 +146,7 @@ export function createCompactionDriver({ sdk, core, runner, session, models, cap
     try {
       sameSnapshot();
       check(session.model, "ERR_COMPACTION_MODEL");
-      const prepared = await prepareActorCompaction({ sdk, session, capture });
+      const prepared = await prepareActorCompaction({ sdk, session, capture, reason });
       sameSnapshot();
       check(prepared.outstanding.length === 0, "ERR_COMPACTION_PENDING_CALLS");
       check(prepared.preparation, "ERR_COMPACTION_NOTHING_TO_SUMMARIZE");

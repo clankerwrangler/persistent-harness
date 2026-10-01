@@ -405,3 +405,74 @@ test("split summary starts are serialized and queued aborts never dispatch provi
     assert.equal(maximum, 1);
   }
 });
+
+
+test("manual refresh of an existing checkpoint preserves the full short tail and stock file facts", async t => {
+  for (const checkpointLeaf of [true, false]) {
+    const f = await driverFixture(t, { keep: 20000 });
+    const kept = f.manager.appendMessage(user("kept requirement"));
+    f.manager.appendMessage(assistant("kept answer"));
+    f.manager.appendCompaction("previous portable summary", kept, 900,
+      { readFiles: ["read.txt"], modifiedFiles: ["edited.txt"] });
+    if (!checkpointLeaf) f.manager.appendMessage(user("brief follow-on"));
+    const before = structuredClone(f.manager.getEntries());
+    const tail = f.manager.buildSessionProjection().messages.filter(message => message.role !== "compactionSummary" && message.role !== "system");
+    const settingsBefore = f.session.settingsManager.getCompactionSettings(f.session.model);
+    const result = await f.run();
+    assert.equal(result.firstKeptEntryId, kept);
+    assert.match(result.summary, /fixture summary/);
+    assert.deepEqual(result.details, { readFiles: ["read.txt"], modifiedFiles: ["edited.txt"] });
+    assert.deepEqual(f.manager.getEntries().slice(0, before.length), before);
+    assert.deepEqual(f.manager.buildSessionProjection().messages.filter(message => message.role !== "compactionSummary" && message.role !== "system"), tail);
+    assert.deepEqual(f.session.settingsManager.getCompactionSettings(f.session.model), settingsBefore);
+    assert.equal(f.requests.length, 1);
+    assert.match(JSON.stringify(f.requests[0].context), /previous portable summary/);
+    assert.doesNotMatch(JSON.stringify(f.requests[0].context), /kept requirement/);
+    assert.equal(f.published.filter(event => event.type === "compaction_end").length, 1);
+  }
+});
+
+test("manual refresh offers ordinary extension lifecycle without a discardable span", async t => {
+  let preparation;
+  const f = await driverFixture(t, { keep: 20000, hooks: pi => {
+    pi.on("session_before_compact", event => {
+      preparation = event.preparation;
+      return { compaction: { summary: "updated summary", firstKeptEntryId: preparation.firstKeptEntryId, tokensBefore: preparation.tokensBefore } };
+    });
+  } });
+  const kept = f.manager.appendMessage(user("short tail"));
+  f.manager.appendCompaction("old summary", kept, 900);
+  await f.run();
+  assert.equal(preparation.previousSummary, "old summary");
+  assert.equal(preparation.firstKeptEntryId, kept);
+  assert.deepEqual(preparation.messagesToSummarize, []);
+  assert.deepEqual(preparation.turnPrefixMessages, []);
+  assert.equal(f.requests.length, 0);
+});
+
+test("refresh does not enable automatic compaction or uncheckpointed small histories", async t => {
+  for (const reason of ["threshold", "overflow", "manual"]) {
+    const f = await driverFixture(t, { keep: 20000 });
+    const kept = f.manager.appendMessage(user("small history"));
+    if (reason !== "manual") f.manager.appendCompaction("old summary", kept, 900);
+    const before = structuredClone(f.manager.getEntries());
+    await assert.rejects(f.run({ reason }), error => error.code === "ERR_COMPACTION_NOTHING_TO_SUMMARIZE");
+    assert.deepEqual(f.manager.getEntries(), before);
+    assert.equal(f.requests.length, 0);
+  }
+});
+
+test("manual refresh final driver guard refuses a source change after custom result", async t => {
+  let f;
+  f = await driverFixture(t, { keep: 20000, hooks: pi => {
+    pi.on("session_before_compact", event => ({ compaction: {
+      summary: "must not append", firstKeptEntryId: event.preparation.firstKeptEntryId, tokensBefore: event.preparation.tokensBefore,
+    } }));
+    pi.on("session_before_compact", () => { f.manager.appendCustomEntry("concurrent-change", {}); });
+  } });
+  const kept = f.manager.appendMessage(user("short tail"));
+  f.manager.appendCompaction("old summary", kept, 900);
+  await assert.rejects(f.run(), error => error.code === "ERR_COMPACTION_STALE_SNAPSHOT");
+  assert.equal(f.manager.getEntries().filter(entry => entry.type === "compaction").length, 1);
+  assert.equal(f.requests.length, 0);
+});
