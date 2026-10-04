@@ -10,7 +10,7 @@ import { projectProgressEntry } from "./progress-projection.mjs";
 import { firstCompletedTitleTurn, rootTitleExcerpt } from "./root-title.mjs";
 import { canonicalRetryInput } from "./session-actions.mjs";
 
-const READ_CHUNK_BYTES = 64 * 1024;
+const READ_CHUNK_BYTES = 256 * 1024;
 const MAX_JSONL_LINE_BYTES = 256 * 1024 * 1024;
 const utf8 = new TextDecoder("utf-8", { fatal: true });
 const HISTORY_CURSOR_MAX = 2048;

@@ -566,3 +566,37 @@ test("tool images retain input image and canonical source bounds", async (t) => 
   await writeFile(file, encoded.replace("original", "modified"));
   await assert.rejects(reader.readImage(options), /source changed/);
 });
+
+test("chunk boundaries preserve UTF-8, CRLF source hashes, and incomplete appended frames", async (t) => {
+  const { file, id } = await fixture(t);
+  const chunkBytes = 256 * 1024;
+  const first = message("unicode", "padding", "assistant", "🧭 visible");
+  const encoded = JSON.stringify(first);
+  const textOffset = Buffer.byteLength(encoded.slice(0, encoded.indexOf("🧭")));
+  const headerLine = `${JSON.stringify(header(id))}\n`;
+  const padding = { type: "custom", customType: "padding", id: "padding", parentId: null, data: "" };
+  const emptyPaddingLine = `${JSON.stringify(padding)}\n`;
+  // The four-byte code point straddles the read boundary. The preceding private
+  // line also spans several chunks, exercising both single- and multi-part lines.
+  padding.data = "x".repeat(3 * chunkBytes - 1 - textOffset
+    - Buffer.byteLength(headerLine) - Buffer.byteLength(emptyPaddingLine));
+  const prefix = `${headerLine}${JSON.stringify(padding)}\n`;
+  assert.equal((Buffer.byteLength(prefix) + textOffset) % chunkBytes, chunkBytes - 1);
+  await writeFile(file, `${prefix}${encoded}\r\n`);
+  const reader = new VisibleTranscriptReader();
+  const options = { sessionFile: file, sessionId: id, publicView: true, maxMessages: 1 };
+  const firstPage = await reader.read(options);
+  assert.equal(firstPage.messages[0].text, "🧭 visible");
+  const second = message("appended", "unicode", "user", "café 🧭");
+  const bytes = Buffer.from(JSON.stringify(second));
+  const split = bytes.indexOf(Buffer.from("🧭")) + 2;
+  await appendFile(file, bytes.subarray(0, split));
+  assert.deepEqual(await reader.read(options), firstPage, "an incomplete UTF-8 frame is not projected");
+  await appendFile(file, Buffer.concat([bytes.subarray(split), Buffer.from("\r\n")]));
+  const latest = await reader.read(options);
+  assert.equal(latest.messages[0].text, "café 🧭");
+  assert.equal(latest.historyPage.branchId, firstPage.historyPage.branchId);
+  assert.deepEqual((await reader.read({ ...options, before: latest.historyPage.nextCursor })).messages, firstPage.messages);
+  assert.deepEqual((await reader.readBranch({ ...options, leafId: second.id })).entries, [padding, first, second],
+    "canonical offsets and hashes still reread the exact CRLF-delimited source");
+});
