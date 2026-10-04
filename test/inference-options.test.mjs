@@ -33,9 +33,10 @@ test("projects only bounded public model metadata and preserves thinking map hol
     reasoning: true,
     thinkingLevels: ["off", "low", "high", "max"],
     contextWindow: 200_000,
+    fastModeSupported: false,
   }]);
   assert.deepEqual(Object.keys(projected[0]), [
-    "provider", "id", "name", "reasoning", "thinkingLevels", "contextWindow",
+    "provider", "id", "name", "reasoning", "thinkingLevels", "contextWindow", "fastModeSupported",
   ]);
   assert.doesNotMatch(JSON.stringify(projected), /sk-do-not-project|Authorization|private\.invalid|secretRate/);
   assert.notEqual(projected[0], input);

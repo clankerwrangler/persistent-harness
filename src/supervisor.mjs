@@ -18,6 +18,7 @@ import { CronScheduler } from "./cron-scheduler.mjs";
 import { CronStore } from "./cron-store.mjs";
 import { NotificationStore, NOTIFICATION_IDLE_MS } from "./notification-store.mjs";
 import { JsonLineDecoder, encodeFrame } from "./framing.mjs";
+import { supportsFastMode } from "./fast-mode.mjs";
 import { projectAvailableModels, resolveModelSelection, validateInferenceEffort } from "./inference-options.mjs";
 import { actorInputPrompt,
   MAX_FRAME_BYTES,
@@ -638,7 +639,8 @@ export class HarnessSupervisor {
       if (!actor || actor.generation !== state.generation) throw new Error("actor generation is stale");
       return { continuationOwner: `input-queue\0${state.sessionId}\0${state.generation}`, run: async () => {
         await this.#deliverActorInputs(state.sessionId, actor);
-        return { flushed: true };
+        // Read after delivery at the existing authenticated request cutoff.
+        return { flushed: true, fastMode: this.store.getSessionFastMode(state.sessionId) };
       } };
     }
     if (state.role === "actor" && ["get_actor_input", "accept_actor_input", "record_input_delivery"].includes(type)) {
@@ -846,6 +848,7 @@ export class HarnessSupervisor {
     if (type === "unsubscribe_session") { state.subscriptions.delete(params.sessionId); return { detached: true }; }
     if (type === "get_session_inference") return this.#withSessionMutation(params.sessionId, () => this.#getSessionInference(params.sessionId));
     if (type === "set_session_inference") return this.#withSessionMutation(params.sessionId, () => this.#setSessionInference(params));
+    if (type === "set_session_fast_mode") return this.#withSessionMutation(params.sessionId, () => this.#setSessionFastMode(params));
     if (type === "submit_input") return this.#withSessionMutation(params.sessionId, async () => {
       const inputId = params.clientRequestId ? `client-${createHash("sha256").update(params.sessionId).update("\0").update(params.clientRequestId).digest("hex")}` : undefined;
       const clientMessageId = params.clientMessageId ?? params.clientRequestId;
@@ -1021,13 +1024,40 @@ export class HarnessSupervisor {
     if (!session || session.lifecycle === "deleted") throw requestFailure("not_found", "session does not exist");
     const busy = Boolean(state?.isStreaming || state?.isCompacting || Number(state?.pendingMessageCount) > 0
       || ["working", "delegating"].includes(session.activity) || this.store.hasPendingSessionWork(sessionId));
-    return { selection: { provider: current.provider, model: current.id, thinkingLevel: state.thinkingLevel },
-      models, busy, telemetry: this.store.getSessionTelemetry(sessionId) };
+    return { selection: { provider: current.provider, model: current.id, thinkingLevel: state.thinkingLevel, fastMode: session.launch?.fastMode ?? null },
+      fastModeRootSessionId: session.launch?.fastModeRootSessionId ?? null,
+      fastModeSupported: supportsFastMode(state.model) && current.fastModeSupported, models, busy, telemetry: this.store.getSessionTelemetry(sessionId) };
   }
 
   async #getSessionInference(sessionId) {
     const actor = await this.#ensureActorReady(sessionId);
     return this.#inferenceSnapshot(sessionId, actor);
+  }
+
+  async #setSessionFastMode(params) {
+    const preference = this.store.getSessionFastModePreference(params.sessionId);
+    if (preference.fastModeRootSessionId !== params.sessionId) {
+      throw requestFailure("invalid_request", "only the root session can change family Fast mode");
+    }
+    const actor = await this.#ensureActorReady(params.sessionId);
+    // Read only the target actor, not the provider catalog or unrelated sessions.
+    const state = await actor.worker.request("get_state");
+    const session = this.store.getSession(params.sessionId);
+    if (!session || session.lifecycle === "deleted") throw requestFailure("not_found", "session does not exist");
+    if (session.launch?.fastModeRootSessionId !== params.sessionId) {
+      throw requestFailure("invalid_request", "only the root session can change family Fast mode");
+    }
+    const selection = { provider: state?.model?.provider, model: state?.model?.id,
+      thinkingLevel: state?.thinkingLevel, fastMode: session.launch?.fastMode ?? null };
+    if (Object.keys(selection).some(key => selection[key] !== params.expected[key])) {
+      throw requestFailure("stale_inference", "session inference selection changed; refresh and try again");
+    }
+    const fastModeSupported = supportsFastMode(state.model);
+    const changed = selection.fastMode !== params.fastMode;
+    if (changed) this.store.updateSessionFastMode(params.sessionId, params.fastMode, selection.fastMode);
+    // The durable receipt is authoritative. No post-commit actor RPC can turn success into failure.
+    this.#broadcastNavigator("inference_changed");
+    return { selection: { ...selection, fastMode: params.fastMode }, fastModeRootSessionId: params.sessionId, fastModeSupported, changed };
   }
 
   async #setSessionInference(params) {
@@ -1054,7 +1084,7 @@ export class HarnessSupervisor {
     try {
       await this.#stopActor(params.sessionId, "passivated");
       persistedTargetLaunch = this.store.updateSessionInference(params.sessionId,
-        { provider: target.provider, model: target.id, thinkingLevel: params.thinkingLevel, contextWindow: target.contextWindow }, launchBefore).launch;
+        { provider: target.provider, model: target.id, thinkingLevel: params.thinkingLevel, contextWindow: target.contextWindow, fastModeSupported: target.fastModeSupported }, launchBefore).launch;
       this.#requestActorStart(params.sessionId, true);
       const replacement = await this.#ensureActorReady(params.sessionId);
       const result = await this.#inferenceSnapshot(params.sessionId, replacement);
@@ -1691,7 +1721,7 @@ export class HarnessSupervisor {
       if (typeof state?.model?.provider === "string" && typeof state?.model?.id === "string"
         && typeof state?.thinkingLevel === "string") {
         this.store.recordResolvedSessionInference(sessionId, session.actorGeneration,
-          { provider: state.model.provider, model: state.model.id, thinkingLevel: state.thinkingLevel });
+          { provider: state.model.provider, model: state.model.id, thinkingLevel: state.thinkingLevel, fastModeSupported: supportsFastMode(state.model) });
       }
       this.store.assertSessionAvailable(sessionId);
       const processIdentity = await this.processIdentityFactory(worker.pid, session.actorToken);

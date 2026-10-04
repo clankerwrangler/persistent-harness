@@ -68,7 +68,7 @@ async function fixture(t, { holdReconnect = false, dropAck = false, rejectFlush 
           socket.write(encodeFrame(errorResponse(request.id, request.type, "verified flush rejection"))); continue;
         }
         if (request.type === "flush_actor_inputs" && dropFlush) { socket.destroy(); continue; }
-        socket.write(encodeFrame(response(request.id, request.type, request.type === "flush_actor_inputs" ? { flushed: true } : {})));
+        socket.write(encodeFrame(response(request.id, request.type, request.type === "flush_actor_inputs" ? { flushed: true, fastMode: false } : {})));
       }
     });
   });

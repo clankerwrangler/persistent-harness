@@ -15,18 +15,51 @@ function parseJson(value, fallback = null) {
   try { return JSON.parse(value); } catch { return fallback; }
 }
 
-function publicLaunch(value) {
+// Resolve only actual parent edges. Shared family labels are not root identities.
+// The bound matches the navigator's ancestor snapshot; partial ancestry is unknown.
+function resolveFastModePreference(sessionId, readRow) {
+  const unknown = { fastMode: null, fastModeRootSessionId: null };
+  const seen = new Set();
+  let id = sessionId, expectedDepth = null;
+  for (let hops = 0; hops <= MAX_NAVIGATOR_ANCESTOR_DEPTH; hops += 1) {
+    if (seen.has(id)) return unknown;
+    seen.add(id);
+    const row = readRow(id);
+    if (!row || row.id !== id || row.lifecycle === "deleted" || !Number.isSafeInteger(row.depth)
+      || row.depth < 0 || row.depth > MAX_NAVIGATOR_ANCESTOR_DEPTH
+      || (expectedDepth !== null && row.depth !== expectedDepth)) return unknown;
+    if (row.kind === "root") {
+      if (row.depth !== 0 || row.parent_session_id !== null) return unknown;
+      const launch = parseJson(row.launch_json);
+      let fastMode = null;
+      if (launch !== null && typeof launch === "object" && !Array.isArray(launch)) {
+        // Retained pre-feature roots default off without rewriting their launch state.
+        if (!Object.hasOwn(launch, "fastMode")) fastMode = false;
+        else if (typeof launch.fastMode === "boolean") fastMode = launch.fastMode;
+      }
+      return { fastMode, fastModeRootSessionId: row.id };
+    }
+    if (row.kind !== "child" || row.depth === 0 || typeof row.parent_session_id !== "string" || !row.parent_session_id) return unknown;
+    expectedDepth = row.depth - 1;
+    id = row.parent_session_id;
+  }
+  return unknown;
+}
+
+function publicLaunch(value, preference) {
   const launch = typeof value === "string" ? parseJson(value) : value;
   if (!launch) return null;
   return {
     model: launch.model,
     thinking: launch.thinking,
+    ...preference,
+    fastModeSupported: typeof launch.fastModeSupported === "boolean" ? launch.fastModeSupported : null,
     ...(launch.contextFork ? { contextFork: launch.contextFork } : {}),
     capabilityIds: Array.isArray(launch.capabilities) ? launch.capabilities.map((item) => item.id) : [],
   };
 }
 
-function mapSession(row) {
+function mapSession(row, preference) {
   if (!row) return undefined;
   return {
     sessionId: row.id,
@@ -46,7 +79,7 @@ function mapSession(row) {
     actorIdentity: parseJson(row.actor_identity_json),
     quietSince: row.quiet_since,
     lastError: row.last_error,
-    launch: publicLaunch(row.launch_json),
+    launch: publicLaunch(row.launch_json, preference),
     createdAt: row.created_at,
     updatedAt: row.updated_at,
     lastActivityAt: row.last_activity_at ?? row.created_at,
@@ -396,11 +429,11 @@ export class HarnessStore {
     return Number(this.#db.prepare(`
       WITH RECURSIVE descendants(id) AS (
         SELECT id FROM sessions WHERE parent_session_id = ? AND lifecycle <> 'deleted'
-        UNION ALL
+        UNION
         SELECT s.id FROM sessions s JOIN descendants d ON s.parent_session_id = d.id WHERE s.lifecycle <> 'deleted'
       )
-      SELECT count(*) AS count FROM sessions WHERE id IN descendants AND activity = 'working'
-    `).get(sessionId).count);
+      SELECT count(*) AS count FROM sessions WHERE id IN descendants AND id <> ? AND activity = 'working'
+    `).get(sessionId, sessionId).count);
   }
 
   #sessionLineage(sessionId) {
@@ -421,7 +454,8 @@ export class HarnessStore {
     const row = this.#sessionRow(sessionId);
     if (!row) return undefined;
     row.working_descendant_count = this.#workingDescendantCount(sessionId);
-    return { ...mapSession(row), lineage: this.#sessionLineage(sessionId) };
+    return { ...mapSession(row, resolveFastModePreference(sessionId, (id) => id === sessionId ? row : this.#sessionRow(id))),
+      lineage: this.#sessionLineage(sessionId) };
   }
 
   #insertRoot(params, now) {
@@ -437,7 +471,7 @@ export class HarnessStore {
         actor_generation, launch_json, created_at, updated_at, last_activity_at)
       VALUES (?, ?, ?, ?, ?, ?, 'root', ?, NULL, 0, 'inactive', 0, 'starting', ?, 1, ?, ?, ?, ?)
     `).run(id, shortSessionId(id), params.sessionFile ?? null, params.cwd, params.repositoryRoot ?? null,
-      name, GLOBAL_ROOT_FAMILY_ID, actorToken, JSON.stringify(params.launch ?? {}), now, now, now);
+      name, GLOBAL_ROOT_FAMILY_ID, actorToken, JSON.stringify({ ...params.launch, fastMode: false }), now, now, now);
     return id;
   }
 
@@ -467,7 +501,7 @@ export class HarnessStore {
         repository_root = ?, display_name = ?, launch_json = coalesce(?, launch_json), updated_at = ? WHERE id = ?`)
         .run(params.sessionFile ?? null, params.cwd ?? existing.cwd,
           params.repositoryRoot ?? existing.repository_root, name,
-          params.launch == null ? null : JSON.stringify(params.launch), now, existing.id);
+          params.launch == null ? null : JSON.stringify({ ...params.launch, fastMode: parseJson(existing.launch_json, {}).fastMode === true }), now, existing.id);
       this.#db.exec("COMMIT");
       return { session: this.#mappedSession(existing.id), created: false };
     } catch (error) { this.#db.exec("ROLLBACK"); throw error; }
@@ -491,7 +525,7 @@ export class HarnessStore {
         VALUES (?, ?, ?, ?, ?, ?, 'child', ?, ?, ?, 'inactive', 0, 'starting', ?, 1, ?, ?, ?, ?)
       `).run(sessionId, shortSessionId(sessionId), sessionFile ?? null, policy.cwd ?? parent.cwd,
         policy.repositoryRoot ?? parent.repository_root, displayName, parent.family_id, parentId, depth,
-        actorToken, JSON.stringify({ ...policy, depth }), now, now, now);
+        actorToken, JSON.stringify({ ...policy, depth, fastMode: false }), now, now, now);
       this.#db.prepare("INSERT INTO children(session_id) VALUES (?)").run(sessionId);
       const taskId = randomUUID();
       this.#db.prepare("INSERT INTO child_tasks(id, child_id, kind, prompt, state, created_at, history_peer_name, history_entry_id) VALUES (?, ?, 'initial', ?, 'queued', ?, ?, NULL)")
@@ -607,12 +641,43 @@ export class HarnessStore {
         resolved: { provider: selection.provider, id: selection.model }, source: launch.model?.source ?? "settings" };
       if (!currentThinking) launch.thinking = { requested: launch.thinking?.requested ?? null,
         resolved: selection.thinkingLevel, source: launch.thinking?.source ?? "settings" };
-      if (!currentModel || !currentThinking) {
+      if (!currentModel || !currentThinking || launch.fastModeSupported !== (selection.fastModeSupported === true) || typeof launch.fastMode !== "boolean") {
+        launch.fastMode = launch.fastMode === true;
+        launch.fastModeSupported = selection.fastModeSupported === true;
         this.#db.prepare("UPDATE sessions SET launch_json = ?, updated_at = ? WHERE id = ?")
           .run(JSON.stringify(launch), now, sessionId);
       }
       this.#db.exec("COMMIT");
       return this.getActorLaunch(sessionId);
+    } catch (error) { this.#db.exec("ROLLBACK"); throw error; }
+  }
+
+  getSessionFastModePreference(sessionId) {
+    return resolveFastModePreference(sessionId, (id) => this.#sessionRow(id));
+  }
+
+  // Sample the canonical root at request preparation, never a worker-local flag.
+  getSessionFastMode(sessionId) {
+    const preference = this.getSessionFastModePreference(sessionId);
+    if (typeof preference.fastMode !== "boolean") throw new Error("session Fast preference is unavailable: missing, deleted, or invalid ancestry");
+    return preference.fastMode;
+  }
+
+  updateSessionFastMode(sessionId, enabled, expected, now = Date.now()) {
+    if (typeof enabled !== "boolean" || typeof expected !== "boolean") throw new TypeError("fastMode must be boolean");
+    this.#db.exec("BEGIN IMMEDIATE");
+    try {
+      const row = this.#sessionRow(sessionId);
+      if (!row || row.lifecycle === "deleted") throw new Error("session does not exist");
+      const preference = this.getSessionFastModePreference(sessionId);
+      if (preference.fastModeRootSessionId !== sessionId) throw new Error("only the root session can change family Fast mode");
+      if (typeof preference.fastMode !== "boolean") throw new Error("session Fast preference is unavailable");
+      const launch = parseJson(row.launch_json, {});
+      if (preference.fastMode !== expected) throw new Error("session Fast preference changed concurrently");
+      launch.fastMode = enabled;
+      this.#db.prepare("UPDATE sessions SET launch_json = ?, updated_at = ? WHERE id = ?")
+        .run(JSON.stringify(launch), now, sessionId);
+      this.#db.exec("COMMIT");
     } catch (error) { this.#db.exec("ROLLBACK"); throw error; }
   }
 
@@ -627,6 +692,7 @@ export class HarnessStore {
       }
       launch.model = { requested: `${selection.provider}/${selection.model}`, resolved: { provider: selection.provider, id: selection.model }, source: "explicit" };
       launch.thinking = { requested: selection.thinkingLevel, resolved: selection.thinkingLevel, source: "explicit" };
+      launch.fastModeSupported = selection.fastModeSupported === true;
       this.#db.prepare("UPDATE sessions SET launch_json = ?, updated_at = ? WHERE id = ?")
         .run(JSON.stringify(launch), now, sessionId);
       if (Number.isSafeInteger(selection.contextWindow) && selection.contextWindow > 0) {
@@ -888,7 +954,7 @@ export class HarnessStore {
       while (current && !seen.has(current.id) && names.length <= MAX_NAVIGATOR_ANCESTOR_DEPTH) {
         seen.add(current.id); names.unshift(current.display_name); current = current.parent_session_id ? byId.get(current.parent_session_id) : undefined;
       }
-      return { ...mapSession({ ...row, working_descendant_count: counts.get(row.id) ?? 0 }), lineage: names.join("/") };
+      return { ...mapSession({ ...row, working_descendant_count: counts.get(row.id) ?? 0 }, resolveFastModePreference(row.id, (id) => byId.get(id))), lineage: names.join("/") };
     });
     return { sessions, total, truncated: total > sessions.length,
       work: { queryCount, priorityRows: priorityRows.length, newestRows: newestRows.length,
@@ -1380,7 +1446,7 @@ export class HarnessStore {
     };
     return rows.filter((row) => (includeDeleted || row.lifecycle !== "deleted")
       && (includeSelf || row.id !== caller.id))
-      .map((row) => ({ ...mapSession(row), name: historicalName(row), lineage: lineage(row) }))
+      .map((row) => ({ ...mapSession(row, this.getSessionFastModePreference(row.id)), name: historicalName(row), lineage: lineage(row) }))
       .sort((left, right) => right.updatedAt - left.updatedAt || left.sessionId.localeCompare(right.sessionId));
   }
 

@@ -207,7 +207,7 @@ test("session inference policy and telemetry are durable and session-scoped", as
   const dir = await mkdtemp(path.join(os.tmpdir(), "harness-inference-store-"));
   const store = new HarnessStore(path.join(dir, "store.sqlite"));
   t.after(async () => { store.close(); await rm(dir, { recursive: true, force: true }); });
-  const original = { ...launch("root"), prompt: "preserve me", capabilities: [{ id: "files" }] };
+  const original = { ...launch("root"), fastMode: false, prompt: "preserve me", capabilities: [{ id: "files" }] };
   store.createRoot({ sessionId: "root", sessionFile: "/sessions/root.jsonl", cwd: "/workspace", repositoryRoot: null,
     name: "root", actorToken: "token", launch: original }, 1);
   assert.equal(store.hasPendingSessionWork("root"), false);
