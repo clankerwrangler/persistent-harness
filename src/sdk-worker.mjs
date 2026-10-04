@@ -324,7 +324,7 @@ export async function bootstrapSDKWorker({ argv = [], cwd = process.cwd(), env =
   publish, broker = new RpcDialogBroker(publish), external, Coordinator, extensionFactory, createNativeAdapter, projectContext, planRecovery,
   lifecycle = {}, onTiming, createCompactionDriver, createNavigationDriver } = {}) {
   external ??= await loadExternalPi({ env, cwd });
-  const { sdk, api, core, responsesApi } = external;
+  const { sdk, api, core, responsesApi, simpleOptions } = external;
   Coordinator ??= (await import("./actor-coordinator.mjs")).ActorCoordinator;
   const usesHarnessFactory = extensionFactory == null;
   extensionFactory ??= (await import("./extension.mjs")).default;
@@ -420,7 +420,7 @@ export async function bootstrapSDKWorker({ argv = [], cwd = process.cwd(), env =
     const nativeAdapter = createNativeAdapter({ api, responsesApi, modelRuntime: models, transportOptions: { WebSocket } });
     const compactionDriver = createCompactionDriver({ sdk, core, runner, session, models, capture, lifecycle, publish: emit });
     const navigationDriver = createNavigationDriver({ sdk, core, runner, session, models, lifecycle, publish: emit });
-    const coordinator = new Coordinator({ session, sdk, api, core, models, nativeAdapter, projectContext, planRecovery, lifecycle, compactionDriver, navigationDriver,
+    const coordinator = new Coordinator({ session, sdk, api, core, models, simpleOptions, nativeAdapter, projectContext, planRecovery, lifecycle, compactionDriver, navigationDriver,
       runner, resources, promptCapture, publish: emit, basePromptOptions, onTiming,
       isProjectTrusted: () => settings.isProjectTrusted() });
     worker = new SDKWorker({ session, coordinator, runner, resources, sdk, models, projectContext, broker, publish: emit, lifecycle });

@@ -1,6 +1,7 @@
 import { ActorToolDispatch, addToolUsage } from "./actor-tool-dispatch.mjs";
 import { createActorStreamPlanner } from "./actor-stream.mjs";
 import { evaluateInferenceRetry } from "./inference-retry.mjs";
+import { fastModeOptions, streamSessionRequest } from "./fast-mode.mjs";
 import { randomUUID } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { isDeepStrictEqual } from "node:util";
@@ -29,9 +30,9 @@ function observedProviderTools(payload) {
 
 /** One actor's inference, execution, canonical writer, and public extension lifecycle owner. */
 export class ActorCoordinator {
-  constructor({ session, runner, sdk, api, core, models, nativeAdapter, projectContext, planRecovery,
+  constructor({ session, runner, sdk, api, core, models, simpleOptions, nativeAdapter, projectContext, planRecovery,
     lifecycle = {}, resources, promptCapture, publish = () => {}, basePromptOptions = {}, onTiming = () => {}, compactionDriver, navigationDriver, isProjectTrusted = () => false }) {
-    Object.assign(this, { session, runner, sdk, api, core, models, nativeAdapter, projectContext, planRecovery,
+    Object.assign(this, { session, runner, sdk, api, core, models, simpleOptions, nativeAdapter, projectContext, planRecovery,
       lifecycle, resources, promptCapture, publish, basePromptOptions, onTiming, compactionDriver, navigationDriver, isProjectTrusted });
     this.manager = session.sessionManager;
     this.activeTools = new Set(); this.queue = []; this.tasks = new Map(); this.seenCalls = new Set();
@@ -439,7 +440,7 @@ export class ActorCoordinator {
       const tools = this.runner.getAllRegisteredTools().filter(item => this.activeTools.has(item.definition.name)).map(item => item.definition);
       const useNative = nativeModel(this.session.model);
       if (useNative && !this.nativeAdapter) throw new Error("native provider adapter is not integrated in this candidate");
-      const options = { signal: requestController.signal, reasoning: this.session.thinkingLevel === "off" ? undefined : this.session.thinkingLevel,
+      const options = { ...fastModeOptions(this.session.model, prompt?.fastMode), signal: requestController.signal, reasoning: this.session.thinkingLevel === "off" ? undefined : this.session.thinkingLevel,
         sessionId: this.manager.getSessionId(), transport: this.session.settingsManager.getTransport?.(),
         onPayload: async payload => {
           live(); const result = await this.runner.emitBeforeProviderRequest(payload); live();
@@ -455,7 +456,7 @@ export class ActorCoordinator {
       const toolSchemas = tools.map(({ name, description, parameters, async: native, constrainedSampling }) => ({ name, description, parameters,
         ...(native ? { async: true } : {}), ...(constrainedSampling ? { constrainedSampling } : {}) }));
       const context = { systemPrompt: this.currentPrompt, messages: this.sdk.convertToLlm(messages), tools: toolSchemas };
-      const stream = useNative ? this.nativeAdapter.stream(this.session.model, context, options) : this.models.streamSimple(this.session.model, context, options);
+      const stream = useNative ? this.nativeAdapter.stream(this.session.model, context, options) : streamSessionRequest(this.models, this.session.model, context, options, this);
       for await (const event of stream) {
         live();
         if (event.type === "done" || event.type === "error") lastTerminal = event.message ?? event.error;

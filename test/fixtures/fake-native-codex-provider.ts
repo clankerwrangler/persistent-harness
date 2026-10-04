@@ -17,11 +17,11 @@ export default function fakeNativeCodexProvider(pi: any) {
     baseUrl,
     apiKey: `fixture.${claim}.fixture`,
     api: "openai-codex-responses",
-    models: [{
-      id: "gpt-6-astra", name: "Harness Astra fixture", reasoning: false,
+    models: ["gpt-6-astra", "gpt-6.1-sol"].map(id => ({
+      id, name: `Harness ${id} fixture`, reasoning: false,
       input: ["text", "image"], cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
       contextWindow: 32768, maxTokens: 1024,
       compat: { supportsAsyncTools: true },
-    }],
+    })),
   });
 }

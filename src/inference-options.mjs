@@ -1,5 +1,7 @@
 import { supportedThinkingLevels } from "./child-policy.mjs";
 
+import { supportsFastMode } from "./fast-mode.mjs";
+
 const MAX_MODELS = 512;
 const MAX_PROVIDER_LENGTH = 128;
 const MAX_ID_LENGTH = 256;
@@ -45,7 +47,7 @@ function projectModel(model, index) {
   }
   validateThinkingLevelMap(model, context);
   const thinkingLevels = supportedThinkingLevels(model);
-  return { provider, id, name, reasoning: model.reasoning, thinkingLevels, contextWindow: model.contextWindow };
+  return { provider, id, name, reasoning: model.reasoning, thinkingLevels, contextWindow: model.contextWindow, fastModeSupported: supportsFastMode(model) };
 }
 
 /**

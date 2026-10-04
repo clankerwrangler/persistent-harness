@@ -52,6 +52,55 @@ The Unix-socket framing and validation contract is in `src/framing.mjs` and `src
 
 The protocol retains session creation, subscription, input admission, stop/revive/delete/rename, kernel reload, model selection, compaction, family messages, schedules, background process notifications, canonical history, telemetry, dialogs, and output streams. Client-neutral conversation projections remain in this repository even though no browser client or HTTP adapter is included.
 
+### Session inference controls
+
+`get_session_inference` returns `selection` (`provider`, `model`, `thinkingLevel`,
+`fastMode`), `fastModeRootSessionId`, `fastModeSupported`, available models, busy
+state, and telemetry. `selection.fastMode` is the effective root preference;
+`fastModeSupported` describes only the selected session's model. Public session
+metadata exposes the same values as `launch.fastMode`,
+`launch.fastModeRootSessionId`, and `launch.fastModeSupported`. Unknown metadata
+stays null; a model label does not establish support.
+
+`set_session_fast_mode` is an authenticated client-only mutation with
+`{sessionId, fastMode, expected}`. Its expected selection must include all four
+selection fields. Stale selections are rejected. Existing model/thinking mutations
+still accept expectations without `fastMode`.
+
+Fast is a durable root-owned family preference, defaulting to false for a new
+root. A retained root's valid launch object with no `fastMode` property also
+resolves to false, without a migration or backfill. A malformed launch or a
+present nonboolean preference remains unknown. Only the root session can change
+it, including when its own model does not support Fast. Child-target writes
+return `invalid_request`, including no-ops.
+Existing child-local flags remain stored but are not used. Fast does not change
+model/reasoning identity; automatic and manual compaction retain their independent
+existing provider behavior.
+
+Conversation requests apply Fast only to exact `gpt-6-astra` or `gpt-6.1-sol`
+identity with `openai-codex` / `openai-codex-responses` or
+`openai` / `openai-responses`. Unsupported descendants keep ordinary inference
+while supported descendants use the root preference. Fast requests priority
+service, which can use more allowance or incur higher cost; it does not guarantee
+latency.
+
+One bounded ancestry resolver follows validated parent edges to the depth-0 root
+for controls, session/navigator metadata, and authenticated request preparation.
+It never selects a root by `familyId`: independent roots can share that label.
+Missing, deleted, cyclic, malformed, or over-64-edge ancestry projects unknown
+metadata and blocks preference sampling rather than selecting another root.
+
+The existing authenticated actor queue flush returns one canonical root preference
+sample during request preparation. Root changes affect the next request of every
+existing, new, retained, or revived descendant, including already resident actors.
+Already sampled requests remain immutable. Preference-read failure blocks that
+request rather than silently using a cached value. Native requests receive
+`options.serviceTier = "priority"`. Pi 0.99.1's
+stock `streamSimple` discards that option, so supported Fast stock requests use
+public simple-option/reasoning helpers and `ModelRuntime.stream`; ordinary requests
+keep `streamSimple`. Provider serialization and cost accounting both receive the
+chosen tier. No payload-only hook, provider alias, or Pi patch is involved.
+
 `get_visible_image` reads existing input images and explicit image blocks from root-session `toolResult` messages on the active canonical branch. Tool images are unavailable for child sessions. The reader retains only image availability, rereads hash-checked canonical bytes on demand, and applies the existing PNG/JPEG limits: at most four images, 3 MiB total encoded bytes, bounded dimensions and decoded size, and a 5 MiB tool-result source line. Tool text, details, arguments, reasoning, and filesystem paths are not image sources. Tool results remain absent from visible message history; a frontend can use its existing image URL in an assistant Markdown response.
 
 Input acceptance, canonical delivery, tool execution, result persistence, namespace save, and settlement are distinct events. In particular, `tool_execution_end` is an execution event, not proof of a completed namespace save; use canonical result and checkpoint evidence for their respective boundaries.

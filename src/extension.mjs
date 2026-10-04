@@ -1122,8 +1122,9 @@ ${catalog.diagnostics.map((item) => item.error).join("\n")}`);
     // A lost ACK can close the transport. Reuse its authenticated registration owner.
     await waitForActorRegistration(deliveryClient, ctx.signal);
     if (client !== deliveryClient) throw new Error("actor input delivery channel changed during request preparation");
-    await deliveryClient.request("flush_actor_inputs", {});
-    return { systemPrompt };
+    const preferences = await deliveryClient.request("flush_actor_inputs", {});
+    if (typeof preferences.fastMode !== "boolean") throw new Error("session inference preferences are unavailable");
+    return { systemPrompt, fastMode: preferences.fastMode };
   };
   if (owner) owner.prepareRequest = prepareRequest;
   else pi.on("before_agent_start", prepareRequest);
