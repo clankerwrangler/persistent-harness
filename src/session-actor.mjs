@@ -168,10 +168,10 @@ export class PiSessionActor extends EventEmitter {
   }
 
   /** Serialize Pi input acceptance. The RPC response acknowledges preflight, not run completion. */
-  submit(message, behavior = "auto", images = [], messageId) {
+  submit(message, behavior = "auto", images = [], messageId, location) {
     const operation = this.#inputTail.then(async () => {
       const state = await this.request("get_state");
-      const imageFields = { ...(images.length ? { images } : {}), ...(messageId === undefined ? {} : { messageId }) };
+      const imageFields = { ...(location === undefined ? {} : { location }), ...(images.length ? { images } : {}), ...(messageId === undefined ? {} : { messageId }) };
       if (behavior === "steer") {
         if (!state?.isStreaming) throw new Error("cannot steer an idle Pi session actor");
         return this.request("steer", { message, ...imageFields });

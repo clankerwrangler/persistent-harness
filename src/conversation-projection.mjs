@@ -1,3 +1,4 @@
+import { normalizeInputLocation } from "./input-location.mjs";
 import { createHash } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
 import { ACTOR_INPUT_MESSAGE_TYPE, actorInputCustomPayload, actorInputDigest } from "./protocol.mjs";
@@ -59,7 +60,8 @@ export function canonicalActorInputContent(entry, receipt) {
   if (entry.type === "message" && entry.message?.role === "user") {
     const content = canonicalInputContent(entry.message.content ?? entry.message.text);
     if (!canonicalUserInputId(entry)) content.message = cleanHarnessInput(content.message);
-    return content;
+    const location = normalizeInputLocation(entry.message.location);
+    return { ...content, ...(location === undefined ? {} : { location }) };
   }
   if (entry.type !== "custom_message" || entry.customType !== ACTOR_INPUT_MESSAGE_TYPE
     || !["cron", "background"].includes(receipt?.source) || entry.details?.source !== receipt.source

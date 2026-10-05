@@ -1,3 +1,4 @@
+import { normalizeInputLocation } from "./input-location.mjs";
 import { ACTOR_INPUT_MESSAGE_TYPE } from "./protocol.mjs";
 import { canonicalInputContent, canonicalActorInputContent, resolveActorInputAssociation } from "./conversation-projection.mjs";
 
@@ -53,6 +54,7 @@ export function canonicalRetryInput(entry, { sessionId, inputReceipt, inputAssoc
   }
   if (entry?.type === "message" && entry.message?.role === "user") {
     return { entryId: entry.id, originalInputId: null, ...canonicalInputContent(entry.message.content ?? entry.message.text),
+      ...(entry.message.location === undefined ? {} : { location: normalizeInputLocation(entry.message.location) }),
       source: "user", origin: null };
   }
   if (entry?.type !== "custom_message" || entry.customType !== ACTOR_INPUT_MESSAGE_TYPE) {

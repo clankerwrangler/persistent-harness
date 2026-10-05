@@ -10,7 +10,7 @@ npm test
 
 The tests use isolated temporary state, fake providers, and local processes. All supervisor tests, including fake-worker tests, need private `HOME` and `PI_CODING_AGENT_DIR`: a temporary database alone does not isolate transcripts or background notifications. The default background directory is `$PI_CODING_AGENT_DIR/state/background-jobs` (otherwise `$HOME/.pi/agent/state/background-jobs`); any explicit `backgroundJobsDirectory` must also be test-private. Never point tests at running service state or live credentials. For offline real-worker checks, set `PI_HARNESS_PYTHON` to an existing compatible interpreter and `PI_HARNESS_AUTO_INSTALL=0`.
 
-The managed-runtime test explicitly exercises actual managed reuse and dependency rebuild, not the interpreter override. An optional `PI_HARNESS_TEST_MANAGED_SEED` can contain only cached `bin/uv-0.12.3`, `python/cpython-3.12.12-linux-x86_64-gnu`, and package `cache/` prerequisites. The test copies that seed into its temporary runtime, denies Node fetch, and uses `UV_OFFLINE=1`. Do not supply completed environments, sessions, credentials, or kernel state as the seed. Without cached prerequisites, managed provisioning needs its documented downloads.
+The managed-runtime test explicitly exercises actual managed reuse and dependency rebuild, not the interpreter override. The stock-worker provisioning fixture also clears the override locally to check the real consent path. An optional `PI_HARNESS_TEST_MANAGED_SEED` can contain only cached `bin/uv-0.12.3`, `python/cpython-3.12.12-linux-x86_64-gnu`, and package `cache/` prerequisites. Both fixtures copy only these prerequisites into their temporary runtime; neither copies completed environments. The kernel test denies Node fetch. Set `UV_OFFLINE=1` for both offline runs. Do not supply completed environments, sessions, credentials, or kernel state as the seed. Without cached prerequisites, managed provisioning needs its documented downloads.
 
 Native integration additionally requires `PI_HARNESS_NATIVE_ASYNC_BUILD_ROOT` to identify the same external Pi install prefix:
 
@@ -35,6 +35,17 @@ java -cp "$TLA2TOOLS" tlc2.TLC -workers 1 -config specification/FirstInputSnapsh
 ```
 
 Use each model's matching configuration. Model checks prove only their finite abstraction, not arbitrary provider behavior, filesystem crash atomicity, or remote exactly-once execution. Keep test and model results tied to the source bytes under test.
+
+`MessageLocation` models one submission and one acquisition: separate acquisition
+and Send deadlines (including native callbacks before delayed timer delivery),
+opt-in epochs, frozen no-location sends, late fixes, durable
+replay and original Retry. It abstracts the browser and provider serializers.
+`input-location`, `retry-context-rpc`, `native-provider-adapter` and
+`actor-compaction` tests exercise validation/digest equality, restart persistence,
+real stock worker replay, same-role serialization and visible/fork omission using
+synthetic coordinates. The separate frontend model and browser tests cover
+successive sends and stale native callback identities; neither model represents
+the entire UI or a live location service.
 
 The `RecursiveSessionDeletion-*.cfg` configurations cover root and direct-child deletion with and without a legacy deleted intermediate. They check subtree completeness, shutdown fencing, retained artifacts, and unrelated actors. `HarnessDependencies` covers explicit extension ordering, exact stock graph selection, and read-only, current-session projection. The models abstract external stop completion and projector internals; worker, socket, and canonical-history tests verify the implementation boundaries.
 

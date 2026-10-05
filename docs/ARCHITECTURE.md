@@ -52,6 +52,35 @@ The Unix-socket framing and validation contract is in `src/framing.mjs` and `src
 
 The protocol retains session creation, subscription, input admission, stop/revive/delete/rename, kernel reload, model selection, compaction, family messages, schedules, background process notifications, canonical history, telemetry, dialogs, and output streams. Client-neutral conversation projections remain in this repository even though no browser client or HTTP adapter is included.
 
+### User location attachment
+
+`submit_input` accepts optional `location` on a genuine user message. It contains
+exactly `latitude` (−90 to 90), `longitude` (−180 to 180), nonnegative `accuracy`
+in metres, and a nonnegative integer `timestamp` in Unix milliseconds within the
+JavaScript Date range. All numbers must be finite. The client owns permission,
+freshness and opt-in; the harness treats the attachment as unverified user context.
+
+Validation copies the record and includes it in the existing queue byte limits,
+digest and duplicate-request equality. Absence preserves the previous digest.
+The additive nullable queue column is removed with the payload on delivery;
+the canonical `role: "user"` message retains the structured attachment. Original
+Retry requires message, images and location to be omitted from the request and
+resolves all three from its exact canonical source. Internal cron/background input
+cannot acquire a location attachment.
+
+At ordinary/native inference and default compaction serialization, a copy-only
+renderer appends an ordinary text block to that same user message. Stored user
+text remains unchanged; there is no extra submission, role elevation or text marker
+parsing. Retained source entries keep their own location through context edits;
+omitted/reclassified entries do not transfer it to another input. Explicit extension
+history APIs still expose canonical metadata to trusted in-process extensions.
+
+Visible/pending messages, event projections and title inputs omit coordinates.
+Context forks and family messages do not gain raw structured location propagation.
+Previously shared locations can recur in model replay, original Retry and summaries,
+and model output can quote them. Disabling client sharing affects future acquisition,
+not the conversation's existing history.
+
 ### Session inference controls
 
 `get_session_inference` returns `selection` (`provider`, `model`, `thinkingLevel`,

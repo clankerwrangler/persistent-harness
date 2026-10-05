@@ -1,3 +1,4 @@
+import { normalizeInputLocation } from "./input-location.mjs";
 import { randomUUID } from "node:crypto";
 import { realpath } from "node:fs/promises";
 import os from "node:os";
@@ -220,7 +221,7 @@ export class SDKWorker {
           behavior = choice(command.streamingBehavior, ["steer", "followUp"], "streamingBehavior") === "followUp" ? "follow_up" : "steer";
         }
         return coordinator.submit(command.message, behavior, images, command.messageId ?? null, {
-          source: "rpc", expandPromptTemplates: command.expandPromptTemplates === undefined ? true : boolean(command.expandPromptTemplates, "expandPromptTemplates"),
+          source: "rpc", ...(command.location === undefined ? {} : { location: normalizeInputLocation(command.location) }), expandPromptTemplates: command.expandPromptTemplates === undefined ? true : boolean(command.expandPromptTemplates, "expandPromptTemplates"),
         });
       }
       case "abort": this.broker.cancelAll(); await coordinator.abort(); return undefined;

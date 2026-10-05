@@ -860,9 +860,9 @@ export class HarnessSupervisor {
         ...(includeMessage && input.outcome !== "handled" && typeof input.message === "string" ? { message: pendingInputMessage(input) } : {}),
       });
       const prior = this.store.matchActorInputRequest(params.sessionId, { inputId, retryIntent, behavior: params.behavior, clientMessageId,
-        ...(retryIntent?.mode === "original" ? {} : { message: params.message, images: params.images }) });
+        ...(retryIntent?.mode === "original" ? {} : { message: params.message, images: params.images, location: params.location }) });
       if (prior && retryIntent) return acceptedResponse(prior, prior.state !== "completed");
-      let payload = { message: params.message, images: params.images, source: "user", origin: null };
+      let payload = { message: params.message, images: params.images, location: params.location, source: "user", origin: null };
       if (retryIntent) {
         const actor = await this.#idleActorForAction(params.sessionId, "retry a response");
         let resolved;
@@ -870,7 +870,7 @@ export class HarnessSupervisor {
           const session = this.store.getSession(params.sessionId);
           if (!session?.sessionFile) throw requestFailure("not_found", "session does not have a canonical Pi transcript");
           resolved = await this.transcriptReader.resolveRetryInput({ sessionFile: session.sessionFile, sessionId: params.sessionId, assistantId: params.retryOf });
-          payload = { message: resolved.input.message, images: resolved.input.images, source: resolved.input.source, origin: resolved.input.origin };
+          payload = { message: resolved.input.message, images: resolved.input.images, location: resolved.input.location, source: resolved.input.source, origin: resolved.input.origin };
         }
         await this.#branchForRetry(params.sessionId, actor, params.retryOf, resolved);
       }
@@ -1839,7 +1839,7 @@ export class HarnessSupervisor {
               throw new Error("internal input was not accepted by the actor extension");
             }
           } else {
-            const result = await record.worker.submit(input.message, input.behavior, input.images, input.inputId);
+            const result = await record.worker.submit(input.message, input.behavior, input.images, input.inputId, input.location);
             if (result?.outcome === "handled") {
               const handled = this.store.markActorInputHandled(input.inputId, sessionId);
               this.#publishInputOutcome(sessionId, handled);

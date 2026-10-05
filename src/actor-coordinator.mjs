@@ -1,3 +1,4 @@
+import { normalizeInputLocation, renderUserLocations } from "./input-location.mjs";
 import { ActorToolDispatch, addToolUsage } from "./actor-tool-dispatch.mjs";
 import { createActorStreamPlanner } from "./actor-stream.mjs";
 import { evaluateInferenceRetry } from "./inference-retry.mjs";
@@ -169,9 +170,10 @@ export class ActorCoordinator {
     this.commitTail = operation.catch(() => {}); return operation;
   }
 
-  async submit(message, behavior = "auto", images = [], messageId = null, { source = "rpc", expandPromptTemplates = true } = {}) {
+  async submit(message, behavior = "auto", images = [], messageId = null, { source = "rpc", expandPromptTemplates = true, location } = {}) {
     if (this.closed) throw new Error("actor is closed");
     if (typeof message !== "string") throw new Error("message must be text");
+    location = normalizeInputLocation(location);
     if (behavior === "steer") behavior = "auto";
     if (behavior === "followUp") behavior = "follow_up";
     if (!["auto", "follow_up"].includes(behavior)) throw new Error("unsupported input delivery behavior");
@@ -204,7 +206,7 @@ export class ActorCoordinator {
         }
       }
     }
-    this.queue.push({ kind: "user", behavior, message, images, messageId });
+    this.queue.push({ kind: "user", behavior, message, images, messageId, location });
     this.onTiming({ phase: "input_enqueued", at: performance.now(), messageId });
     this.failure = null; this.wake(); return { outcome: "accepted" };
   }
@@ -253,7 +255,7 @@ export class ActorCoordinator {
       this.queue.splice(this.queue.indexOf(item), 1);
       if (item.kind === "user") {
         const content = item.images.length ? [{ type: "text", text: item.message }, ...item.images] : item.message;
-        const message = { role: "user", content, timestamp: Date.now(), ...(item.messageId ? { id: item.messageId } : {}) };
+        const message = { role: "user", content, timestamp: Date.now(), ...(item.location === undefined ? {} : { location: item.location }), ...(item.messageId ? { id: item.messageId } : {}) };
         await this.emit({ type: "message_start", message, messageId: message.id }); await this.commit(message);
         await this.preparePrompt(item.message, item.images);
       } else {
@@ -489,7 +491,7 @@ export class ActorCoordinator {
       this.onTiming({ phase: "inference_start", at: performance.now(), turnIndex: this.turnIndex });
       const toolSchemas = tools.map(({ name, description, parameters, async: native, constrainedSampling }) => ({ name, description, parameters,
         ...(native ? { async: true } : {}), ...(constrainedSampling ? { constrainedSampling } : {}) }));
-      const context = { systemPrompt: this.currentPrompt, messages: this.sdk.convertToLlm(messages), tools: toolSchemas };
+      const context = { systemPrompt: this.currentPrompt, messages: this.sdk.convertToLlm(renderUserLocations(messages)), tools: toolSchemas };
       const stream = useNative ? this.nativeAdapter.stream(this.session.model, context, options) : streamSessionRequest(this.models, this.session.model, context, options, this);
       for await (const event of stream) {
         live();

@@ -12,6 +12,7 @@ import { VisibleTranscriptReader } from "../src/visible-transcript-reader.mjs";
 import { acceptedNativeRuntime, writeWorkerFixture } from "./fixtures/accepted-native-runtime.mjs";
 
 const gate = (name, body) => test(name, { timeout: 30000 }, body);
+const location = { latitude: 12.345678, longitude: -76.54321, accuracy: 8.5, timestamp: 1700000000123 };
 const image = { type: "image", mimeType: "image/png", data: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=" };
 const textOf = (messages) => messages.flatMap(message => typeof message.content === "string" ? [message.content]
   : (message.content ?? []).filter(part => part.type === "text").map(part => part.text)).join("\n");
@@ -43,10 +44,10 @@ async function fixture(t, { source = "user", prior = false, cancel = false, repl
   if (!replied) manager.appendMessage(assistant("PRIOR_COMPLETED_RESPONSE"));
   if (prior) priorId = manager.appendMessage({ role: "user", content: [{ type: "text", text: "PRIOR_USER_CONTEXT" }], timestamp: 5 });
   const origin = source === "cron" ? { jobId: "job", runId: "run" } : source === "background" ? { jobId: "job" } : null;
-  const input = store.createActorInput(sessionId, { inputId: "original-input", message: "  EXACT_ORIGINAL_INPUT\nlast line ", images: [image], source, origin }, 10);
+  const input = store.createActorInput(sessionId, { inputId: "original-input", message: "  EXACT_ORIGINAL_INPUT\nlast line ", images: [image], ...(source === "user" ? { location } : {}), source, origin }, 10);
   let inputEntryId;
   if (source === "user") inputEntryId = manager.appendMessage({ role: "user", id: input.inputId,
-    content: [{ type: "text", text: input.message }, image], timestamp: 10 });
+    content: [{ type: "text", text: input.message }, image], timestamp: 10, location: input.location });
   else {
     const payload = actorInputCustomPayload(input);
     inputEntryId = manager.appendCustomMessageEntry(payload.customType, payload.content, payload.display, payload.details);
@@ -77,7 +78,7 @@ async function submitAndSettle(f, input) {
     const listener = event => { if (event.type === "agent_settled") { clearTimeout(timer); f.actor.off("event", listener); resolve(); } };
     f.actor.on("event", listener);
   });
-  if (input.source === "user") await f.actor.submit(input.message, "auto", input.images, input.inputId);
+  if (input.source === "user") await f.actor.submit(input.message, "auto", input.images, input.inputId, input.location);
   else await f.actor.request("prompt", { message: actorInputPrompt(input.inputId) });
   await settled;
 }
@@ -113,6 +114,15 @@ for (const source of ["user", "cron", "background"]) for (const prior of [false,
     const admitted = entries.find(entry => entry.message?.id === input.inputId || entry.details?.inputId === input.inputId);
     assert(admitted);
     assert.equal(admitted.type, source === "user" ? "message" : "custom_message");
+    if (source === "user") {
+      assert.deepEqual(resolved.input.location, location);
+      assert.deepEqual(admitted.message.location, location);
+      assert.deepEqual(admitted.message.content, [{ type: "text", text: f.input.message }, image]);
+      assert.equal(textOf(requests[0].messages).split("latitude 12.345678").length - 1, 1);
+      assert.equal(requests[0].messages.find(message => textOf([message]).includes("latitude 12.345678")).role, "user");
+      const visible = await f.reader.read({ sessionFile: f.file, sessionId: f.sessionId, publicView: true });
+      assert.doesNotMatch(JSON.stringify(visible.messages), /12\.345678|76\.54321|"location"/);
+    }
     if (source !== "user") { assert.equal(admitted.details.source, source); assert.deepEqual(admitted.details.origin, f.input.origin); }
     assert.equal((await stat(f.file)).ino, inode);
     assert.deepEqual((await readFile(f.file)).subarray(0, bytes.length), bytes, "Retry only appends; it never rewrites old JSONL bytes");
@@ -162,4 +172,18 @@ for (const source of ["user", "cron", "background"]) gate(`stock-worker explicit
   const prior = f.store.matchActorInputRequest(f.sessionId, { inputId: input.inputId, message: params.message, images: params.images,
     retryIntent, clientMessageId: params.clientRequestId });
   assert.equal(prior.source, "user"); assert.equal(prior.origin, null);
+});
+
+
+gate("reopened worker replays a prior location on later ordinary user input without attaching it to the new turn", async t => {
+  const f = await fixture(t);
+  const next = f.store.createActorInput(f.sessionId, { inputId: "later", message: "later without location" }, 30);
+  await submitAndSettle(f, next);
+  const requests = (await f.records()).filter(record => record.type === "provider");
+  assert.equal(requests.length, 1);
+  assert.equal(textOf(requests[0].messages).split("latitude 12.345678").length - 1, 1);
+  const later = requests[0].messages.find(message => textOf([message]) === next.message);
+  assert.equal(later.role, "user"); assert.equal(later.location, undefined);
+  const canonical = (await f.actor.request("get_entries")).entries.find(entry => entry.message?.id === next.inputId);
+  assert.equal(canonical.message.location, undefined);
 });

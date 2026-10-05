@@ -1,3 +1,4 @@
+import { normalizeInputLocation } from "./input-location.mjs";
 import { createHash } from "node:crypto";
 import { MAX_INPUT_REQUEST_BYTES, normalizeInputImages } from "./input-images.mjs";
 
@@ -8,8 +9,10 @@ export const ACTOR_INPUT_MESSAGE_TYPE = "persistent-harness-input";
 export function actorInputPrompt(inputId) {
   return `/${ACTOR_INPUT_COMMAND} ${encodeURIComponent(string(inputId, "inputId", 128))}`;
 }
-export function actorInputDigest(message, imagesJson, behavior) {
-  return createHash("sha256").update(message).update("\0").update(imagesJson).update("\0").update(behavior).digest("hex");
+export function actorInputDigest(message, imagesJson, behavior, location) {
+  const digest = createHash("sha256").update(message).update("\0").update(imagesJson).update("\0").update(behavior);
+  if (location !== undefined) digest.update("\0location\0").update(JSON.stringify(normalizeInputLocation(location)));
+  return digest.digest("hex");
 }
 
 // The optional label is used only to verify historical notification headers.
@@ -148,19 +151,19 @@ function visibleImage(params) { const { value, sessionId } = sessionIdParam(para
   entryId: string(value.entryId, "params.entryId", 128), index: integer(value.index, "params.index", 0, 3) }; }
 function renameSession(params) { const { value, sessionId } = sessionIdParam(params, ["name"]); return { sessionId, name: string(value.name, "params.name", 256) }; }
 function submit(params) {
-  const { value, sessionId } = sessionIdParam(params, ["message", "images", "behavior", "clientRequestId", "clientMessageId", "retryOf", "retryOriginal"]);
+  const { value, sessionId } = sessionIdParam(params, ["message", "images", "location", "behavior", "clientRequestId", "clientMessageId", "retryOf", "retryOriginal"]);
   const retryOf = value.retryOf === undefined ? null : string(value.retryOf, "params.retryOf", 128);
   const clientRequestId = value.clientRequestId === undefined ? null : string(value.clientRequestId, "params.clientRequestId", 128);
   const retryOriginal = value.retryOriginal === undefined ? false : bool(value.retryOriginal, "params.retryOriginal");
-  let images;
+  let images, location;
   if (retryOriginal) {
     if (!retryOf) throw new ProtocolError("invalid_request", "original retry requires params.retryOf");
     if (!clientRequestId) throw new ProtocolError("invalid_request", "original retry requires params.clientRequestId");
-    if (Object.hasOwn(value, "message") || Object.hasOwn(value, "images")) {
-      throw new ProtocolError("invalid_request", "params.retryOriginal requires message and images to be omitted");
+    if (Object.hasOwn(value, "message") || Object.hasOwn(value, "images") || Object.hasOwn(value, "location")) {
+      throw new ProtocolError("invalid_request", "params.retryOriginal requires message, images, and location to be omitted");
     }
   } else {
-    try { images = normalizeInputImages(value.images); }
+    try { images = normalizeInputImages(value.images); location = normalizeInputLocation(value.location); }
     catch (error) { throw new ProtocolError("invalid_request", error instanceof Error ? error.message : String(error)); }
     if (typeof value.message !== "string" || Buffer.byteLength(value.message, "utf8") > MAX_USER_INPUT_BYTES
       || (!value.message.length && images.length === 0)) {
@@ -170,7 +173,7 @@ function submit(params) {
   const behavior = value.behavior ?? "auto";
   if (!["auto", "steer", "follow_up"].includes(behavior)) throw new ProtocolError("invalid_request", "params.behavior must be auto, steer, or follow_up");
   if (retryOf && behavior !== "auto") throw new ProtocolError("invalid_request", "params.retryOf requires params.behavior auto");
-  return { sessionId, ...(retryOriginal ? {} : { message: value.message, images }), behavior, clientRequestId,
+  return { sessionId, ...(retryOriginal ? {} : { message: value.message, images, ...(location === undefined ? {} : { location }) }), behavior, clientRequestId,
     ...(value.retryOriginal === undefined ? {} : { retryOriginal }),
     ...(value.clientMessageId === undefined ? {} : { clientMessageId: string(value.clientMessageId, "params.clientMessageId", 128) }), retryOf };
 }

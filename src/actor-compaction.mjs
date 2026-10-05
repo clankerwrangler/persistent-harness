@@ -1,3 +1,4 @@
+import { renderCompactionLocations } from "./input-location.mjs";
 import { randomUUID } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
 import { projectCanonicalBranch, projectCanonicalContext } from "./canonical-context.mjs";
@@ -208,7 +209,7 @@ export function createCompactionDriver({ sdk, core, runner, session, models, cap
           dispatches.push(dispatch.then(() => undefined, () => undefined));
           return dispatch;
         };
-        result = await sdk.compact(clone(prepared.preparation), session.model, undefined, undefined,
+        result = await sdk.compact(renderCompactionLocations(clone(prepared.preparation)), session.model, undefined, undefined,
           event.customInstructions, signal, session.thinkingLevel, stream, undefined,
           session.settingsManager.getRetrySettings(), {
             onRetryScheduled: (attempt, maxAttempts, delayMs, errorMessage) => publish({ type: "summarization_retry_scheduled", attempt, maxAttempts, delayMs, errorMessage }),

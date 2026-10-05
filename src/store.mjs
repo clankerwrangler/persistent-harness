@@ -1,4 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
+import { normalizeInputLocation } from "./input-location.mjs";
 import { actorInputDigest } from "./protocol.mjs";
 import { DatabaseSync } from "node:sqlite";
 import { allocateUniqueRootName, defaultRootName, shortSessionId } from "./root-title.mjs";
@@ -234,6 +235,7 @@ const CURRENT_SCHEMA = `
     session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
     body TEXT NOT NULL,
     images_json TEXT NOT NULL DEFAULT '[]',
+    location_json TEXT,
     digest TEXT NOT NULL,
     behavior TEXT NOT NULL CHECK (behavior IN ('auto', 'steer', 'follow_up')),
     state TEXT NOT NULL CHECK (state IN ('queued', 'accepted')),
@@ -353,6 +355,7 @@ export class HarnessStore {
       throw new Error("unreleased split-architecture database is unsupported; preserve session files, then recreate harness.sqlite");
     }
     let inputColumns = new Set(this.#db.prepare("PRAGMA table_info(actor_inputs)").all().map((row) => row.name));
+    if (!inputColumns.has("location_json")) this.#db.exec("ALTER TABLE actor_inputs ADD COLUMN location_json TEXT");
     if (!inputColumns.has("images_json")) this.#db.exec("ALTER TABLE actor_inputs ADD COLUMN images_json TEXT NOT NULL DEFAULT '[]'");
     inputColumns = new Set(this.#db.prepare("PRAGMA table_info(actor_inputs)").all().map((row) => row.name));
     if (!inputColumns.has("digest")) this.#db.exec("ALTER TABLE actor_inputs ADD COLUMN digest TEXT");
@@ -1275,7 +1278,7 @@ export class HarnessStore {
     return issues.slice(0, 256);
   }
 
-  createActorInput(sessionId, { inputId = randomUUID(), message, images = [], behavior = "auto", source = "user",
+  createActorInput(sessionId, { inputId = randomUUID(), message, images = [], location, behavior = "auto", source = "user",
     origin = null, clientMessageId = null, retryIntent = null, pendingLimit = 100, pendingBytesLimit = MAX_PENDING_INPUT_BYTES_PER_SESSION,
     globalPendingBytesLimit = MAX_PENDING_INPUT_BYTES_GLOBAL }, now = Date.now()) {
     this.assertSessionAvailable(sessionId);
@@ -1287,7 +1290,10 @@ export class HarnessStore {
     if (clientMessageId !== null && (typeof clientMessageId !== "string" || !clientMessageId.length || clientMessageId.length > 128)) {
       throw new Error("clientMessageId must be a non-empty string of at most 128 characters");
     }
-    const imagesJson = JSON.stringify(images); const digest = actorInputDigest(message, imagesJson, behavior);
+    location = normalizeInputLocation(location);
+    if (location !== undefined && source !== "user") throw new Error("location requires a genuine user input");
+    const locationJson = location === undefined ? null : JSON.stringify(location);
+    const imagesJson = JSON.stringify(images); const digest = actorInputDigest(message, imagesJson, behavior, location);
     this.#db.exec("BEGIN IMMEDIATE");
     try {
       const receipt = this.#db.prepare("SELECT * FROM actor_input_receipts WHERE id = ?").get(inputId);
@@ -1307,20 +1313,20 @@ export class HarnessStore {
         }
         const result = this.getActorInput(inputId, sessionId);
         this.#db.exec("COMMIT");
-        return result.state === "completed" ? { ...result, message, images, behavior } : result;
+        return result.state === "completed" ? { ...result, message, images, behavior, ...(location === undefined ? {} : { location }) } : result;
       }
       const pending = Number(this.#db.prepare("SELECT count(*) AS count FROM actor_inputs WHERE session_id = ?").get(sessionId).count);
       if (pending >= pendingLimit) throw new Error("target pending user-input limit exceeded");
-      const payloadBytes = Buffer.byteLength(message, "utf8") + Buffer.byteLength(imagesJson, "utf8");
-      const sessionBytes = Number(this.#db.prepare("SELECT coalesce(sum(length(CAST(body AS BLOB)) + length(CAST(images_json AS BLOB))), 0) AS bytes FROM actor_inputs WHERE session_id = ?").get(sessionId).bytes);
-      const globalBytes = Number(this.#db.prepare("SELECT coalesce(sum(length(CAST(body AS BLOB)) + length(CAST(images_json AS BLOB))), 0) AS bytes FROM actor_inputs").get().bytes);
+      const payloadBytes = Buffer.byteLength(message, "utf8") + Buffer.byteLength(imagesJson, "utf8") + Buffer.byteLength(locationJson ?? "", "utf8");
+      const sessionBytes = Number(this.#db.prepare("SELECT coalesce(sum(length(CAST(body AS BLOB)) + length(CAST(images_json AS BLOB)) + coalesce(length(CAST(location_json AS BLOB)), 0)), 0) AS bytes FROM actor_inputs WHERE session_id = ?").get(sessionId).bytes);
+      const globalBytes = Number(this.#db.prepare("SELECT coalesce(sum(length(CAST(body AS BLOB)) + length(CAST(images_json AS BLOB)) + coalesce(length(CAST(location_json AS BLOB)), 0)), 0) AS bytes FROM actor_inputs").get().bytes);
       if (sessionBytes + payloadBytes > pendingBytesLimit) throw new Error("target pending user-input byte limit exceeded");
       if (globalBytes + payloadBytes > globalPendingBytesLimit) throw new Error("global pending user-input byte limit exceeded");
       this.#db.prepare(`INSERT INTO actor_input_receipts(id, session_id, digest, created_at, sequence, source, origin_json, client_message_id, retry_intent_json)
         VALUES (?, ?, ?, ?, (SELECT coalesce(max(sequence), 0) + 1 FROM actor_input_receipts), ?, ?, ?, ?)`)
         .run(inputId, sessionId, digest, now, source, provenance.originJson, clientMessageId, retryIntentJson);
-      this.#db.prepare("INSERT INTO actor_inputs(id, session_id, body, images_json, digest, behavior, state, created_at) VALUES (?, ?, ?, ?, ?, ?, 'queued', ?)")
-        .run(inputId, sessionId, message, imagesJson, digest, behavior, now);
+      this.#db.prepare("INSERT INTO actor_inputs(id, session_id, body, images_json, location_json, digest, behavior, state, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, 'queued', ?)")
+        .run(inputId, sessionId, message, imagesJson, locationJson, digest, behavior, now);
       this.recordSessionActivity(sessionId, now);
       const result = this.getActorInput(inputId, sessionId);
       this.#db.exec("COMMIT");
@@ -1328,11 +1334,11 @@ export class HarnessStore {
     } catch (error) { this.#db.exec("ROLLBACK"); throw error; }
   }
 
-  matchActorInputRequest(sessionId, { inputId, message, images, behavior = "auto", retryIntent = null, clientMessageId = null }) {
+  matchActorInputRequest(sessionId, { inputId, message, images, location, behavior = "auto", retryIntent = null, clientMessageId = null }) {
     const retryIntentJson = normalizeRetryIntent(retryIntent);
     if (retryIntent && behavior !== "auto") throw new Error("retry input behavior must be auto");
-    if (retryIntent?.mode === "original" && (message !== undefined || images !== undefined)) {
-      throw new Error("original retry request must omit message and images");
+    if (retryIntent?.mode === "original" && (message !== undefined || images !== undefined || location !== undefined)) {
+      throw new Error("original retry request must omit message, images, and location");
     }
     if (inputId === undefined) return undefined;
     const receipt = this.#db.prepare("SELECT * FROM actor_input_receipts WHERE id = ?").get(inputId);
@@ -1340,7 +1346,7 @@ export class HarnessStore {
     const explicit = retryIntent?.mode !== "original";
     if (receipt.session_id !== sessionId || receipt.retry_intent_json !== retryIntentJson
       || (receipt.client_message_id !== null && clientMessageId !== null && receipt.client_message_id !== clientMessageId)
-      || (explicit && (receipt.digest !== actorInputDigest(message, JSON.stringify(images ?? []), behavior)
+      || (explicit && (receipt.digest !== actorInputDigest(message, JSON.stringify(images ?? []), behavior, location)
         || (receipt.source !== null && receipt.source !== "user")))) {
       throw new Error("actor input id was reused with different input");
     }
@@ -1354,7 +1360,8 @@ export class HarnessStore {
     return { ...mapActorInputReceipt(receipt), ...(includeDigest ? { digest: receipt.digest } : {}), state: pending?.state ?? "completed",
       transportAcceptedAt: pending?.accepted_at ?? null,
       acceptedGeneration: pending?.accepted_generation == null ? null : Number(pending.accepted_generation),
-      ...(pending ? { message: pending.body, images: parseJson(pending.images_json, []), behavior: pending.behavior } : {}) };
+      ...(pending ? { message: pending.body, images: parseJson(pending.images_json, []), behavior: pending.behavior,
+        ...(pending.location_json == null ? {} : { location: normalizeInputLocation(JSON.parse(pending.location_json)) }) } : {}) };
   }
 
   listActorInputReceipts(sessionId, { inputIds = null, limit = 1000 } = {}) {
