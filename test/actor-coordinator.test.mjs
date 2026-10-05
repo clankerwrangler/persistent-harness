@@ -12,7 +12,7 @@ const { sdk, api, core } = await loadExternalPi();
 const deferred = () => Promise.withResolvers();
 const wait = async (promise, message) => Promise.race([promise, new Promise((_, reject) => { const timer = setTimeout(() => reject(new Error(message)), 5000); timer.unref(); })]);
 const usage = () => ({ input: 1, output: 1, cacheRead: 0, cacheWrite: 0, totalTokens: 2, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } });
-async function fixture(t, { prepareRequest, script, retry, compaction, compactionDriver, hooks, promptExtensions = [], captureFirst = false, basePromptOptions } = {}) {
+async function fixture(t, { prepareRequest, script, retry, compaction, compactionDriver, hooks, promptExtensions = [], captureFirst = false, basePromptOptions, automaticCompactionAllowed } = {}) {
   const root = await mkdtemp(path.join(os.tmpdir(), "sc-"));
   const model = { id: "fixture", name: "Fixture", provider: "coordinator-test", api: "coordinator-test-api", reasoning: false,
     input: ["text"], cost: usage().cost, contextWindow: 32000, maxTokens: 1000 };
@@ -59,7 +59,7 @@ async function fixture(t, { prepareRequest, script, retry, compaction, compactio
   const { session } = await sdk.createAgentSession({ cwd: root, agentDir: path.join(root, "agent"), model: models.getModel(model.provider, model.id), modelRuntime: models, settingsManager: settings, sessionManager: manager, resourceLoader: empty, tools: [] });
   const loaded = active.getExtensions(); const runner = new sdk.ExtensionRunner(loaded.extensions, loaded.runtime, root, manager, new sdk.ModelRegistry(models));
   coor = new ActorCoordinator({ session, runner, sdk, api, core, models, resources: active, promptCapture, lifecycle: { prepareRequest }, publish: event => events.push(event),
-    basePromptOptions: basePromptOptions ?? { contextFiles: [], cwd: root }, isProjectTrusted: () => false, compactionDriver });
+    basePromptOptions: basePromptOptions ?? { contextFiles: [], cwd: root }, isProjectTrusted: () => false, compactionDriver, automaticCompactionAllowed });
   await coor.start(); await runner.emit({ type: "session_start", reason: "startup" });
   t.after(async () => { held.resolve(); await coor.close(); await rm(root, { recursive: true, force: true }); });
   return { coor, requests, events, manager, held, toolStarted, capture, runs: () => runs };
@@ -149,7 +149,9 @@ function seedCompaction(f) {
 }
 for (const reason of ["manual", "threshold", "overflow"]) test(`${reason} compaction cancellation is not a summary failure`, async t => {
   const cancellations = [], failures = [];
+  let manualCompacting = reason === "manual";
   const f = await fixture(t, {
+    automaticCompactionAllowed: () => { assert.equal(manualCompacting, false, "manual must bypass automatic permission"); return true; },
     compaction: { enabled: true, reserveTokens: 1000, keepRecentTokens: 20 },
     script: (_context, n) => n === 1 && reason === "overflow"
       ? { content: [], stopReason: "error", errorMessage: "context_length_exceeded" }
@@ -169,6 +171,7 @@ for (const reason of ["manual", "threshold", "overflow"]) test(`${reason} compac
     });
     const error = await wait(completed.promise, "manual cancellation did not complete");
     assert.equal(error.code, "ERR_COMPACTION_CANCELLED");
+    manualCompacting = false;
   } else {
     await f.coor.submit("start"); await wait(f.coor.waitForIdle(), "cancelled compaction did not settle");
     assert.equal(f.requests.length, 1, "cancellation must not retry inference or loop compaction");
@@ -496,4 +499,55 @@ test("custom-started tool continuations and family follow-ups reuse preparation 
   assert.equal(f.requests.length, 3); assert.equal(f.runs(), 1);
   assert.deepEqual(hooks, ["", "STEER"]);
   assert.deepEqual(f.manager.getBranch().filter(e => e.type === "custom_message" && e.customType === "fixture.prompt").map(e => e.content), ["INJECTED_1", "INJECTED_2"]);
+});
+
+
+test("threshold veto precedes archive/usage access and compaction lifecycle", async t => {
+  const f = await fixture(t, { compaction: { enabled: true }, compactionDriver: () => assert.fail("driver"),
+    automaticCompactionAllowed(reason, window) { assert.equal(reason, "threshold"); assert.equal(window, 32000); return false; } });
+  const original = f.manager.getEntries();
+  const branch = t.mock.method(f.manager, "getBranch", () => assert.fail("raw history accessed"));
+  const usageRead = t.mock.method(f.coor.session, "getContextUsage", () => assert.fail("stock usage accessed"));
+  assert.equal(await f.coor.maybeAutoCompact(), false);
+  branch.mock.restore(); usageRead.mock.restore();
+  assert.deepEqual(f.manager.getEntries(), original);
+  assert.equal(f.events.length, 0);
+  // Stock usage is above threshold, but this tiny history has no discardable span.
+  f.manager.appendMessage({ role: "user", content: "tiny history", timestamp: 1 });
+  f.manager.appendMessage(f.coor.assistant([{ type: "text", text: "done" }], { ...usage(), input: 32000, totalTokens: 32001 }, "stop"));
+  await f.coor.submit("original queued input", "auto", [], "threshold-original-id");
+  await wait(f.toolStarted.promise, "input did not progress past denied threshold");
+  f.held.resolve();
+  await wait(f.coor.waitForIdle(), "threshold continuation did not settle");
+  assert.equal(f.coor.failure, null);
+  assert.equal(f.manager.getEntries().filter(e => e.message?.id === "threshold-original-id").length, 1);
+  assert.equal(f.events.filter(e => /compaction/.test(e.type)).length, 0);
+});
+
+test("denied overflow terminalizes original failure once without recovery marker, driver or ordinary retry", async t => {
+  const checks = [];
+  const f = await fixture(t, { compaction: { enabled: true }, retry: { enabled: true, maxRetries: 3, baseDelayMs: 1 },
+    script: () => ({ content: [], stopReason: "error", errorMessage: "context_length_exceeded" }),
+    compactionDriver: () => assert.fail("compaction driver"),
+    automaticCompactionAllowed(reason) {
+      if (reason === "overflow") {
+        assert.equal(f.coor.controller.signal.aborted, false, "permission precedes recovery abort");
+        assert.equal(f.coor.overflowRecoveryAttempted, false);
+      }
+      checks.push(reason); return false;
+    } });
+  await f.coor.submit("original admitted input", "auto", [], "original-id");
+  await wait(f.coor.waitForIdle(), "denied overflow did not settle");
+  assert.equal(f.requests.length, 1);
+  assert.deepEqual(checks, ["threshold", "overflow"]);
+  assert.equal(f.coor.overflowRecoveryAttempted, false);
+  assert.equal(f.coor.failedAttempt, null);
+  assert.equal(f.events.filter(e => e.type === "agent_settled").length, 1);
+  assert.equal(f.events.filter(e => /auto_compaction|auto_retry/.test(e.type)).length, 0);
+  const entries = f.manager.getEntries();
+  assert.equal(entries.filter(e => e.type === "custom" && /compaction-recovery|inference-retry/.test(e.customType)).length, 0);
+  assert.equal(entries.filter(e => e.type === "compaction").length, 0);
+  const errors = entries.filter(e => e.type === "message" && e.message.role === "assistant" && e.message.stopReason === "error");
+  assert.equal(errors.length, 1); assert.equal(errors[0].message.errorMessage, "context_length_exceeded");
+  assert.deepEqual(entries.filter(e => e.type === "message" && e.message.role === "user").map(e => e.message.id), ["original-id"]);
 });

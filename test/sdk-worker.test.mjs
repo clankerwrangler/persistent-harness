@@ -14,6 +14,7 @@ import { resolveExternalPi, loadExternalPi } from "../src/external-pi.mjs";
 import { RpcDialogBroker, bootstrapSDKWorker, runSDKWorkerRpc, toWorkerRpcEvent } from "../src/sdk-worker.mjs";
 import { PiSessionActor } from "../src/session-actor.mjs";
 import { createCompactionDriver, prepareActorCompaction } from "../src/actor-compaction.mjs";
+import { AUTOMATIC_COMPACTION_CHECK as compactionChannel, createAutomaticCompactionPermission } from "../src/automatic-compaction-permission.mjs";
 import { projectCanonicalBranch } from "../src/canonical-context.mjs";
 
 const candidate = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
@@ -908,4 +909,43 @@ test("dormant public preparation capture has no provider, transcript, UI or acti
     await worker.handle({ type: "prompt", message: "subsequent input" }); await worker.coordinator.waitForIdle();
     assert.equal(providerCalls, 1, "the independent active owner still dispatches after preparation");
   } finally { await worker.close(); }
+});
+
+
+test("active worker permission is actor-local and close invalidates the old subscription", async () => {
+  let calls = 0;
+  const first = await fixture({ extensionFactory(pi) {
+    fixtureExtension(pi);
+    pi.events.on(compactionChannel, request => { calls++; request.veto(); });
+  } });
+  const second = await fixture();
+  try {
+    assert.equal(first.worker.coordinator.automaticCompactionAllowed("threshold", 128000), false);
+    assert.equal(second.worker.coordinator.automaticCompactionAllowed("threshold", 128000), true);
+    await first.worker.close();
+    assert.equal(first.worker.coordinator.automaticCompactionAllowed("threshold", 128000), true);
+    assert.equal(calls, 1);
+  } finally { await first.worker.close(); await second.worker.close(); }
+});
+
+test("supported invalidate then reload removes old veto before successor registration", async () => {
+  const { sdk } = external;
+  const bus = sdk.createEventBus(), check = createAutomaticCompactionPermission(bus);
+  let generation = 0, oldCalls = 0, newCalls = 0;
+  const loader = new sdk.DefaultResourceLoader({ cwd: temporary, agentDir: path.join(temporary, "reload-agent"),
+    settingsManager: sdk.SettingsManager.inMemory(), eventBus: bus,
+    noExtensions: true, noSkills: true, noPromptTemplates: true, noThemes: true, noContextFiles: true,
+    extensionFactories: [pi => {
+      const old = generation++ === 0;
+      pi.events.on(compactionChannel, request => { if (old) { oldCalls++; request.veto(); } else newCalls++; });
+    }] });
+  await loader.reload();
+  assert.equal(check("threshold", 128000), false);
+  // Raw resourceLoader.reload does not unsubscribe: supported owners invalidate first.
+  loader.getExtensions().runtime.invalidate("Replace test generation");
+  await loader.reload();
+  try {
+    assert.equal(check("threshold", 128000), true);
+    assert.equal(oldCalls, 1); assert.equal(newCalls, 1);
+  } finally { loader.getExtensions().runtime.invalidate("Test complete"); }
 });

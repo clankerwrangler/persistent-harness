@@ -5,6 +5,7 @@ import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import WebSocket from "ws";
+import { createAutomaticCompactionPermission } from "./automatic-compaction-permission.mjs";
 import { createAgentStartPromptCapture } from "./actor-prompt.mjs";
 import { loadExternalPi } from "./external-pi.mjs";
 import { PiRpcLineDecoder } from "./session-actor.mjs";
@@ -352,8 +353,9 @@ export async function bootstrapSDKWorker({ argv = [], cwd = process.cwd(), env =
     if (identity !== ownEntry) additionalExtensionPaths.push(source);
   }
   const promptCapture = createAgentStartPromptCapture();
+  const eventBus = sdk.createEventBus();
   const resources = new sdk.DefaultResourceLoader({
-    cwd, agentDir, settingsManager: settings,
+    cwd, agentDir, settingsManager: settings, eventBus,
     additionalExtensionPaths, extensionFactories: [{ name: "persistent-harness", factory: (pi) => extensionFactory(pi, lifecycle) }, promptCapture.extension],
     extensionsOverride: (loaded) => {
       if (usesHarnessFactory) {
@@ -423,6 +425,7 @@ export async function bootstrapSDKWorker({ argv = [], cwd = process.cwd(), env =
     const navigationDriver = createNavigationDriver({ sdk, core, runner, session, models, lifecycle, publish: emit });
     const coordinator = new Coordinator({ session, sdk, api, core, models, simpleOptions, nativeAdapter, projectContext, planRecovery, lifecycle, compactionDriver, navigationDriver,
       runner, resources, promptCapture, publish: emit, basePromptOptions, onTiming,
+      automaticCompactionAllowed: createAutomaticCompactionPermission(eventBus),
       isProjectTrusted: () => settings.isProjectTrusted() });
     worker = new SDKWorker({ session, coordinator, runner, resources, sdk, models, projectContext, broker, publish: emit, lifecycle });
     await coordinator.start();
