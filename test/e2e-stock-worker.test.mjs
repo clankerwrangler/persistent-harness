@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import http from "node:http";
-import { mkdtemp, mkdir, rm, stat } from "node:fs/promises";
+import { cp, mkdtemp, mkdir, rm, stat } from "node:fs/promises";
 import path from "node:path";
 import os from "node:os";
 import { HarnessSupervisor } from "../src/supervisor.mjs";
@@ -24,10 +24,15 @@ async function settled(client, id, text) {
 test("stock worker: real supervisor, external stock SDK, canonical input and persistent Python", { timeout: 60000 }, async t => {
   const root = await mkdtemp(path.join(os.tmpdir(), "sw-")); const cwd = path.join(root, "project"), agentDir = path.join(root, "agent");
   await mkdir(cwd); await mkdir(agentDir);
+  // Exercise real provisioning/consent, using only cached prerequisites when running offline.
+  if (process.env.PI_HARNESS_TEST_MANAGED_SEED) {
+    await cp(process.env.PI_HARNESS_TEST_MANAGED_SEED, path.join(agentDir, "harness/kernel-runtime"), { recursive: true });
+  }
   const catalog = await discoverSkillsFromDirectory(path.resolve("skills")); assert.deepEqual(catalog.diagnostics, []);
   const dependencies = [...new Set(catalog.skills.flatMap(skill => skill.python?.dependencies ?? []))].sort();
   const expectedRuntimeMessage = `Persistent Harness needs CPython ${PYTHON_VERSION} and:\n${[`ipython==${IPYTHON_VERSION}`, `dill==${DILL_VERSION}`, ...dependencies].join("\n")}`;
-  const previous = { PI_CODING_AGENT_DIR: process.env.PI_CODING_AGENT_DIR, HARNESS_FAKE_BASE_URL: process.env.HARNESS_FAKE_BASE_URL };
+  const previous = { PI_CODING_AGENT_DIR: process.env.PI_CODING_AGENT_DIR, HARNESS_FAKE_BASE_URL: process.env.HARNESS_FAKE_BASE_URL, PI_HARNESS_PYTHON: process.env.PI_HARNESS_PYTHON };
+  delete process.env.PI_HARNESS_PYTHON;
   process.env.PI_CODING_AGENT_DIR = agentDir;
   const bodies = []; let supervisor, client, cronStore, admission;
   let provisioningAnswered = false, provisioningError = null;

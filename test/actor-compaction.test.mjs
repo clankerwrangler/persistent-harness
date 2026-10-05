@@ -476,3 +476,19 @@ test("manual refresh final driver guard refuses a source change after custom res
   assert.equal(f.manager.getEntries().filter(entry => entry.type === "compaction").length, 1);
   assert.equal(f.requests.length, 0);
 });
+
+
+test("stock compaction sees structured user location only in its rendered transcript copies", async t => {
+  const f = await driverFixture(t);
+  const location = { latitude: 12.345678, longitude: -76.54321, accuracy: 8.5, timestamp: 1700000000123 };
+  f.manager.appendMessage({ ...user("old question ".repeat(100)), location });
+  f.manager.appendMessage(assistant("old answer ".repeat(100)));
+  f.manager.appendMessage({ ...user("new question ".repeat(100)), location: { ...location, latitude: 23.456789 } });
+  f.manager.appendMessage(assistant("new answer ".repeat(100)));
+  const before = structuredClone(f.manager.getEntries());
+  await f.run({});
+  const payload = JSON.stringify(f.requests.map(request => request.context));
+  assert.match(payload, /latitude 12\.345678/);
+  assert.match(payload, /latitude 23\.456789/);
+  assert.deepEqual(f.manager.getEntries().slice(0, -1), before);
+});

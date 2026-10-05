@@ -971,3 +971,19 @@ for (const provider of ["openai-codex", "openai"]) for (const id of ["gpt-6-astr
     }
   });
 }
+
+
+test("location renderer reaches native input on the same user item without mutating canonical history", async t => {
+  const { renderUserLocations } = await import("../src/input-location.mjs");
+  const original = { role: "user", content: "  exact message\n", timestamp: 1,
+    location: { latitude: 12.345678, longitude: -76.54321, accuracy: 8.5, timestamp: 1700000000123 } };
+  const before = copied(original); let body;
+  const a = await adapter(t, { fetch: async (_url, init) => { body = JSON.parse(init.body); return response([created(), complete()]); } });
+  const messages = convertToLlm(renderUserLocations([original]));
+  const result = await collect(a.stream(model, { ...context, messages }, { transport: "sse" }));
+  assert.equal(result.message.stopReason, "stop");
+  const users = body.input.filter(item => item.role === "user");
+  assert.equal(users.length, 1); assert.equal(users[0].content[0].text, original.content);
+  assert.match(users[0].content[1].text, /latitude 12\.345678.*longitude -76\.54321/);
+  assert.deepEqual(original, before);
+});
