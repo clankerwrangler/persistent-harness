@@ -1,7 +1,7 @@
 import { renderCompactionLocations } from "./input-location.mjs";
 import { randomUUID } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
-import { projectCanonicalBranch, projectCanonicalContext } from "./canonical-context.mjs";
+import { projectCanonicalBranch, projectCanonicalContext, snapshotCanonicalArchive } from "./canonical-context.mjs";
 
 export class ActorCompactionError extends Error {
   constructor(code, message = code, options) {
@@ -65,7 +65,7 @@ function prepareManualRefresh(sdk, session, branchEntries, leafId) {
  */
 export async function prepareActorCompaction({ sdk, session, capture, reason }) {
   const manager = session.sessionManager, leafId = manager.getLeafId();
-  const original = clone(manager.getEntries());
+  const original = snapshotCanonicalArchive(manager.getEntries());
   const { entries: branchEntries, diagnostics } = projectCanonicalBranch({ entries: original, leafId });
   const projection = projectCanonicalContext({ entries: branchEntries, leafId, buildSessionProjection: sdk.buildSessionProjection, mode: "native" });
   const outstanding = projection.outstanding;
@@ -136,7 +136,7 @@ export function createCompactionDriver({ sdk, core, runner, session, models, cap
     const completions = [], dispatches = [];
     let providerTail = Promise.resolve(), streamFailure;
     const sessionId = manager.getSessionId(), leafId = manager.getLeafId();
-    const original = clone(manager.getEntries());
+    const original = snapshotCanonicalArchive(manager.getEntries());
     const sameSnapshot = () => {
       abort(signal);
       check(session.isIdle && manager.getSessionId() === sessionId && manager.getLeafId() === leafId
@@ -152,7 +152,7 @@ export function createCompactionDriver({ sdk, core, runner, session, models, cap
       check(prepared.outstanding.length === 0, "ERR_COMPACTION_PENDING_CALLS");
       check(prepared.preparation, "ERR_COMPACTION_NOTHING_TO_SUMMARIZE");
       const event = { type: "session_before_compact", preparation: clone(prepared.preparation),
-        branchEntries: clone(prepared.branchEntries), customInstructions, reason, willRetry, signal };
+        branchEntries: snapshotCanonicalArchive(prepared.branchEntries), customInstructions, reason, willRetry, signal };
       const diagnostic = await lifecycle.prepareCompaction?.(event, runner.createContext());
       if (diagnostic?.customInstructions !== undefined) {
         check(typeof diagnostic.customInstructions === "string" && diagnostic.customInstructions.length <= 4 * 1024 * 1024,

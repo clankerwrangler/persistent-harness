@@ -1,4 +1,6 @@
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
+import { fileURLToPath } from "node:url";
 import { after, test, mock } from "node:test";
 import { mkdtemp, mkdir, rm, readFile } from "node:fs/promises";
 import os from "node:os";
@@ -491,4 +493,35 @@ test("stock compaction sees structured user location only in its rendered transc
   assert.match(payload, /latitude 12\.345678/);
   assert.match(payload, /latitude 23\.456789/);
   assert.deepEqual(f.manager.getEntries().slice(0, -1), before);
+});
+
+
+test("compaction cancellation reaches the hook with large opaque history under a bounded heap", () => {
+  const fixturePath = fileURLToPath(new URL("./fixtures/compaction-archive-memory.mjs", import.meta.url));
+  const output = execFileSync(process.execPath, ["--max-old-space-size=256", fixturePath], {
+    env: process.env, timeout: 30000, encoding: "utf8", maxBuffer: 64 * 1024,
+  });
+  assert.match(output, /"phase":"verified"/);
+});
+
+test("compaction snapshots detect nested mutations in active and inactive history", async t => {
+  for (const phase of ["capture", "hook"]) for (const branch of ["active", "inactive"]) {
+    let f, target;
+    const mutate = () => { f.manager.getEntry(target).data.nested.value = "changed"; };
+    f = await driverFixture(t, { hooks: pi => pi.on("session_before_compact", () => {
+      if (phase === "hook") mutate();
+      return { cancel: true };
+    }) });
+    addOrdinary(f.manager);
+    const leaf = f.manager.getLeafId();
+    target = f.manager.appendCustomEntry("opaque", { nested: { value: "original" } });
+    if (branch === "inactive") f.manager.branch(leaf);
+    if (phase === "capture") {
+      const read = f.capture.read.bind(f.capture);
+      f.capture.read = async session => { const value = await read(session); mutate(); return value; };
+    }
+    await assert.rejects(f.run(), { code: "ERR_COMPACTION_STALE_SNAPSHOT" }, `${phase}/${branch}`);
+    assert.equal(f.manager.getEntries().filter(entry => entry.type === "compaction").length, 0);
+    assert.equal(f.requests.length, 0);
+  }
 });
