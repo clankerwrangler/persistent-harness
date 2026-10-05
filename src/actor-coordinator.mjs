@@ -28,6 +28,15 @@ function observedProviderTools(payload) {
   return false;
 }
 
+// Local preparation may already have committed input or extension effects. It is
+// not a provider attempt and must cross nested inference/retry catches unchanged.
+class LocalPreparationError extends Error {
+  constructor(stage, cause) {
+    super(`${stage} preparation failed: ${cause instanceof Error ? cause.message : String(cause)}`, { cause });
+    this.code = "ERR_LOCAL_PREPARATION";
+  }
+}
+
 /** One actor's inference, execution, canonical writer, and public extension lifecycle owner. */
 export class ActorCoordinator {
   constructor({ session, runner, sdk, api, core, models, simpleOptions, nativeAdapter, projectContext, planRecovery,
@@ -211,7 +220,18 @@ export class ActorCoordinator {
 
   wake() {
     if (this.closed || this.drivePromise) return;
-    this.drivePromise = Promise.resolve().then(() => this.drive()).catch(error => { this.failure = error; })
+    this.drivePromise = Promise.resolve().then(() => this.drive()).catch(async error => {
+      this.failure = error;
+      if (!(error instanceof LocalPreparationError)) return;
+      // One owner terminalizes both idle and nested delivery. Stop this run even
+      // if a new admission clears failure while the terminal commit is pending.
+      this.failedAttempt = null; this.continueNative = false; this.stopping = true;
+      this.controller?.abort();
+      const message = this.assistant([{ type: "text", text: "This turn stopped because request preparation failed. Send another message to retry." }], zeroUsage(), "error");
+      message.errorMessage = error.message;
+      try { await this.commit(message); }
+      catch (commitError) { this.failure = new AggregateError([error, commitError], `${error.message}; terminal commit failed: ${commitError.message}`); }
+    })
       .finally(() => { this.drivePromise = null; this.notifyIdle(); if (this.shouldDrive()) this.wake(); });
   }
   shouldDrive() {
@@ -225,13 +245,12 @@ export class ActorCoordinator {
   }
   hasOrdinaryBarrier() { return [...this.tasks.values()].some(task => !task.native && !task.resultCommitted); }
   async deliverQueued(includeFollow = false) {
-    const selected = []; const retained = [];
-    for (const item of this.queue) {
-      if (item.behavior === "auto" || (includeFollow && item.behavior === "follow_up") || (!this.running && item.behavior === "next_turn")) selected.push(item);
-      else retained.push(item);
-    }
-    this.queue = retained;
+    const selected = this.queue.filter(item => item.behavior === "auto"
+      || (includeFollow && item.behavior === "follow_up") || (!this.running && item.behavior === "next_turn"));
     for (const item of selected) {
+      // Retain unprocessed items in their original order if commit/preparation
+      // fails. Never requeue the current input after it has been committed.
+      this.queue.splice(this.queue.indexOf(item), 1);
       if (item.kind === "user") {
         const content = item.images.length ? [{ type: "text", text: item.message }, ...item.images] : item.message;
         const message = { role: "user", content, timestamp: Date.now(), ...(item.messageId ? { id: item.messageId } : {}) };
@@ -247,9 +266,22 @@ export class ActorCoordinator {
     return selected.length;
   }
   async preparePrompt(prompt, images) {
-    const prepared = await this.promptCapture.prepare(this.runner, prompt, images, this.baseOptions());
-    this.runPrompt = prepared.systemPrompt; this.runPromptOptions = clone(prepared.systemPromptOptions);
-    for (const extra of prepared?.messages ?? []) this.manager.appendCustomMessageEntry(extra.customType, extra.content, extra.display, extra.details);
+    try {
+      const prepared = await this.promptCapture.prepare(this.runner, prompt, images, this.baseOptions());
+      this.runPrompt = prepared.systemPrompt; this.runPromptOptions = clone(prepared.systemPromptOptions);
+      for (const extra of prepared?.messages ?? []) this.manager.appendCustomMessageEntry(extra.customType, extra.content, extra.display, extra.details);
+    } catch (error) {
+      if (this.controller?.signal.aborted) throw error;
+      throw new LocalPreparationError("Prompt", error);
+    }
+  }
+  async prepareRequest() {
+    try {
+      return await this.lifecycle.prepareRequest?.({ systemPrompt: this.runPrompt, systemPromptOptions: this.promptOptions() }, this.runner.createContext());
+    } catch (error) {
+      if (this.controller?.signal.aborted) throw error;
+      throw new LocalPreparationError("Request", error);
+    }
   }
   async recover() {
     if (this.recoveryDone) return;
@@ -335,6 +367,7 @@ export class ActorCoordinator {
         await this.inference({ reservedEpoch });
         return true;
       } catch (error) {
+        if (error instanceof LocalPreparationError) throw error;
         this.failure = error?.code === "ERR_COMPACTION_CANCELLED" ? providerFailure : error;
         this.failedAttempt = null; this.controller.abort(); return false;
       }
@@ -363,6 +396,7 @@ export class ActorCoordinator {
       await this.inference({ reservedEpoch });
       return true;
     } catch (error) {
+      if (error instanceof LocalPreparationError) throw error;
       this.failure = error; this.controller.abort(); return false;
     } finally { this.retrying = false; }
   }
@@ -429,7 +463,7 @@ export class ActorCoordinator {
       let prompt, preparedOptions;
       do {
         preparedOptions = this.runPromptOptions;
-        prompt = await this.lifecycle.prepareRequest?.({ systemPrompt: this.runPrompt, systemPromptOptions: this.promptOptions() }, this.runner.createContext());
+        prompt = await this.prepareRequest();
         await this.deliverQueued(false); await this.commitTail; live();
         // Preparation may flush queued input. Re-prepare only when that delivery
         // changed the per-run prompt, before taking the matching message snapshot.
@@ -489,6 +523,7 @@ export class ActorCoordinator {
         }
       }
     } catch (error) {
+      if (error instanceof LocalPreparationError) throw error;
       const wasAborted = requestController.signal.aborted;
       this.failure = error;
       const terminal = error.providerEvent?.error ?? lastTerminal;

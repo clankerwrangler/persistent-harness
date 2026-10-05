@@ -13,7 +13,9 @@ Complete == \A c \in anchored: states[c] \in (Terminal \cup {"saving"}) /\ resul
 PromptInitial == [phase |-> "idle", run |-> 0, preparedRun |-> 0,
                   queue |-> <<>>, accepted |-> 0, userIds |-> {}, deliveredUsers |-> {},
                   allowFollow |-> TRUE, needsInference |-> FALSE, requests |-> 0,
-                  hooks |-> <<>>, injected |-> <<>>, sentRun |-> 0, sentPreparedRun |-> 0]
+                  hooks |-> <<>>, injected |-> <<>>, sentRun |-> 0, sentPreparedRun |-> 0,
+                  committed |-> <<>>, pendingId |-> 0, resume |-> "running", blocked |-> FALSE,
+                  failedRuns |-> {}, terminals |-> <<>>, requestsAtFailure |-> 0]
 Init == /\ life = "running" /\ mode \in {"ordinary", "native"}
         /\ flight = FALSE /\ requests = 0 /\ states = [c \in Calls |-> "absent"]
         /\ results = [c \in Calls |-> "none"] /\ anchored = {} /\ effects = <<>>
@@ -91,45 +93,67 @@ PromptCanDeliver == Len(promptState.queue) > 0 /\
 PromptAccept(kind, delivery) ==
     /\ promptState.accepted < 3 /\ Len(promptState.queue) < 2
     /\ promptState' = [promptState EXCEPT
-        !.accepted = @ + 1,
+        !.accepted = @ + 1, !.blocked = FALSE,
         !.userIds = IF kind = "user" THEN @ \cup {promptState.accepted + 1} ELSE @,
         !.queue = Append(@, [kind |-> kind, delivery |-> delivery, id |-> promptState.accepted + 1])]
-PromptStart == /\ promptState.phase = "idle" /\ Len(promptState.queue) > 0 /\ promptState.run < 2
+PromptStart == /\ promptState.phase = "idle" /\ Len(promptState.queue) > 0 /\ promptState.run < 3
+               /\ ~promptState.blocked
                /\ promptState' = [promptState EXCEPT !.phase = "running", !.run = @ + 1,
                    !.preparedRun = 0, !.allowFollow = TRUE, !.needsInference = FALSE]
+\* Dequeue only the item being committed. A failing hook cannot consume its tail.
+\* Delivery also occurs inside request preparation, before the provider snapshot.
 PromptDeliver ==
-    /\ promptState.phase = "running" /\ PromptCanDeliver
+    /\ promptState.phase \in {"running", "request"} /\ PromptCanDeliver
     /\ LET item == Head(promptState.queue)
-           key == <<"user", item.id, promptState.run>>
-       IN promptState' = [promptState EXCEPT !.queue = Tail(@), !.needsInference = TRUE,
-           !.preparedRun = IF item.kind = "user" THEN promptState.run ELSE @,
-           !.deliveredUsers = IF item.kind = "user" THEN @ \cup {item.id} ELSE @,
-           !.hooks = IF item.kind = "user" THEN Append(@, key) ELSE @,
-           !.injected = IF item.kind = "user" THEN Append(@, key) ELSE @]
+       IN promptState' = [promptState EXCEPT !.queue = Tail(@),
+           !.committed = Append(@, item.id), !.pendingId = item.id,
+           !.phase = IF item.kind = "user" THEN "preparing" ELSE @,
+           !.resume = promptState.phase,
+           !.needsInference = IF item.kind = "custom" THEN TRUE ELSE @,
+           !.deliveredUsers = IF item.kind = "user" THEN @ \cup {item.id} ELSE @]
+PromptPrepared ==
+    /\ promptState.phase = "preparing"
+    /\ LET key == <<"user", promptState.pendingId, promptState.run>>
+       IN promptState' = [promptState EXCEPT !.phase = promptState.resume,
+           !.needsInference = TRUE, !.preparedRun = promptState.run,
+           !.hooks = Append(@, key), !.injected = Append(@, key)]
 PromptPrepareNeutral ==
     /\ PrepareCustomPrompt /\ promptState.phase = "running" /\ ~PromptCanDeliver
     /\ promptState.needsInference /\ promptState.preparedRun # promptState.run
     /\ LET key == <<"neutral", 0, promptState.run>>
        IN promptState' = [promptState EXCEPT !.preparedRun = promptState.run,
            !.hooks = Append(@, key), !.injected = Append(@, key)]
-PromptInfer == /\ promptState.phase = "running" /\ ~PromptCanDeliver
+PromptPrepareRequest == /\ promptState.phase = "running" /\ ~PromptCanDeliver
                /\ promptState.needsInference /\ promptState.requests < 4
                /\ (~PrepareCustomPrompt \/ promptState.preparedRun = promptState.run)
+               /\ promptState' = [promptState EXCEPT !.phase = "request"]
+PromptInfer == /\ promptState.phase = "request" /\ ~PromptCanDeliver
                /\ promptState' = [promptState EXCEPT !.phase = "flight", !.requests = @ + 1,
                    !.sentRun = promptState.run, !.sentPreparedRun = promptState.preparedRun,
                    !.needsInference = FALSE, !.allowFollow = FALSE]
+\* One injected local failure, before any transport for this preparation.
+PromptFail == /\ promptState.phase \in {"preparing", "request"}
+              /\ promptState.failedRuns = {}
+              /\ promptState' = [promptState EXCEPT !.phase = "failed", !.blocked = TRUE,
+                  !.failedRuns = {promptState.run}, !.needsInference = FALSE,
+                  !.requestsAtFailure = promptState.requests]
+PromptTerminal == /\ promptState.phase = "failed"
+                  /\ promptState' = [promptState EXCEPT !.phase = "stopped",
+                      !.terminals = Append(@, promptState.run)]
 PromptResponse(outcome) ==
     /\ promptState.phase = "flight"
     /\ promptState' = [promptState EXCEPT !.phase = "running",
         !.allowFollow = outcome = "stop", !.needsInference = outcome = "tool"]
-PromptSettle == /\ promptState.phase = "running" /\ ~PromptCanDeliver /\ ~promptState.needsInference
+PromptSettle == /\ ((promptState.phase = "running" /\ ~PromptCanDeliver /\ ~promptState.needsInference)
+                    \/ promptState.phase = "stopped")
                 /\ promptState' = [promptState EXCEPT !.phase = "idle"]
-PromptNext == /\ (PromptStart \/ PromptDeliver \/ PromptPrepareNeutral \/ PromptInfer \/ PromptSettle
+PromptNext == /\ (PromptStart \/ PromptDeliver \/ PromptPrepared \/ PromptPrepareNeutral \/ PromptPrepareRequest
+                 \/ PromptInfer \/ PromptFail \/ PromptTerminal \/ PromptSettle
                  \/ (\E kind \in {"user", "custom"}, delivery \in {"auto", "follow"}: PromptAccept(kind, delivery))
                  \/ (\E outcome \in {"tool", "stop"}: PromptResponse(outcome)))
               /\ UNCHANGED baseVars
-PromptTypeOK == /\ promptState.phase \in {"idle", "running", "flight"}
-                /\ promptState.run \in 0..2 /\ promptState.preparedRun \in 0..2
+PromptTypeOK == /\ promptState.phase \in {"idle", "running", "preparing", "request", "flight", "failed", "stopped"}
+                /\ promptState.run \in 0..3 /\ promptState.preparedRun \in 0..3
                 /\ promptState.accepted \in 0..3 /\ Len(promptState.queue) <= 2
                 /\ promptState.requests \in 0..4
 PromptCurrentRun == promptState.phase = "flight" => promptState.sentPreparedRun = promptState.sentRun
@@ -140,5 +164,26 @@ PromptNoPromotion == /\ promptState.deliveredUsers \subseteq promptState.userIds
                      /\ \A i \in 1..Len(promptState.hooks):
                          LET key == promptState.hooks[i]
                          IN (key[1] = "neutral" /\ key[2] = 0) \/ (key[1] = "user" /\ key[2] \in promptState.userIds)
-PromptSpec == Init /\ [][PromptNext]_vars
+PromptCommittedOnce == Len(promptState.committed) = Cardinality({promptState.committed[i]: i \in 1..Len(promptState.committed)})
+PromptNoLostTail == (1..promptState.accepted) = {promptState.committed[i]: i \in 1..Len(promptState.committed)}
+                    \cup {promptState.queue[i].id: i \in 1..Len(promptState.queue)}
+PromptTerminalOnce == /\ Len(promptState.terminals) = Cardinality({promptState.terminals[i]: i \in 1..Len(promptState.terminals)})
+                      /\ {promptState.terminals[i]: i \in 1..Len(promptState.terminals)} \subseteq promptState.failedRuns
+                      /\ promptState.phase # "failed" => promptState.failedRuns = {promptState.terminals[i]: i \in 1..Len(promptState.terminals)}
+PromptNoFailureRetry == promptState.phase \in {"failed", "stopped"} => promptState.requests = promptState.requestsAtFailure
+PromptFailureVisible == (promptState.phase = "failed") ~> (Len(promptState.terminals) = 1)
+PromptLaterRecovery == \A n \in 0..2:
+    (promptState.phase = "idle" /\ ~promptState.blocked /\ Len(promptState.queue) > 0 /\ promptState.run = n)
+      ~> (promptState.run > n)
+PromptRecoveredRequest == \A n \in 0..2, r \in 0..3:
+    (promptState.phase = "idle" /\ ~promptState.blocked /\ Len(promptState.queue) > 0
+     /\ promptState.failedRuns # {} /\ promptState.run = n /\ promptState.requests = r)
+      ~> (promptState.requests > r)
+\* Canonical writes and local hooks complete in this bounded projection. Owner
+\* progress is fair; transport/tool completion is not a general liveness claim.
+\* Recovery is conditional on another admission and remaining request budget.
+PromptProgress == (PromptStart \/ PromptDeliver \/ PromptPrepared \/ PromptPrepareNeutral
+                   \/ PromptPrepareRequest \/ PromptInfer \/ PromptTerminal \/ PromptSettle)
+                  /\ UNCHANGED baseVars
+PromptSpec == Init /\ [][PromptNext]_vars /\ WF_vars(PromptProgress)
 =============================================================================

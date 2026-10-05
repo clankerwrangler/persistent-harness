@@ -208,10 +208,106 @@ test("service lease queues input without concurrent provider execution", async t
   release.resolve(); await mutation; await wait(f.coor.waitForIdle(), "lease input did not settle");
   assert.equal(f.requests.length, 1);
 });
-test("critical direct preparation rejection never dispatches provider", async t => {
-  const f = await fixture(t, { prepareRequest: async () => { throw new Error("flush unavailable"); } });
-  await f.coor.submit("blocked"); await wait(f.coor.waitForIdle(), "rejected preparation did not settle");
-  assert.equal(f.requests.length, 0); assert.match(f.coor.getState().error, /flush unavailable/);
+for (const stage of ["idle-prompt", "nested-prompt", "request", "neutral-prompt"]) test(`local ${stage} failure is visible, terminal, and later input recovers without replay`, async t => {
+  const entered = deferred(), release = deferred(); let requestPreparations = 0, injected = 0;
+  t.after(() => release.resolve());
+  const f = await fixture(t, { retry: { enabled: true, maxRetries: 2, baseDelayMs: 1 }, compaction: { enabled: false },
+    script: (_context, n) => [{ type: "text", text: `ANSWER_${n}` }],
+    prepareRequest: async () => {
+      if (++requestPreparations === 1 && ["nested-prompt", "request"].includes(stage)) {
+        entered.resolve(); await release.promise;
+        if (stage === "request") throw new Error("503 injected local preparation");
+      }
+    },
+  });
+  const prepare = f.coor.promptCapture.prepare.bind(f.coor.promptCapture);
+  f.coor.promptCapture.prepare = async (...args) => {
+    const prepared = await prepare(...args);
+    if (stage !== "request" && injected === 0 && (args[1] === "FAULT" || stage === "neutral-prompt")) {
+      injected++;
+      // Represent a completed extension effect. It must survive, not be retried.
+      f.manager.appendCustomEntry("fixture.preparation-effect", { once: true });
+      throw new Error("503 injected local preparation");
+    }
+    return prepared;
+  };
+  if (["nested-prompt", "request"].includes(stage)) {
+    await f.coor.submit(stage === "nested-prompt" ? "FIRST" : "FAULT");
+    await wait(entered.promise, "request preparation did not start");
+    if (stage === "nested-prompt") await f.coor.submit("FAULT");
+    await f.coor.submit("TAIL"); release.resolve();
+  } else if (stage === "neutral-prompt") {
+    await f.coor.sendCustom({ customType: "fixture.family", content: "CUSTOM", display: true }, { triggerTurn: true });
+  } else await f.coor.withServiceMutation(async () => { await f.coor.submit("FAULT"); await f.coor.submit("TAIL"); });
+  await wait(f.coor.waitForIdle(), "local preparation failure did not settle");
+  const messages = () => f.manager.getBranch().filter(e => e.type === "message").map(e => e.message);
+  const errors = messages().filter(m => m.stopReason === "error");
+  assert.equal(errors.length, 1); assert.equal(errors[0].stopReason, "error");
+  assert.equal(errors[0].errorMessage, `${stage === "request" ? "Request" : "Prompt"} preparation failed: 503 injected local preparation`);
+  assert.match(projectVisibleMessage(f.manager.getBranch().find(e => e.message === errors[0])).text, /request preparation failed/);
+  assert.equal(f.events.filter(e => e.type === "message_end" && e.message.stopReason === "error").length, 1);
+  assert.equal(f.coor.failure.code, "ERR_LOCAL_PREPARATION"); assert.equal(f.coor.failedAttempt, null);
+  assert.equal(f.coor.flight, null); assert.equal(f.coor.running, false); assert.equal(f.coor.drivePromise, null);
+  assert.equal(f.requests.length, 0); assert.equal(f.runs(), 0);
+  assert(!f.events.some(e => e.type === "auto_retry_start"));
+  assert(!f.manager.getBranch().some(e => e.customType === "persistent-harness.inference-retry-v1"));
+  assert.deepEqual(f.coor.queue.map(item => item.message), stage === "neutral-prompt" ? [] : ["TAIL"]);
+  assert.equal(messages().filter(m => m.role === "user" && m.content === "FAULT").length, stage === "neutral-prompt" ? 0 : 1);
+  for (const n of [1, 2]) {
+    await f.coor.submit(`RECOVER_${n}`); await wait(f.coor.waitForIdle(), "later input did not recover");
+    assert.equal(f.requests.length, n); assert.equal(f.coor.failure, null);
+    assert.equal(messages().at(-1).content[0].text, `ANSWER_${n}`);
+  }
+  assert.equal(messages().filter(m => m.role === "user" && m.content === "FAULT").length, stage === "neutral-prompt" ? 0 : 1);
+  assert.equal(messages().filter(m => m.role === "user" && m.content === "TAIL").length, stage === "neutral-prompt" ? 0 : 1);
+  assert.equal(f.manager.getBranch().filter(e => e.customType === "fixture.preparation-effect").length, stage === "request" ? 0 : 1);
+  assert.equal(messages().filter(m => m.stopReason === "error").length, 1);
+});
+
+test("admission during a local error commit starts a new run, not the failed inference", async t => {
+  const entered = deferred(), release = deferred(); let calls = 0;
+  t.after(() => release.resolve());
+  const f = await fixture(t, { script: () => [{ type: "text", text: "RECOVERED" }],
+    prepareRequest: () => { if (++calls === 1) throw new Error("unavailable"); },
+    hooks: pi => pi.on("message_end", async event => {
+      if (event.message.stopReason === "error") { entered.resolve(); await release.promise; }
+    }),
+  });
+  await f.coor.submit("FAULT"); await wait(entered.promise, "terminal commit did not start");
+  await f.coor.submit("LATER"); release.resolve();
+  await wait(f.coor.waitForIdle(), "later admission did not settle");
+  assert.equal(f.requests.length, 1); assert.equal(calls, 2); assert.equal(f.coor.failure, null);
+  assert.deepEqual(f.events.filter(e => ["agent_start", "agent_settled"].includes(e.type)).map(e => e.type),
+    ["agent_start", "agent_settled", "agent_start", "agent_settled"]);
+});
+
+test("abort during request preparation retains cancellation classification", async t => {
+  const entered = deferred(), release = deferred();
+  t.after(() => release.resolve());
+  const f = await fixture(t, { prepareRequest: async () => { entered.resolve(); await release.promise; throw new Error("cancelled preparation"); } });
+  await f.coor.submit("CANCEL"); await wait(entered.promise, "preparation did not start");
+  const aborted = f.coor.abort(); release.resolve(); await wait(aborted, "cancelled preparation did not settle");
+  assert.equal(f.requests.length, 0);
+  assert.deepEqual(f.manager.getBranch().filter(e => e.message?.role === "assistant").map(e => e.message.stopReason), ["aborted"]);
+  assert.notEqual(f.coor.failure?.code, "ERR_LOCAL_PREPARATION");
+});
+
+for (const recovery of ["retry", "overflow"]) test(`local preparation failure inside ${recovery} recovery cannot become another provider retry`, async t => {
+  let prepared = 0, summaries = 0;
+  const f = await fixture(t, { retry: { enabled: true, maxRetries: 2, baseDelayMs: 30 },
+    compaction: { enabled: recovery === "overflow" },
+    script: (_context, n) => n === 1 ? { content: [], stopReason: "error", errorMessage: recovery === "retry" ? "503 overloaded" : "context_length_exceeded" }
+      : [{ type: "text", text: "RECOVERED" }],
+    prepareRequest: () => { if (++prepared === 2) throw new Error("503 local failure, not a transport retry"); },
+    compactionDriver: async () => { summaries++; return { summary: "summary", firstKeptEntryId: "fixture", tokensBefore: 1 }; },
+  });
+  await f.coor.submit("START"); await wait(f.coor.waitForIdle(), "recovery failure did not settle");
+  assert.equal(f.requests.length, 1); assert.equal(prepared, 2); assert.equal(summaries, recovery === "overflow" ? 1 : 0);
+  const errors = f.manager.getBranch().filter(e => e.message?.stopReason === "error");
+  assert.equal(errors.length, 2); assert.match(errors[1].message.content[0].text, /request preparation failed/);
+  assert.equal(f.coor.failure.code, "ERR_LOCAL_PREPARATION"); assert.equal(f.coor.failedAttempt, null);
+  await f.coor.submit("LATER"); await wait(f.coor.waitForIdle(), "later input did not recover");
+  assert.equal(f.requests.length, 2); assert.equal(f.coor.failure, null);
 });
 
 test("ordinary steering stays queued until real result is canonical", async t => {
