@@ -111,6 +111,13 @@ function copyArchive(entries) {
   return { entries: copyData(entries, { archiveRecordUnits: recordUnits }), recordUnits };
 }
 
+/** Detach every archive container while sharing immutable strings. Keep opaque
+ * and inactive records intact, with the same validation as canonical projection.
+ */
+export function snapshotCanonicalArchive(entries) {
+  return copyArchive(entries).entries;
+}
+
 function selectBranch(entries, leafId) {
   requireThat(Array.isArray(entries) && entries.length <= CANONICAL_CONTEXT_LIMITS.entries,
     "ERR_CONTEXT_ENTRIES");
