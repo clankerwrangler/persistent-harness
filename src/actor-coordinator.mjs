@@ -41,9 +41,9 @@ class LocalPreparationError extends Error {
 /** One actor's inference, execution, canonical writer, and public extension lifecycle owner. */
 export class ActorCoordinator {
   constructor({ session, runner, sdk, api, core, models, simpleOptions, nativeAdapter, projectContext, planRecovery,
-    lifecycle = {}, resources, promptCapture, publish = () => {}, basePromptOptions = {}, onTiming = () => {}, compactionDriver, navigationDriver, isProjectTrusted = () => false }) {
+    lifecycle = {}, resources, promptCapture, publish = () => {}, basePromptOptions = {}, onTiming = () => {}, compactionDriver, navigationDriver, automaticCompactionAllowed = () => true, isProjectTrusted = () => false }) {
     Object.assign(this, { session, runner, sdk, api, core, models, simpleOptions, nativeAdapter, projectContext, planRecovery,
-      lifecycle, resources, promptCapture, publish, basePromptOptions, onTiming, compactionDriver, navigationDriver, isProjectTrusted });
+      lifecycle, resources, promptCapture, publish, basePromptOptions, onTiming, compactionDriver, navigationDriver, automaticCompactionAllowed, isProjectTrusted });
     this.manager = session.sessionManager;
     this.activeTools = new Set(); this.queue = []; this.tasks = new Map(); this.seenCalls = new Set();
     this.completedResults = [];
@@ -297,6 +297,7 @@ export class ActorCoordinator {
     if (!this.compactionDriver || this.flight || this.tasks.size || this.compacting || this.serviceMutation || this.failure) return false;
     const settings = this.session.settingsManager.getCompactionSettings();
     if (!settings.enabled) return false;
+    if (!this.automaticCompactionAllowed("threshold", this.session.model?.contextWindow)) return false;
     const entries = this.manager.getBranch();
     const latestCompaction = this.sdk.getLatestCompactionEntry(entries);
     const assistant = [...entries].reverse().find(entry => entry.type === "message" && entry.message.role === "assistant" && !["error", "aborted"].includes(entry.message.stopReason));
@@ -353,6 +354,10 @@ export class ActorCoordinator {
     const overflow = this.api.isContextOverflow(attempt.terminal ?? attempt.error, this.session.model.contextWindow)
       || this.api.isRecoverableLength(attempt.terminal ?? attempt.error, this.session.model.maxTokens);
     if (overflow && this.session.settingsManager.getCompactionSettings().enabled && this.compactionDriver) {
+      // Denial is terminal for this provider failure, not an ordinary retry candidate.
+      if (!this.automaticCompactionAllowed("overflow", this.session.model?.contextWindow)) {
+        this.failedAttempt = null; this.controller.abort(); return false;
+      }
       const providerFailure = this.failure;
       this.controller.abort(); await this.toolTail;
       if (this.stopping || this.closed || this.overflowRecoveryAttempted) {
