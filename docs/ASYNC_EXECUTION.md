@@ -8,6 +8,8 @@ The adapter owns raw SSE or header-capable WebSocket transport and composes the 
 
 Python execution remains FIFO. `wait_for_ipython` is an ordinary barrier that hands control back when original results are available; it does not submit duplicate code or manufacture a result. An early result does not imply that the namespace checkpoint has finished. Later Python calls, reload, and graceful shutdown still obey the kernel's save tail.
 
+Public `tool_result` follows real execution, not native admission. A Python control-channel or decoder failure kills the controlled interpreter and waits for its exit before releasing the failed execution result. Forced shutdown also retains process ownership until exit. A successful result can still precede namespace saving; detached subprocesses remain separately owned.
+
 Cancellation fences the inference generation and cancels queued/active work with original-ID outcomes. After a crash, an uncertain operation is not automatically replayed.
 
 An unexplained post-send transport loss is an unknown inference outcome, including possible provider processing and usage. Automatic inference retry is allowed only under the explicit policy when the old generation is fenced, no local calls were admitted or dispatched, and no provider-side tools could have executed. The original unknown record remains. This does not promise exactly-once server inference or cancellation of a remote request.

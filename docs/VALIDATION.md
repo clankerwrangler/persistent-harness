@@ -19,6 +19,8 @@ export PI_HARNESS_NATIVE_ASYNC_BUILD_ROOT="$PI_PREFIX"
 npm run test:native
 ```
 
+Set `PI_HARNESS_TEST_CLM_EXTENSION` to a separately maintained candidate CLM `index.ts` to include the direct-mirror integration: inference during a paused Python writer, canonical acceptance, and reopen. Without that optional checkout, this one cross-project test is skipped.
+
 This suite uses synthetic loopback Responses transport and real Python. It covers early results and save ordering, FIFO, cancellation, wait barriers, actor/kernel loss, no-replay recovery, family wake, default compaction and public compaction hooks, source-order admission, encrypted reasoning amendments, and safe inference-only retry.
 
 Compaction regressions hold a summary while an authenticated family message arrives, require the canonical snapshot to remain unchanged, and then verify one summary, one delivery, acknowledgement, and resumed inference. Coordinator checks cover queued bookkeeping after success, failure, and cancellation, plus a durable automatic-compaction error and recovery on later input. Cancellation checks distinguish manual callback rejection, threshold continuation without a loop, and overflow termination with the original provider failure and no retry. Public stock-runner tests cover structured and forced prompt chains, final observer ordering, first and subsequent requests, fresh resources, idle tool metadata, and input delivered during owner preparation.
@@ -60,6 +62,8 @@ The `RecursiveSessionDeletion-*.cfg` configurations cover root and direct-child 
 `ProviderErrorMetadata` checks fixed-field redaction, unknown-value noninterference, unchanged retry/error classification, and final-attempt ownership. Adapter tests cover actual error frames, private payloads and hook exceptions, retry resets, and a produced interrupted suffix carried through the actor stream planner into offline next-request serializers.
 
 `ChildExitDelivery` models atomic generation-bound failure receipts, silent intentional exits, parent availability/deletion, retransmission after restart, and idempotent recipient incorporation. TLC checked 967 generated states, 181 distinct states, and depth 11 with no errors. It abstracts SQLite durability, fixed payload validation, and the existing family-message transport; it does not prove exactly-once inference or explain heap growth. Store and supervisor regressions exercise actual receipt persistence, worker-exit events, privacy, direct-parent routing, restart/redelivery, and acknowledgement. The native integration kills only a verified synthetic child process group and checks automatic parent inference, one canonical receipt, acknowledgement, and no child revival.
+
+`KernelCompletion` checks that failed execution cannot become terminal until the controlled process exits, while successful execution can complete before namespace saving. It abstracts signal delivery and transport errors. `kernel-completion.test.mjs` checks decoder corruption, control-channel failure, queued-call no-replay, and forced close against real Python process exit.
 
 `SnapshotSaveScope` separates non-certifying prior blob candidates from current-byte reuse verification. It covers unused old state, post-lookup source substitution, rewrite fallback, and unchanged full restore validation. The snapshot regression checks actual bounded reads, malformed old metadata, symlink/corrupt candidates, and recovery. The model does not claim protection against mutation of a hardlinked inode after verification.
 

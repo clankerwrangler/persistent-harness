@@ -130,6 +130,7 @@ export class PythonKernel {
   #snapshotGeneration = 0;
   #lastSnapshot;
   #checkpointError;
+  #controlError;
   #closed = false;
 
   constructor({
@@ -213,12 +214,13 @@ export class PythonKernel {
     child.stderr.on("data", (chunk) => { if (this.#process === child) this.#active?.collector.add("stderr", chunk); });
     child.stdout.on("error", () => {});
     child.stderr.on("error", () => {});
-    this.#control.on("error", (error) => { if (this.#process === child) this.#failAll(error); });
+    this.#control.on("error", (error) => { if (this.#process === child) this.#terminateOnControlError(error); });
     this.#control.on("data", (chunk) => { if (this.#process === child) this.#onControl(chunk); });
     child.once("error", (error) => { if (this.#process === child) this.#failAll(error); });
     child.once("exit", (code, signal) => {
       if (this.#process !== child) return;
-      const error = new Error(`Python kernel exited code=${code} signal=${signal}`);
+      const error = this.#controlError ?? new Error(`Python kernel exited code=${code} signal=${signal}`);
+      this.#controlError = undefined;
       this.#failAll(error);
       this.#process = undefined;
       this.#control = undefined;
@@ -232,8 +234,7 @@ export class PythonKernel {
     try {
       frames = this.#decoder.push(chunk);
     } catch (error) {
-      this.#process?.kill("SIGKILL");
-      this.#failAll(error);
+      this.#terminateOnControlError(error);
       return;
     }
     for (const frame of frames) {
@@ -542,8 +543,21 @@ export class PythonKernel {
         new Promise((resolve) => setTimeout(resolve, this.killTimeoutMs)),
       ]);
     }
-    if (this.#process?.exitCode === null) this.#process.kill("SIGKILL");
+    if (this.#process?.exitCode === null) {
+      const child = this.#process;
+      const exited = new Promise((resolve) => child.once("exit", resolve));
+      child.kill("SIGKILL");
+      await exited;
+    }
     this.#process = undefined;
+  }
+
+  #terminateOnControlError(error) {
+    // A broken control channel is not execution completion. Keep promises pending
+    // until exit confirms that the controlled Python process can no longer write.
+    this.#controlError ??= error;
+    this.#active?.abortController.abort();
+    this.#process?.kill("SIGKILL");
   }
 
   #failAll(error) {

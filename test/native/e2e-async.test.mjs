@@ -65,7 +65,7 @@ function respond(response, id, { calls = [], answer = id, usage = { input_tokens
   response.end(events.map((event) => `data: ${JSON.stringify(event)}\n\n`).join(""));
 }
 
-async function fixture(t, script, { customCompaction = false, nativeAsync = true, modelId = "gpt-6-astra" } = {}) {
+async function fixture(t, script, { customCompaction = false, nativeAsync = true, modelId = "gpt-6-astra", clmExtension = undefined } = {}) {
   const buildRoot = process.env.PI_HARNESS_NATIVE_ASYNC_BUILD_ROOT;
   const artifacts = process.env.PI_HARNESS_NATIVE_TEST_ARTIFACTS;
   assert(buildRoot, "Set PI_HARNESS_NATIVE_ASYNC_BUILD_ROOT to the explicit immutable stock install root");
@@ -192,7 +192,7 @@ export default function customCompactionFixture(pi) {
   process.env.HARNESS_FAKE_NATIVE_BASE_URL = baseUrl;
   const socketPath = path.join(root, "run", "supervisor.sock");
   supervisor = new HarnessSupervisor({ socketPath, databasePath: path.join(root, "state", "harness.sqlite"),
-    pidPath: path.join(root, "run", "supervisor.pid"), actorExtensionPaths: [providerPath, ...(customCompaction ? [customExtensionPath] : [])], actorInactivityMs: 0 });
+    pidPath: path.join(root, "run", "supervisor.pid"), actorExtensionPaths: [providerPath, ...(customCompaction ? [customExtensionPath] : []), ...(clmExtension ? [clmExtension] : [])], actorInactivityMs: 0 });
   client = new HarnessClient({ socketPath, heartbeatMs: 0, requestTimeoutMs: 30_000 });
   await supervisor.start();
   assert(await client.start({ registrationType: "register_client", clientInstanceId: crypto.randomUUID() }));
@@ -983,4 +983,54 @@ test("family Fast reaches an already resident real child on its next request and
   assert.equal(childRequests.at(-1).service_tier, "priority");
   assert.equal(childRequests.length, 4);
   assert.equal((await f.client.request("get_session_inference", { sessionId: child.sessionId })).fastModeRootSessionId, f.sessionId);
+});
+
+
+test("CLM direct mirror stays frozen during native Python execution and persists at settlement", { timeout: 120_000, skip: !process.env.PI_HARNESS_TEST_CLM_EXTENSION }, async t => {
+  const clmExtension = process.env.PI_HARNESS_TEST_CLM_EXTENSION;
+  assert(clmExtension, "Set PI_HARNESS_TEST_CLM_EXTENSION to the candidate CLM index.ts");
+  const during = deferred(); let mirrorPath; let f;
+  f = await fixture(t, async (body, index, baseUrl) => {
+    if (index === 1) return { answer: "OLD_DIRECT_CONTEXT ".repeat(200) };
+    if (index === 2) {
+      mirrorPath = body.instructions.match(/mirrored at `([^`]+)`/)[1];
+      return { calls: [{ id: "direct-writer", code: `from pathlib import Path
+from urllib.request import urlopen
+mirror = Path(${JSON.stringify(mirrorPath)})
+original = mirror.read_text()
+mirror.write_text(original.splitlines()[0])
+with urlopen(${JSON.stringify(baseUrl + "/gate/direct-writer")}) as response:
+    response.read()
+mirror.write_text("FINAL_DIRECT_SUMMARY: retained task and decisions")
+print("DIRECT_EDIT_COMPLETE")` }] };
+    }
+    if (!toolOutputs(body).some(output => output.call_id === "direct-writer|fc_direct-writer" || output.call_id === "direct-writer")) {
+      await f.gate("direct-writer").started.promise;
+      during.resolve(body);
+      return { answer: "INFERENCE_DURING_DIRECT_WRITE" };
+    }
+    return { answer: "DIRECT_RESULT_SEEN" };
+  }, { clmExtension });
+  await submitAndSettle(f, "Seed the original task");
+  const since = f.log.frames.length;
+  await f.submit("Edit context now");
+  await bounded(f.gate("direct-writer").started.promise, "direct Python writer is held");
+  await f.submit("Independent work while editing", "steer");
+  const liveRequest = await bounded(during.promise, "actual inference while the direct writer is paused");
+  assert.match(text(liveRequest), /OLD_DIRECT_CONTEXT/);
+  assert.match(await readFile(mirrorPath, "utf8"), /^\[\[LIVE_CONTEXT[^\n]+\]\]$/);
+  const states = entries => entries.filter(e => e.customType === "live-context-state");
+  assert.equal(states(await f.entries()).filter(e => e.data?.checkpoint).length, 0);
+  f.gate("direct-writer").release.resolve();
+  await f.log.waitFrame(frame => frame.event === "actor_event" && frame.data.sessionId === f.sessionId
+    && frame.data.event.type === "agent_settled", "writer and final CLM checkpoint settled", since);
+  const accepted = states(await f.entries()).filter(e => e.data?.checkpoint);
+  assert.equal(accepted.length, 1);
+  assert.equal(accepted[0].data.revision, 1);
+  assert.match(text(accepted[0]), /FINAL_DIRECT_SUMMARY/);
+  await f.client.request("stop_session", { sessionId: f.sessionId });
+  const beforeReopen = f.requests.length;
+  await submitAndSettle(f, "Reopen with the accepted direct context");
+  assert.match(text(f.requests[beforeReopen]), /FINAL_DIRECT_SUMMARY/);
+  assert.doesNotMatch(text(f.requests[beforeReopen]), /OLD_DIRECT_CONTEXT/);
 });
