@@ -1801,6 +1801,7 @@ export class HarnessSupervisor {
     // Persist startup intent before acknowledging; startup and skill reconciliation
     // remain owned by the existing actor scheduler, not the HTTP/RPC connection.
     this.#requestActorStart(sessionId, true);
+    for (const input of this.store.setActorInputWakeError(sessionId)) this.#publishInputState(sessionId, pendingInputMessage(input));
     const current = this.#actorInputWakes.get(sessionId);
     if (current) { current.requested = true; return; }
     const wake = { requested: true, cancelled: false, done: null };
@@ -1818,7 +1819,10 @@ export class HarnessSupervisor {
           const message = error instanceof Error ? error.message : String(error);
           // Keep the durable outbox retryable and make post-acceptance failure
           // visible through the existing session error/revival path.
-          await this.#stopActor(sessionId, "error", message);
+          const stopped = this.#stopActor(sessionId, "error", message);
+          for (const input of this.store.setActorInputWakeError(sessionId, this.store.getSession(sessionId).actorGeneration))
+            this.#publishInputState(sessionId, pendingInputMessage(input));
+          await stopped;
           this.logger.error?.(`actor input wake failed for ${sessionId}: ${message}`);
         }
       } while (wake.requested && !wake.cancelled && !this.#stoppingPromise && !this.store.isSessionDeleting(sessionId));
@@ -1996,7 +2000,13 @@ export class HarnessSupervisor {
         setImmediate(() => void this.#completeCronRunsForSession(sessionId));
         setImmediate(() => void this.#maybeAutoTitleRoot(sessionId));
         if (!record.expectedLifecycle) {
-          if (!this.#stoppingPromise && !this.store.isSessionDeleting(sessionId)) this.#queueActorInputWake(sessionId);
+          // Order only wake registration behind prior mutations. Readiness remains
+          // owned outside that queue so it cannot delay later input admission.
+          void this.#withSessionMutation(sessionId, () => {
+            if (this.#actors.get(sessionId) !== record || record.expectedLifecycle || this.#stoppingPromise
+              || this.store.isSessionDeleting(sessionId) || this.store.getSession(sessionId)?.actorGeneration !== record.generation) return;
+            this.#queueActorInputWake(sessionId);
+          }).catch(error => this.logger.error?.(`actor ${sessionId} settled wake failed: ${error.message}`));
           setImmediate(() => this.#retryQueuedMessages(sessionId));
         }
       }

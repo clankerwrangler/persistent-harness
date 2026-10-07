@@ -65,9 +65,13 @@ same-ID retries reuse the receipt and request delivery without repeating admissi
 Response Retry still waits for its idle branch operation before admitting input.
 
 The actor scheduler and readiness path retain skill and generation checks. Wake
-failures after acceptance publish the session's error state and retain pending input
-for same-ID retry or explicit revival. Stop, deletion, and supervisor shutdown drain
-or cancel owned wakes before releasing their state. Restart recovers pending inputs
+failures after acceptance publish the session's error state and a correlated
+`delivery.retryableError` on each affected pending input. The fixed
+`actor_wake_failed` code and actor generation preserve accepted status without
+exposing raw worker errors. A successfully registered new wake clears the annotation;
+canonical delivery removes it with the pending payload. Same-ID retries retain the
+original receipt and immutable content, images, and location. Stop, deletion, and
+supervisor shutdown drain or cancel owned wakes before releasing their state. Restart recovers pending inputs
 from gracefully passivated sessions; explicitly stopped sessions remain stopped.
 Canonical delivery evidence and ambiguous-input replay guards remain authoritative.
 

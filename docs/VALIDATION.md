@@ -101,4 +101,11 @@ coalesced wake ownership, overlapping sends, failure visibility, and drained
 shutdown/restart. It abstracts skill reconciliation, SQLite atomicity, transport,
 and worker consumption; it does not prove exactly-once execution. Supervisor
 regressions hold startup and close, reject registration/factory/start/submit,
-retry the same receipt after reconnect or failure, and verify stop/delete/restart.
+retry the same receipt after reconnect or failure, verify the correlated accepted
+error and its clearing on retry, and verify stop/delete/restart.
+
+`SettledWakeOrdering` checks both mutation orderings: a wake registered before Stop
+is joined, and a later settled callback cannot reenter readiness after Stop.
+Registration leaves the mutation queue before readiness waits. The existing
+`supervisor-settled-stop.test.mjs` cases also verify that a real stopped writer
+cannot append and that only explicit later activation revives it.
