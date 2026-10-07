@@ -1281,7 +1281,7 @@ async function admissionFailureFixture(t) {
   const { admission } = await client.request("create_root", { cwd: root, repositoryRoot: null, name: "Admission failure",
     provider: null, model: null, thinkingLevel: null });
   const sessionId = admission.sessionId;
-  await eventually(() => supervisor.store.getSession(sessionId)?.lifecycle === "resident");
+  await eventually(() => supervisor.store.getSession(sessionId)?.lifecycle === "resident" && supervisor.status().capacity.starting === 0);
   await client.request("stop_session", { sessionId });
   const params = { sessionId, message: "durable retry", behavior: "auto", clientRequestId: "durable-retry-id" };
   return { supervisor, client, sessionId, params, actors, errors, events, control, options, supervisors };
@@ -1314,7 +1314,15 @@ for (const failure of ["registration", "factory", "startup", "submit"]) test(`in
   }
   assert.equal(supervisor.store.listActorInputReceipts(sessionId).length, 1);
   assert.equal(supervisor.store.listPendingActorInputs(sessionId).length, 1);
+  if (accepted) {
+    await eventually(() => supervisor.store.getActorInput(accepted.inputId,sessionId).delivery.retryableError);
+    const visible = await client.request("get_visible_messages", { sessionId });
+    const saved = visible.messages.find(message => message.clientMessageId === params.clientRequestId);
+    assert.equal(saved.delivery.state, "accepted"); assert.equal(saved.delivery.retryableError.code,"actor_wake_failed");
+    assert.doesNotMatch(saved.delivery.retryableError.message,/injected/);
+  }
   const replay = await client.request("submit_input", params);
+  assert.equal(replay.delivery.retryableError, undefined);
   assert.equal(replay.accepted, true);
   if (accepted) assert.equal(replay.inputId, accepted.inputId);
   await eventually(() => actors.some((actor) => actor.submits.some((input) => input.message === params.message)));

@@ -241,7 +241,8 @@ const CURRENT_SCHEMA = `
     state TEXT NOT NULL CHECK (state IN ('queued', 'accepted')),
     created_at INTEGER NOT NULL,
     accepted_at INTEGER,
-    accepted_generation INTEGER
+    accepted_generation INTEGER,
+    wake_error_generation INTEGER
   ) STRICT;
   CREATE INDEX actor_inputs_pending ON actor_inputs(session_id, created_at, id);
   CREATE TABLE actor_input_receipts (
@@ -355,6 +356,7 @@ export class HarnessStore {
       throw new Error("unreleased split-architecture database is unsupported; preserve session files, then recreate harness.sqlite");
     }
     let inputColumns = new Set(this.#db.prepare("PRAGMA table_info(actor_inputs)").all().map((row) => row.name));
+    if (!inputColumns.has("wake_error_generation")) this.#db.exec("ALTER TABLE actor_inputs ADD COLUMN wake_error_generation INTEGER");
     if (!inputColumns.has("location_json")) this.#db.exec("ALTER TABLE actor_inputs ADD COLUMN location_json TEXT");
     if (!inputColumns.has("images_json")) this.#db.exec("ALTER TABLE actor_inputs ADD COLUMN images_json TEXT NOT NULL DEFAULT '[]'");
     inputColumns = new Set(this.#db.prepare("PRAGMA table_info(actor_inputs)").all().map((row) => row.name));
@@ -1358,7 +1360,11 @@ export class HarnessStore {
     const receipt = this.#db.prepare("SELECT * FROM actor_input_receipts WHERE id = ? AND session_id = ?").get(inputId, sessionId);
     if (!receipt) return undefined;
     const pending = this.#db.prepare("SELECT * FROM actor_inputs WHERE id = ? AND session_id = ?").get(inputId, sessionId);
-    return { ...mapActorInputReceipt(receipt), ...(includeDigest ? { digest: receipt.digest } : {}), state: pending?.state ?? "completed",
+    const receiptValue = mapActorInputReceipt(receipt);
+    if (pending?.wake_error_generation != null && receiptValue.delivery.state === "accepted") receiptValue.delivery.retryableError = {
+      code: "actor_wake_failed", generation: Number(pending.wake_error_generation),
+      message: "Message saved. The agent could not receive it. Retry sending." };
+    return { ...receiptValue, ...(includeDigest ? { digest: receipt.digest } : {}), state: pending?.state ?? "completed",
       transportAcceptedAt: pending?.accepted_at ?? null,
       acceptedGeneration: pending?.accepted_generation == null ? null : Number(pending.accepted_generation),
       ...(pending ? { message: pending.body, images: parseJson(pending.images_json, []), behavior: pending.behavior,
@@ -1379,6 +1385,14 @@ export class HarnessStore {
   listPendingActorInputs(sessionId) {
     return this.#db.prepare(`SELECT i.id FROM actor_inputs i JOIN actor_input_receipts r ON r.id = i.id
       WHERE i.session_id = ? ORDER BY r.sequence`).all(sessionId).map((row) => this.getActorInput(row.id, sessionId));
+  }
+
+  setActorInputWakeError(sessionId, generation = null) {
+    if (generation !== null && (!Number.isSafeInteger(generation) || generation < 1)) throw new Error("invalid actor generation");
+    const inputs = this.listPendingActorInputs(sessionId);
+    this.#db.prepare("UPDATE actor_inputs SET wake_error_generation = ? WHERE session_id = ?").run(generation, sessionId);
+    return inputs.filter(input => generation !== null || input.delivery.retryableError)
+      .map(input => this.getActorInput(input.inputId, sessionId));
   }
 
   markActorInputAccepted(inputId, sessionId, generation, now = Date.now()) {
