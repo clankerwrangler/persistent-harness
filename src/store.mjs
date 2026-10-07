@@ -579,7 +579,8 @@ export class HarnessStore {
   reconcileAfterDaemonStart(now = Date.now()) {
     this.#db.exec("BEGIN IMMEDIATE");
     try {
-      const previousOwners = this.#db.prepare(`SELECT * FROM sessions WHERE lifecycle IN ('starting', 'resident')`)
+      const previousOwners = this.#db.prepare(`SELECT * FROM sessions WHERE lifecycle IN ('starting', 'resident')
+        OR (lifecycle = 'passivated' AND EXISTS (SELECT 1 FROM actor_inputs WHERE session_id = sessions.id))`)
         .all().map((row) => ({
           sessionId: row.id,
           actorId: row.id,

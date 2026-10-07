@@ -359,6 +359,7 @@ export class HarnessSupervisor {
   #resolveStopped;
   #logTail = Promise.resolve();
   #actorReadyPromises = new Map();
+  #actorInputWakes = new Map();
   #skillGrantPromises = new Map();
   #runtimeReadinessPromises = new Map();
   #sessionMutationTails = new Map();
@@ -850,6 +851,7 @@ export class HarnessSupervisor {
     if (type === "set_session_inference") return this.#withSessionMutation(params.sessionId, () => this.#setSessionInference(params));
     if (type === "set_session_fast_mode") return this.#withSessionMutation(params.sessionId, () => this.#setSessionFastMode(params));
     if (type === "submit_input") return this.#withSessionMutation(params.sessionId, async () => {
+      if (this.#stoppingPromise) throw requestFailure("unavailable", "supervisor is stopping");
       const inputId = params.clientRequestId ? `client-${createHash("sha256").update(params.sessionId).update("\0").update(params.clientRequestId).digest("hex")}` : undefined;
       const clientMessageId = params.clientMessageId ?? params.clientRequestId;
       const retryIntent = retryIntentForRequest(params);
@@ -861,7 +863,10 @@ export class HarnessSupervisor {
       });
       const prior = this.store.matchActorInputRequest(params.sessionId, { inputId, retryIntent, behavior: params.behavior, clientMessageId,
         ...(retryIntent?.mode === "original" ? {} : { message: params.message, images: params.images, location: params.location }) });
-      if (prior && retryIntent) return acceptedResponse(prior, prior.state !== "completed");
+      if (prior && retryIntent) {
+        if (prior.state !== "completed") this.#queueActorInputWake(params.sessionId);
+        return acceptedResponse(prior, prior.state !== "completed");
+      }
       let payload = { message: params.message, images: params.images, location: params.location, source: "user", origin: null };
       if (retryIntent) {
         const actor = await this.#idleActorForAction(params.sessionId, "retry a response");
@@ -877,10 +882,7 @@ export class HarnessSupervisor {
       const input = this.store.createActorInput(params.sessionId, { inputId, ...payload, behavior: params.behavior,
         retryIntent, clientMessageId, pendingLimit: this.pendingMessageLimit });
       if (!prior) this.#notifications.noteUserInput(params.sessionId);
-      if (input.state !== "completed") {
-        const actor = await this.#ensureActorReady(params.sessionId);
-        this.#kickActorInputDelivery(params.sessionId, actor);
-      }
+      if (input.state !== "completed") this.#queueActorInputWake(params.sessionId);
       const current = this.store.getActorInput(input.inputId, params.sessionId);
       const trusted = { ...payload, ...input, ...current };
       if (current.outcome !== "handled" && (!prior || prior.state !== "completed")) this.#publishInputState(params.sessionId, pendingInputMessage(trusted));
@@ -928,7 +930,11 @@ export class HarnessSupervisor {
       return { restarted: true };
     });
     if (type === "abort_session") return this.#withSessionMutation(params.sessionId, async () => { const actor = await this.#ensureActorReady(params.sessionId); await actor.worker.request("abort"); return { aborted: true }; });
-    if (type === "stop_session") return this.#withSessionMutation(params.sessionId, async () => { await this.#stopActor(params.sessionId, "stopped"); return { session: this.store.getSession(params.sessionId) }; });
+    if (type === "stop_session") return this.#withSessionMutation(params.sessionId, async () => {
+      const wake = this.#actorInputWakes.get(params.sessionId); if (wake) wake.cancelled = true;
+      await this.#stopActor(params.sessionId, "stopped"); await wake?.done;
+      return { session: this.store.getSession(params.sessionId) };
+    });
     if (type === "revive_session") return this.#withSessionMutation(params.sessionId, async () => { this.#requestActorStart(params.sessionId, true); return { session: this.store.getSession(params.sessionId) }; });
     if (type === "delete_session") return this.#deleteSessionTree(params.sessionId);
     throw new Error(`request ${type} is not available to clients`);
@@ -938,7 +944,7 @@ export class HarnessSupervisor {
     // Fence before the first await, including legacy tombstoned intermediates.
     const sessions = this.store.beginSessionDeletion(sessionId);
     const ids = sessions.map((session) => session.sessionId);
-    const pending = ids.flatMap((id) => [this.#sessionMutationTails.get(id), this.#launchPromises.get(id)]).filter(Boolean);
+    const pending = ids.flatMap((id) => [this.#sessionMutationTails.get(id), this.#launchPromises.get(id), this.#actorInputWakes.get(id)?.done]).filter(Boolean);
     const failures = [];
     try {
       for (const id of ids) {
@@ -1615,6 +1621,7 @@ export class HarnessSupervisor {
   }
 
   #requestActorStart(sessionId, revive) {
+    if (this.#stoppingPromise) throw requestFailure("unavailable", "supervisor is stopping");
     this.store.assertSessionAvailable(sessionId);
     let session = this.store.getSession(sessionId); if (!session || session.lifecycle === "deleted") throw new Error("session does not exist");
     if (this.#actors.has(sessionId) || this.#startingActors.has(sessionId) || this.#startQueue.includes(sessionId)) return session;
@@ -1622,22 +1629,27 @@ export class HarnessSupervisor {
     if (session.lifecycle !== "starting") return session;
     this.#startQueue.push(sessionId); setImmediate(() => this.#drainActorStarts()); return session;
   }
-  #ensureActorReady(sessionId) {
+  #ensureActorReady(sessionId, check = () => {}) {
+    check();
     const current = this.#actorReadyPromises.get(sessionId);
     if (current) return current.then(
-      () => this.#ensureActorReady(sessionId),
-      () => this.#ensureActorReady(sessionId),
+      () => this.#ensureActorReady(sessionId, check),
+      () => this.#ensureActorReady(sessionId, check),
     );
-    const operation = this.#ensureActorReadyOnce(sessionId)
+    const operation = this.#ensureActorReadyOnce(sessionId, check)
       .finally(() => { if (this.#actorReadyPromises.get(sessionId) === operation) this.#actorReadyPromises.delete(sessionId); });
     this.#actorReadyPromises.set(sessionId, operation);
     return operation;
   }
 
-  async #ensureActorReadyOnce(sessionId) {
-    this.store.assertSessionAvailable(sessionId);
+  async #ensureActorReadyOnce(sessionId, check) {
+    const validate = () => {
+      if (this.#stoppingPromise) throw requestFailure("unavailable", "supervisor is stopping");
+      check(); this.store.assertSessionAvailable(sessionId);
+    };
+    validate();
     const desired = await this.#reconcileSkillGrant(sessionId);
-    this.store.assertSessionAvailable(sessionId);
+    validate();
     let session = this.store.getSession(sessionId);
     if (!session || session.lifecycle === "deleted") throw new Error("session does not exist");
     const resident = this.#actors.get(sessionId);
@@ -1648,12 +1660,13 @@ export class HarnessSupervisor {
         return resident;
       }
       await this.#stopActor(sessionId, "passivated");
+      validate();
       session = this.store.getSession(sessionId);
     }
     this.#requestActorStart(sessionId, session.lifecycle !== "starting");
     const deadline = Date.now() + this.actorStartupTimeoutMs;
     while (Date.now() < deadline) {
-      this.store.assertSessionAvailable(sessionId);
+      validate();
       const record = this.#actors.get(sessionId);
       if (record?.worker.isRunning && this.store.getSession(sessionId)?.lifecycle === "resident") return record;
       const currentSession = this.store.getSession(sessionId);
@@ -1671,7 +1684,16 @@ export class HarnessSupervisor {
         if (new Set([...this.#actors.keys(), ...this.#startingActors]).size >= this.maxResidentActors) { const victim = this.store.findIdleResidentActor(nextId); if (!victim) break; await this.#stopActor(victim.sessionId, "passivated"); continue; }
         this.#startQueue.shift(); const session = this.store.getSession(nextId); if (!session || session.lifecycle !== "starting") continue;
         this.#startingActors.add(nextId); this.#activeStarts += 1;
-        const launchPromise = this.#launchActor(nextId).catch((error) => this.logger.error?.(`actor ${nextId} launch failed: ${error instanceof Error ? error.message : String(error)}`)).finally(() => { this.#launchPromises.delete(nextId); this.#startingActors.delete(nextId); this.#activeStarts -= 1; setImmediate(() => this.#drainActorStarts()); });
+        const launchPromise = this.#launchActor(nextId).catch((error) => {
+          const failed = this.store.getSession(nextId);
+          const message = error instanceof Error ? error.message : String(error);
+          // Factory/setup failures can precede the worker's own startup catch.
+          if (!this.#stoppingPromise && !this.store.isSessionDeleting(nextId) && failed?.lifecycle === "starting") {
+            this.store.markActorLifecycle(nextId, failed.actorGeneration, "error", message);
+            this.#broadcastNavigator("actor_error");
+          }
+          this.logger.error?.(`actor ${nextId} launch failed: ${message}`);
+        }).finally(() => { this.#launchPromises.delete(nextId); this.#startingActors.delete(nextId); this.#activeStarts -= 1; setImmediate(() => this.#drainActorStarts()); });
         this.#launchPromises.set(nextId, launchPromise);
       }
     } finally { this.#drainingStarts = false; }
@@ -1711,7 +1733,9 @@ export class HarnessSupervisor {
       notificationWork: new Set(), messageTransportRepairAttempted: false, presentationFilters: new Map(), liveConversation: new LiveConversation(), assistantMessageIdentity: null, assistantTextIds: new Map() }; this.#actors.set(sessionId, record);
     worker.on("event", (frame) => this.#onActorEvent(sessionId, record, frame)); worker.on("protocolError", (error) => this.logger.error?.(`actor ${sessionId} RPC protocol error: ${error.message}`)); worker.on("exit", (details) => this.#onActorExit(sessionId, record, details));
     try {
-      const state = await worker.start(); if (state?.sessionId !== session.sessionId) throw new Error(`Pi session mismatch: expected ${session.sessionId}, received ${String(state?.sessionId)}`);
+      const state = await worker.start();
+      if (this.#stoppingPromise || record.expectedLifecycle) throw requestFailure("unavailable", "actor startup was stopped");
+      if (state?.sessionId !== session.sessionId) throw new Error(`Pi session mismatch: expected ${session.sessionId}, received ${String(state?.sessionId)}`);
       if (session.launch?.model?.resolved && (state?.model?.provider !== session.launch.model.resolved.provider || state?.model?.id !== session.launch.model.resolved.id)) {
         throw new Error(`Pi model mismatch: expected ${session.launch.model.resolved.provider}/${session.launch.model.resolved.id}`);
       }
@@ -1771,6 +1795,39 @@ export class HarnessSupervisor {
       this.#write(client, actor ? event("actor_event", { sessionId, actorGeneration: actor.generation, seq: actor.eventSeq, event: publicEvent })
         : event("input_state", { sessionId, message }));
     }
+  }
+
+  #queueActorInputWake(sessionId) {
+    // Persist startup intent before acknowledging; startup and skill reconciliation
+    // remain owned by the existing actor scheduler, not the HTTP/RPC connection.
+    this.#requestActorStart(sessionId, true);
+    const current = this.#actorInputWakes.get(sessionId);
+    if (current) { current.requested = true; return; }
+    const wake = { requested: true, cancelled: false, done: null };
+    this.#actorInputWakes.set(sessionId, wake);
+    wake.done = Promise.resolve().then(async () => {
+      const check = () => { if (wake.cancelled) throw requestFailure("unavailable", "input wake was stopped"); };
+      try { do {
+        wake.requested = false;
+        try {
+          const actor = await this.#ensureActorReady(sessionId, check);
+          check();
+          await this.#deliverActorInputs(sessionId, actor);
+        } catch (error) {
+          if (this.#stoppingPromise || wake.cancelled || this.store.isSessionDeleting(sessionId)) return;
+          const message = error instanceof Error ? error.message : String(error);
+          // Keep the durable outbox retryable and make post-acceptance failure
+          // visible through the existing session error/revival path.
+          await this.#stopActor(sessionId, "error", message);
+          this.logger.error?.(`actor input wake failed for ${sessionId}: ${message}`);
+        }
+      } while (wake.requested && !wake.cancelled && !this.#stoppingPromise && !this.store.isSessionDeleting(sessionId));
+      } finally {
+        // Retire synchronously with the final dirty check: no coalesced send can
+        // land between the loop ending and removal of its owner.
+        if (this.#actorInputWakes.get(sessionId) === wake) this.#actorInputWakes.delete(sessionId);
+      }
+    }).catch((error) => this.logger.error?.(`actor input wake cleanup failed for ${sessionId}: ${error.message}`));
   }
 
   #kickActorInputDelivery(sessionId, record) {
@@ -1939,13 +1996,7 @@ export class HarnessSupervisor {
         setImmediate(() => void this.#completeCronRunsForSession(sessionId));
         setImmediate(() => void this.#maybeAutoTitleRoot(sessionId));
         if (!record.expectedLifecycle) {
-          void this.#withSessionMutation(sessionId, async () => {
-            const current = this.store.getSession(sessionId);
-            if (this.#stoppingPromise || this.#actors.get(sessionId) !== record || record.expectedLifecycle
-              || !record.worker.isRunning || current?.lifecycle !== "resident" || current.actorGeneration !== record.generation) return;
-            const active = await this.#ensureActorReady(sessionId);
-            await this.#deliverActorInputs(sessionId, active);
-          }).catch((error) => { if (!this.#stoppingPromise) this.logger.error?.(`actor input reconciliation failed for ${sessionId}: ${error.message}`); });
+          if (!this.#stoppingPromise && !this.store.isSessionDeleting(sessionId)) this.#queueActorInputWake(sessionId);
           setImmediate(() => this.#retryQueuedMessages(sessionId));
         }
       }
@@ -1969,13 +2020,21 @@ export class HarnessSupervisor {
     if (lifecycle === "error") this.#retryChildExitMessages();
     void this.#log("actor_stopped", { sessionId, generation: record.generation, lifecycle, ...(error ? { error } : {}) }); this.#broadcastNavigator(lifecycle === "error" ? "actor_error" : "actor_passivated"); setImmediate(() => this.#drainActorStarts());
   }
-  async #stopActor(sessionId, lifecycle = "passivated") {
+  async #stopActor(sessionId, lifecycle = "passivated", error = null) {
     this.#clearPassivation(sessionId); this.#startQueue = this.#startQueue.filter((id) => id !== sessionId); const record = this.#actors.get(sessionId);
-    if (record) { record.expectedLifecycle = lifecycle; await record.worker.close(); return; }
-    const session = this.store.getSession(sessionId); if (session && session.lifecycle !== "deleted" && session.lifecycle !== lifecycle) {
-      this.store.markActorLifecycle(sessionId, session.actorGeneration, lifecycle);
+    if (record) {
+      record.expectedLifecycle = lifecycle;
+      if (error) {
+        record.exitError = error;
+        this.store.markActorLifecycle(sessionId, record.generation, lifecycle, error);
+        this.#broadcastNavigator("actor_error");
+      }
+      await record.worker.close(); return;
     }
-    this.#broadcastNavigator("actor_stopped");
+    const session = this.store.getSession(sessionId); if (session && session.lifecycle !== "deleted" && session.lifecycle !== lifecycle) {
+      this.store.markActorLifecycle(sessionId, session.actorGeneration, lifecycle, error);
+    }
+    this.#broadcastNavigator(lifecycle === "error" ? "actor_error" : "actor_stopped");
   }
   #syncPassivationTimers() { for (const sessionId of this.#actors.keys()) { const session = this.store.getSession(sessionId); if (session?.lifecycle === "resident" && session.activity === "idle") { if (!this.#passivationTimers.has(sessionId)) this.#schedulePassivation(sessionId); } else this.#clearPassivation(sessionId); } }
   #clearPassivation(sessionId) { const timer = this.#passivationTimers.get(sessionId); if (timer) clearTimeout(timer); this.#passivationTimers.delete(sessionId); }
@@ -2362,6 +2421,8 @@ export class HarnessSupervisor {
       await this.#backgroundCompletionMonitor?.stop(); this.#backgroundCompletionMonitor = undefined;
       await this.#cronScheduler?.stop(); this.#cronScheduler = undefined;
       await Promise.all([...this.#actors.keys()].map((id) => this.#stopActor(id, "passivated"))); await Promise.all([...this.#launchPromises.values()]);
+      await Promise.allSettled([...this.#actorInputWakes.values()].map((wake) => wake.done));
+      await Promise.allSettled([...this.#actorReadyPromises.values()]);
       for (const state of this.#sockets) state.socket.destroy();
       if (this.#server) await new Promise((resolve) => this.#server.close(resolve)); this.#server = undefined;
       if (this.#ownedSocketPath) try { await unlink(this.#ownedSocketPath); } catch {}
@@ -2372,7 +2433,7 @@ export class HarnessSupervisor {
       this.#cronStore?.close(); this.#cronStore = undefined;
       for (const waiters of this.#actorConnectionWaiters.values()) for (const finish of waiters) finish(undefined);
       this.#actorConnectionWaiters.clear();
-      this.#store?.close(); this.#store = undefined; this.#actorConnections.clear(); this.#clientConnections.clear(); this.#actors.clear(); this.#messageBuckets.clear(); this.#actorReadyPromises.clear(); this.#skillGrantPromises.clear(); this.#runtimeReadinessPromises.clear(); this.#sessionMutationTails.clear(); this.#cronCompletionTails.clear(); this.#resolveStopped();
+      this.#store?.close(); this.#store = undefined; this.#actorConnections.clear(); this.#clientConnections.clear(); this.#actors.clear(); this.#messageBuckets.clear(); this.#actorReadyPromises.clear(); this.#actorInputWakes.clear(); this.#skillGrantPromises.clear(); this.#runtimeReadinessPromises.clear(); this.#sessionMutationTails.clear(); this.#cronCompletionTails.clear(); this.#resolveStopped();
     })();
     return this.#stoppingPromise;
   }
