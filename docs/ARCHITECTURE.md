@@ -56,6 +56,21 @@ The Unix-socket framing and validation contract is in `src/framing.mjs` and `src
 
 The protocol retains session creation, subscription, input admission, stop/revive/delete/rename, kernel reload, model selection, compaction, family messages, schedules, background process notifications, canonical history, telemetry, dialogs, and output streams. Client-neutral conversation projections remain in this repository even though no browser client or HTTP adapter is included.
 
+### Input admission
+
+`submit_input` acknowledges a durable receipt after registering supervisor-owned
+wake/delivery work. Normal sends do not await actor startup, skill reconciliation,
+or worker consumption, and release the session mutation lock at admission. Pending
+same-ID retries reuse the receipt and request delivery without repeating admission.
+Response Retry still waits for its idle branch operation before admitting input.
+
+The actor scheduler and readiness path retain skill and generation checks. Wake
+failures after acceptance publish the session's error state and retain pending input
+for same-ID retry or explicit revival. Stop, deletion, and supervisor shutdown drain
+or cancel owned wakes before releasing their state. Restart recovers pending inputs
+from gracefully passivated sessions; explicitly stopped sessions remain stopped.
+Canonical delivery evidence and ambiguous-input replay guards remain authoritative.
+
 ### User location attachment
 
 `submit_input` accepts optional `location` on a genuine user message. It contains

@@ -95,3 +95,10 @@ check payload, reasoning/option parity, and tier-aware estimated cost; real-work
 loopback tests cover streaming toggles, subsequent requests, reattachment, and
 clearing Fast. These are offline checks, not live service-tier eligibility,
 latency, or billing guarantees.
+
+`InputAdmission` checks durable admission, independent acknowledgment/readiness,
+coalesced wake ownership, overlapping sends, failure visibility, and drained
+shutdown/restart. It abstracts skill reconciliation, SQLite atomicity, transport,
+and worker consumption; it does not prove exactly-once execution. Supervisor
+regressions hold startup and close, reject registration/factory/start/submit,
+retry the same receipt after reconnect or failure, and verify stop/delete/restart.

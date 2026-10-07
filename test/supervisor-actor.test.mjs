@@ -1186,6 +1186,170 @@ test("retrying an assistant turn branches the leaf then resubmits the user promp
     (error) => error.code === "invalid_request");
 });
 
+test("submit_input acknowledges overlapping cold sends before readiness and deduplicates a reconnect retry", { timeout: 15_000 }, async (t) => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "harness-cold-admission-"));
+  const skillsPath = path.join(root, "skills"); await mkdir(skillsPath);
+  const socketPath = path.join(root, "run", "supervisor.sock"); const actors = [];
+  const start = Promise.withResolvers();
+  const supervisor = new HarnessSupervisor({
+    socketPath, databasePath: path.join(root, "state", "harness.sqlite"), pidPath: path.join(root, "run", "supervisor.pid"),
+    skillsPath, actorInactivityMs: 0, runtimeProvisioner: async () => ({}),
+    actorFactory: (options) => {
+      const actor = new FakePiActor(options); actors.push(actor);
+      actor.start = async () => { await start.promise; return FakePiActor.prototype.start.call(actor); };
+      return actor;
+    },
+    processIdentityFactory: async (pid) => ({ version: 1, pid, processGroup: pid, startTime: "fake", ownerToken: "fake" }),
+    processTerminator: async () => ({ terminated: true }),
+  });
+  await supervisor.start();
+  const client = new HarnessClient({ socketPath, heartbeatMs: 0, requestTimeoutMs: 3_000 });
+  const replacement = new HarnessClient({ socketPath, heartbeatMs: 0, requestTimeoutMs: 3_000 });
+  t.after(async () => { start.resolve(); await client.stop(); await replacement.stop(); await supervisor.stop(); await rm(root, { recursive: true, force: true }); });
+  await client.start({ registrationType: "register_client", clientInstanceId: "cold-admission" });
+  const { admission } = await client.request("create_root", { cwd: root, repositoryRoot: null, name: "Cold admission",
+    provider: null, model: null, thinkingLevel: null });
+  const sessionId = admission.sessionId;
+  await eventually(() => actors.length === 1);
+  const params = { sessionId, message: "cold-one", behavior: "auto", clientRequestId: "cold-one-id" };
+  const submittedAt = performance.now();
+  const firstWork = client.request("submit_input", params);
+  const secondWork = client.request("submit_input", { ...params, message: "cold-two", clientRequestId: "cold-two-id" });
+  const result = await Promise.race([
+    Promise.all([firstWork, secondWork]),
+    new Promise((resolve) => setTimeout(() => resolve(null), 750)),
+  ]);
+  // Consume any later failures even when testing the old startup-gated implementation.
+  void firstWork.catch(() => {}); void secondWork.catch(() => {});
+  assert(result, "both admissions must finish while cold startup is held, without a readiness-held mutation lock");
+  assert(result.every((value) => value.accepted));
+  t.diagnostic(`two cold admissions acknowledged in ${(performance.now() - submittedAt).toFixed(1)}ms with startup still held`);
+  assert.equal(actors[0].isRunning, false);
+  assert.equal(supervisor.store.listActorInputReceipts(sessionId).length, 2);
+  await client.stop();
+  await replacement.start({ registrationType: "register_client", clientInstanceId: "cold-reconnect" });
+  const replay = await replacement.request("submit_input", params);
+  assert.equal(replay.inputId, result[0].inputId);
+  assert.equal(supervisor.store.listActorInputReceipts(sessionId).length, 2);
+  await assert.rejects(replacement.request("submit_input", { ...params, message: "conflicting content" }),
+    /actor input id was reused with different input/);
+  start.resolve();
+  await eventually(() => actors[0].submits.length === 2);
+  assert.deepEqual(actors[0].submits.map((item) => item.message), ["cold-one", "cold-two"]);
+});
+
+async function admissionFailureFixture(t) {
+  const root = await mkdtemp(path.join(os.tmpdir(), "harness-admission-failure-"));
+  const skillsPath = path.join(root, "skills"); await mkdir(skillsPath);
+  const socketPath = path.join(root, "run", "supervisor.sock");
+  const actors = [], errors = [], supervisors = [], events = []; const control = { next: {} };
+  const options = {
+    socketPath, databasePath: path.join(root, "state", "harness.sqlite"), pidPath: path.join(root, "run", "supervisor.pid"),
+    skillsPath, actorInactivityMs: 0, runtimeProvisioner: async () => ({}), logger: { error: (message) => errors.push(String(message)) },
+    actorFactory: (value) => {
+      const mode = control.next; control.next = {};
+      if (mode.factoryFailure) throw new Error("injected factory rejection");
+      const actor = new FakePiActor(value); actors.push(actor);
+      actor.startGate = mode.holdStart ? Promise.withResolvers() : null;
+      actor.closeGate = mode.holdClose ? Promise.withResolvers() : null;
+      actor.start = async () => {
+        actor.isRunning = true;
+        await actor.startGate?.promise;
+        if (mode.startFailure) throw new Error("injected startup rejection");
+        return FakePiActor.prototype.start.call(actor);
+      };
+      actor.close = async () => {
+        actor.closeEntered = true;
+        actor.startGate?.reject(new Error("injected startup cancellation"));
+        await actor.closeGate?.promise;
+        await FakePiActor.prototype.close.call(actor);
+      };
+      if (mode.submitFailure) actor.submit = async () => { throw new Error("injected submit rejection"); };
+      return actor;
+    },
+    processIdentityFactory: async (pid) => ({ version: 1, pid, processGroup: pid, startTime: "fake", ownerToken: "fake" }),
+    processTerminator: async () => ({ terminated: true }),
+  };
+  const supervisor = new HarnessSupervisor(options); supervisors.push(supervisor); await supervisor.start();
+  const client = new HarnessClient({ socketPath, heartbeatMs: 0, requestTimeoutMs: 3_000 });
+  await client.start({ registrationType: "register_client", clientInstanceId: "admission-failure" });
+  client.on("event", (frame) => events.push(frame));
+  t.after(async () => {
+    for (const actor of actors) { actor.startGate?.resolve(); actor.closeGate?.resolve(); }
+    await client.stop(); for (const owner of supervisors) await owner.stop(); await rm(root, { recursive: true, force: true });
+  });
+  const { admission } = await client.request("create_root", { cwd: root, repositoryRoot: null, name: "Admission failure",
+    provider: null, model: null, thinkingLevel: null });
+  const sessionId = admission.sessionId;
+  await eventually(() => supervisor.store.getSession(sessionId)?.lifecycle === "resident");
+  await client.request("stop_session", { sessionId });
+  const params = { sessionId, message: "durable retry", behavior: "auto", clientRequestId: "durable-retry-id" };
+  return { supervisor, client, sessionId, params, actors, errors, events, control, options, supervisors };
+}
+
+for (const failure of ["registration", "factory", "startup", "submit"]) test(`input admission preserves a retryable receipt after ${failure} rejection`, { timeout: 15_000 }, async (t) => {
+  const f = await admissionFailureFixture(t); const { supervisor, client, sessionId, params, control, actors, events } = f;
+  let accepted;
+  if (failure === "registration") {
+    const prepare = supervisor.store.prepareActorRevival.bind(supervisor.store);
+    supervisor.store.prepareActorRevival = () => { throw new Error("injected wake registration rejection"); };
+    try { await assert.rejects(client.request("submit_input", params), /injected wake registration rejection/); }
+    finally { supervisor.store.prepareActorRevival = prepare; }
+    assert.equal(supervisor.store.getSession(sessionId).lifecycle, "stopped");
+    assert.equal(actors.length, 1, "failed synchronous registration must not launch a worker");
+  } else {
+    control.next = failure === "factory" ? { factoryFailure: true }
+      : failure === "startup" ? { holdStart: true, startFailure: true } : { submitFailure: true };
+    accepted = await client.request("submit_input", params);
+    assert.equal(accepted.accepted, true);
+    if (failure === "startup") {
+      const actor = await eventually(() => actors[1]);
+      assert.equal(supervisor.store.getSession(sessionId).lifecycle, "starting");
+      actor.startGate.resolve();
+    }
+    await eventually(() => supervisor.store.getSession(sessionId)?.lifecycle === "error");
+    assert.match(supervisor.store.getSession(sessionId).lastError, /injected .* rejection/);
+    await eventually(() => events.some((frame) => frame.event === "navigator_changed"
+      && frame.data.sessions?.some((session) => session.sessionId === sessionId && session.lifecycle === "error")));
+  }
+  assert.equal(supervisor.store.listActorInputReceipts(sessionId).length, 1);
+  assert.equal(supervisor.store.listPendingActorInputs(sessionId).length, 1);
+  const replay = await client.request("submit_input", params);
+  assert.equal(replay.accepted, true);
+  if (accepted) assert.equal(replay.inputId, accepted.inputId);
+  await eventually(() => actors.some((actor) => actor.submits.some((input) => input.message === params.message)));
+  assert.equal(actors.flatMap((actor) => actor.submits).filter((input) => input.message === params.message).length, 1);
+  assert.equal(supervisor.store.listActorInputReceipts(sessionId).length, 1);
+});
+
+for (const action of ["shutdown", "stop_session", "delete_session"]) test(`input wake is drained by ${action} during cold startup`, { timeout: 15_000 }, async (t) => {
+  const f = await admissionFailureFixture(t); const { supervisor, client, sessionId, params, control, actors } = f;
+  control.next = { holdStart: true, holdClose: true };
+  const accepted = await client.request("submit_input", params); assert.equal(accepted.accepted, true);
+  const actor = await eventually(() => actors[1]);
+  let completed = false;
+  const stopped = (action === "shutdown" ? supervisor.stop() : client.request(action, { sessionId })).then(() => { completed = true; });
+  await eventually(() => actor.closeEntered);
+  assert.equal(completed, false, "shutdown/deletion must join owned work before closing its store");
+  if (action !== "stop_session") await assert.rejects(client.request("submit_input", { ...params, clientRequestId: "fenced" }));
+  actor.closeGate.resolve(); await stopped;
+  assert.equal(actor.submits.length, 0);
+  if (action === "shutdown") {
+    const replacement = new HarnessSupervisor(f.options); f.supervisors.push(replacement); await replacement.start();
+    await eventually(() => actors[2]?.submits.length === 1);
+    assert.equal(replacement.store.listActorInputReceipts(sessionId).length, 1);
+    assert.equal(actors[2].submits[0].message, params.message);
+  } else if (action === "delete_session") {
+    assert.equal(supervisor.store.getSession(sessionId).lifecycle, "deleted");
+    assert.equal(supervisor.store.listPendingActorInputs(sessionId).length, 0);
+  } else {
+    assert.equal(supervisor.store.getSession(sessionId).lifecycle, "stopped");
+    await client.request("submit_input", params);
+    await eventually(() => actors[2]?.submits.length === 1);
+    assert.equal(supervisor.store.listActorInputReceipts(sessionId).length, 1);
+  }
+});
+
 test("submit_input returns accepted while worker.submit is held and drains a second auto steer", { timeout: 15_000 }, async (t) => {
   const root = await mkdtemp(path.join(os.tmpdir(), "harness-steer-queue-"));
   const skillsPath = path.join(root, "skills"); await mkdir(skillsPath);
