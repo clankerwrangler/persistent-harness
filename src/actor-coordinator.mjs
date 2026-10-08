@@ -1,3 +1,5 @@
+import { ConversationBirthClock, conversationBirth } from "./conversation-birth.mjs";
+import { PROGRESS_ENTRY_TYPE } from "./progress-projection.mjs";
 import { normalizeInputLocation, renderUserLocations } from "./input-location.mjs";
 import { ActorToolDispatch, addToolUsage } from "./actor-tool-dispatch.mjs";
 import { createActorStreamPlanner } from "./actor-stream.mjs";
@@ -45,6 +47,7 @@ export class ActorCoordinator {
     Object.assign(this, { session, runner, sdk, api, core, models, simpleOptions, nativeAdapter, projectContext, planRecovery,
       lifecycle, resources, promptCapture, publish, basePromptOptions, onTiming, compactionDriver, navigationDriver, automaticCompactionAllowed, isProjectTrusted });
     this.manager = session.sessionManager;
+    this.birthClock = new ConversationBirthClock(this.manager.getBranch());
     this.activeTools = new Set(); this.queue = []; this.tasks = new Map(); this.seenCalls = new Set();
     this.completedResults = [];
     this.toolTail = Promise.resolve(); this.commitTail = Promise.resolve();
@@ -117,6 +120,7 @@ export class ActorCoordinator {
     // Bookkeeping shares the existing compaction owner. Do not move its leaf
     // while a summary is in flight; callers retain their normal delivery order.
     while (this.compactionHistoryBarrier) await this.compactionHistoryBarrier.promise;
+    if (type === PROGRESS_ENTRY_TYPE) data = { ...data, harnessBirth: this.birthClock.next() };
     return this.manager.appendCustomEntry(type, data);
   }
 
@@ -152,6 +156,9 @@ export class ActorCoordinator {
     await this.runner.emit(event); await this.publish(event);
   }
   fail(error) { this.failure = error instanceof Error ? error : new Error(String(error)); this.wake(); }
+  createTextBirth(text) {
+    return (this.lifecycle.projectPublicText?.(text) ?? text).trim() ? this.birthClock.next() : undefined;
+  }
   async commit(message, { immutableCalls = false, prepare, guard, onCommit } = {}) {
     const operation = this.commitTail.then(async () => {
       const originalCalls = message.role === "assistant" ? JSON.stringify(message.content.filter(part => part.type === "toolCall")) : null;
@@ -159,6 +166,13 @@ export class ActorCoordinator {
       const replacement = await this.runner.emitMessageEnd({ type: "message_end", message: hookInput });
       let final = replacement ?? hookInput;
       if (prepare) final = prepare(final).message;
+      else if (final.role === "assistant") final.content = final.content.map((part, index) => {
+        if (part.type !== "text") return part;
+        const birth = conversationBirth(message.content[index]?.harnessBirth);
+        if (Object.hasOwn(part, "harnessBirth") && !isDeepStrictEqual(part.harnessBirth, birth)) throw new Error("A message hook changed protected conversation birth metadata");
+        const assigned = birth ?? this.createTextBirth(part.text);
+        return assigned ? { ...part, harnessBirth: assigned } : part;
+      });
       if (immutableCalls && JSON.stringify(final.content.filter(part => part.type === "toolCall")) !== originalCalls) throw new Error("a message hook changed an admitted native call");
       guard?.(final);
       const entryId = this.manager.appendMessage(final);
@@ -490,7 +504,8 @@ export class ActorCoordinator {
         transformHeaders: async headers => { live(); const result = await this.runner.emitBeforeProviderHeaders(headers); live(); return result; },
         onResponse: response => epoch === this.attemptEpoch ? this.runner.emit({ type: "after_provider_response", ...response }) : undefined };
       const base = this.assistant();
-      planner = createActorStreamPlanner({ message: base, createMessageId: () => randomUUID(), createTextId: () => randomUUID() });
+      planner = createActorStreamPlanner({ message: base, createMessageId: () => randomUUID(), createTextId: () => randomUUID(),
+        createTextBirth: text => this.createTextBirth(text) });
       this.flight.planner = planner;
       await this.emit({ type: "turn_start", turnIndex: this.turnIndex, timestamp: Date.now() });
       this.onTiming({ phase: "inference_start", at: performance.now(), turnIndex: this.turnIndex });
@@ -623,10 +638,10 @@ export class ActorCoordinator {
       const previous = this.controller; const controller = new AbortController(); this.controller = controller;
       try {
         const result = await this.navigationDriver(target, options, { coordinator: this, signal: controller.signal });
-        if (!result.cancelled) { this.recoveryDone = false; this.seenCalls.clear(); this.contextUsage = undefined; }
+        if (!result.cancelled) { this.recoveryDone = false; this.seenCalls.clear(); this.contextUsage = undefined; this.birthClock.reset(this.manager.getBranch()); }
         return result;
       } catch (error) {
-        if (error?.committed === true) { this.recoveryDone = false; this.seenCalls.clear(); this.contextUsage = undefined; }
+        if (error?.committed === true) { this.recoveryDone = false; this.seenCalls.clear(); this.contextUsage = undefined; this.birthClock.reset(this.manager.getBranch()); }
         throw error;
       } finally { this.controller = previous; }
     });

@@ -105,6 +105,36 @@ The Unix-socket framing and validation contract is in `src/framing.mjs` and `src
 
 The protocol retains session creation, subscription, input admission, stop/revive/delete/rename, kernel reload, model selection, compaction, family messages, schedules, background process notifications, canonical history, telemetry, dialogs, and output streams. Client-neutral conversation projections remain in this repository even though no browser client or HTTP adapter is included.
 
+### Conversation order
+
+Each public assistant text part and progress row has a host-owned birth stamp.
+`ActorCoordinator` allocates `{version: 1, createdAt, sequence}` from one actor
+clock. Text receives its stamp on the first observed non-whitespace public text,
+after root presentation filtering, or after a supported terminal hook first
+produces visible text. Empty starts, inference start, reasoning, and unobserved
+provider partials do not start a text row's clock.
+
+The stamp is embedded as `harnessBirth` in the existing canonical text block or
+progress entry's `data`. It survives deltas, prefix commits, rebases, and final
+replacement without changing the core text ID. Provider metadata is discarded;
+hook omission restores the host stamp and explicit conflicts fail validation.
+There is no separate metadata append. Text and stamp become durable together in
+the existing message commit; already-streamed text can still be lost before a
+successful commit. Existing append/publication failures remain observable.
+
+Public rows expose the stamp as `createdAt` and optional `timelineSequence`,
+including slim deltas and cold history pages. Order is timestamp, then sequence.
+At an equal millisecond, unstamped legacy rows and input receipts use sequence
+zero before stamped actor rows; unstamped ties retain authoritative history and
+neighbor order. Input acceptance and delivery timestamps are unchanged. Existing
+live IDs retain their first visible ordering metadata; conflicting later stamps
+are reported and ignored without discarding text.
+
+Restart and fork seed the allocator from valid stamps on active canonical
+ancestry; idle branch navigation resets that boundary. The allocator performs no
+I/O. Missing or malformed stamps use the legacy projection. There is no inferred
+historical birth, archive rewrite, or new cross-clock synchronization guarantee.
+
 ### Input admission
 
 `submit_input` acknowledges a durable receipt after registering supervisor-owned

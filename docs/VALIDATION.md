@@ -137,3 +137,16 @@ hydration, receipt ambiguity and receipt-only changes, and cancellation during
 prefix I/O and FTS transactions. Supervisor tests hold disconnect, deadline,
 shutdown, and competing source versions; a real Python skill-to-RPC test crosses
 the former three-second deadline without reviving a transcript actor.
+
+`ConversationBirthOrder` models text/progress births, arbitrary event arrival,
+equal-millisecond sequence order, prefix rebase, immutable identity, embedded
+commit metadata, restart/fork recovery, and visible text after commit failure.
+Run its matching `.cfg`; the eight `ConversationBirthOrder.<flag>.cfg` controls
+each disable one required property and must produce an invariant violation.
+The model abstracts wall clocks, filtering, hooks, canonical I/O, and transport.
+`conversation-birth`, `actor-coordinator`, `visible-transcript-reader`, and
+`e2e-slim-stream-identity` tests cover those boundaries with synthetic data,
+including genuine stock-worker slim events, restart, branch navigation,
+pagination, protected metadata, and injected append failure. The separate WebUI
+browser regression checks keyed progress nodes during live text arrival and
+completion, then independently checks reload reconstruction.

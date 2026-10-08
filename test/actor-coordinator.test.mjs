@@ -30,6 +30,7 @@ async function fixture(t, { prepareRequest, script, retry, compaction, compactio
           usage: scripted?.usage ?? usage(), timestamp: Date.now(), stopReason: scripted?.stopReason ?? (content.some(p => p.type === "toolCall") ? "toolUse" : "stop"),
           ...(scripted?.errorMessage ? { errorMessage: scripted.errorMessage } : {}) };
         stream.push({ type: "start", partial: { ...message, content: [] } });
+        for (const event of scripted?.events?.(message) ?? []) stream.push(event);
         if (message.stopReason === "error") stream.push({ type: "error", reason: "error", error: message });
         else stream.push({ type: "done", message, reason: message.stopReason });
         stream.end();
@@ -550,4 +551,47 @@ test("denied overflow terminalizes original failure once without recovery marker
   const errors = entries.filter(e => e.type === "message" && e.message.role === "assistant" && e.message.stopReason === "error");
   assert.equal(errors.length, 1); assert.equal(errors[0].message.errorMessage, "context_length_exceeded");
   assert.deepEqual(entries.filter(e => e.type === "message" && e.message.role === "user").map(e => e.message.id), ["original-id"]);
+});
+
+
+test("conversation births follow idle branch navigation and share the existing append failure boundary", async t => {
+  const f = await fixture(t, { script: () => [{ type: "text", text: "Reply" }] });
+  const at = "2026-01-01T23:59:10.000Z";
+  const inherited = { version: 1, createdAt: at, sequence: 7 };
+  const ancestor = f.manager.appendMessage({ role: "assistant", content: [{ type: "text", text: "Inherited", harnessBirth: inherited }], timestamp: 1 });
+  f.manager.appendCustomEntry("persistent-harness.progress-v1", { summary: "Abandoned", harnessBirth: { ...inherited, sequence: 90 } });
+  f.coor.navigationDriver = async target => { f.manager.branch(target); return { cancelled: false }; };
+  await f.coor.navigateTree(ancestor);
+  const entryId = await f.coor.appendHistoryEntry("persistent-harness.progress-v1", { summary: "Active" });
+  assert.equal(f.manager.getEntry(entryId).data.harnessBirth.sequence, 8);
+  const append = f.manager.appendMessage.bind(f.manager); let fail = true;
+  f.manager.appendMessage = message => { if (fail) { fail = false; throw new Error("synthetic canonical append failure"); } return append(message); };
+  const before = f.manager.getBranch().length;
+  await assert.rejects(f.coor.commit(f.coor.assistant([{ type: "text", text: "Public failure sample" }])), /synthetic canonical append failure/);
+  assert.equal(f.manager.getBranch().length, before, "no independent birth entry was written");
+  const final = await f.coor.commit(f.coor.assistant([{ type: "text", text: "Visible after failure" }]));
+  assert(final.message.content[0].harnessBirth.sequence > 8);
+  assert.deepEqual(f.manager.getEntry(final.entryId).message.content[0].harnessBirth, final.message.content[0].harnessBirth);
+});
+
+test("a failed canonical append leaves already-published text visible and reports the failure", async t => {
+  const f = await fixture(t, { script: () => ({ content: [{ type: "text", text: "Already visible" }], events: message => [
+    { type: "text_start", contentIndex: 0, partial: { ...message, content: [{ type: "text", text: "" }] } },
+    { type: "text_delta", contentIndex: 0, delta: "Already visible", partial: message },
+    { type: "text_end", contentIndex: 0, content: "Already visible", partial: message },
+  ] }) });
+  const append = f.manager.appendMessage.bind(f.manager); let attempted;
+  f.manager.appendMessage = message => {
+    if (message.role === "assistant" && !attempted) { attempted = structuredClone(message); throw new Error("synthetic text commit failure"); }
+    return append(message);
+  };
+  await f.coor.submit("Start"); await wait(f.coor.waitForIdle(), "failed commit did not settle");
+  const update = f.events.find(event => event.type === "message_update" && event.assistantMessageEvent?.type === "text_delta");
+  assert.equal(update.message.content[0].text, "Already visible");
+  assert.deepEqual(attempted.content[0].harnessBirth, update.message.content[0].harnessBirth);
+  assert.equal(f.events.filter(event => event.type === "message_update" && event.assistantMessageEvent?.type === "text_delta").length, 1);
+  assert.match(JSON.stringify(f.events), /synthetic text commit failure/);
+  assert.deepEqual(f.manager.getEntries().filter(entry => entry.type === "custom").map(entry => entry.customType),
+    ["persistent-harness.inference-retry-v1"], "only the existing failure decision is recorded; no metadata write or repair");
+  assert(!f.manager.getBranch().some(entry => entry.message?.id === attempted.id), "uncommitted text is not claimed durable");
 });

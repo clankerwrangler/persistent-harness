@@ -1,3 +1,4 @@
+import { birthOrder } from "./conversation-birth.mjs";
 import { createHash, randomUUID } from "node:crypto";
 import { chmod, lstat, mkdir, readFile, readlink, rename, rm, symlink, unlink, writeFile } from "node:fs/promises";
 import net from "node:net";
@@ -749,7 +750,7 @@ export class HarnessSupervisor {
       if (!record || record.generation !== state.generation) return { accepted: false };
       const summary = normalizeProgressHeading(params.summary);
       if (!summary || summary !== params.summary) throw new Error("progress entry is not a normalized safe heading");
-      this.#onActorEvent(state.sessionId, record, { type: "progress_entry", entryId: params.entryId, summary, createdAt: params.createdAt });
+      this.#onActorEvent(state.sessionId, record, { type: "progress_entry", entryId: params.entryId, summary, createdAt: params.createdAt, harnessBirth: params.harnessBirth });
       return { accepted: true };
     }
     if (type === "record_agent_message_entry") {
@@ -2000,7 +2001,7 @@ export class HarnessSupervisor {
       this.#rootOutput.accept({ session: record.rootOutputSession, actorGeneration: record.generation, actorEventSeq: record.eventSeq, event: retained });
       visibleRetained = this.#sanitizeRootActorEvent(record, retained);
       if (visibleRetained) {
-        record.liveConversation.accept(visibleRetained);
+        visibleRetained = record.liveConversation.accept(visibleRetained);
         if (visibleRetained.type === "message_update" && visibleRetained.assistantMessageEvent?.type === "text_end") {
           setImmediate(() => void this.#maybeAutoTitleRoot(sessionId));
         }
@@ -2302,10 +2303,10 @@ export class HarnessSupervisor {
         && update.id.length <= 128 && !/[\u0000-\u001f\u007f]/.test(update.id)) record?.assistantTextIds.set(contentIndex, update.id);
       const message = frame.message ?? { ...record?.assistantMessageIdentity,
         content: { [contentIndex]: { type: "text", id: record?.assistantTextIds.get(contentIndex),
-          text: update.content ?? update.text ?? update.delta ?? "" } } };
+          text: update.content ?? update.text ?? update.delta ?? "", harnessBirth: update.harnessBirth } } };
       const part = assistantTextPart(message, contentIndex);
       if (!part) return null;
-      return { type, messageId: part.id, createdAt: part.createdAt, assistantMessageEvent: { type: update.type, contentIndex,
+      return { type, messageId: part.id, createdAt: part.createdAt, ...(part.timelineSequence ? { timelineSequence: part.timelineSequence } : {}), assistantMessageEvent: { type: update.type, contentIndex,
         ...(update.type === "text_delta" ? { delta: update.delta } : {}), ...(update.type === "text_end" ? { text: part.text } : {}) } };
     }
     if (type === "message_start") {
@@ -2329,7 +2330,7 @@ export class HarnessSupervisor {
         ? message.content.map((part, contentIndex) => {
           if (part?.type !== "text" || typeof part.text !== "string") return null;
           const projected = assistantTextPart(message, contentIndex, { timestamp: record?.assistantMessageIdentity?.timestamp });
-          return { type: "text", text: part.text, ...(projected ? { id: projected.id, createdAt: projected.createdAt, contentIndex } : {}) };
+          return { type: "text", text: part.text, ...(projected ? { id: projected.id, createdAt: projected.createdAt, ...(projected.timelineSequence ? { timelineSequence: projected.timelineSequence } : {}), contentIndex } : {}) };
         }).filter(Boolean) : [];
       const stopReason = ["stop", "length", "toolUse", "error", "aborted"].includes(message.stopReason) ? message.stopReason : "unknown";
       const messageId = typeof message.id === "string" && message.id.length > 0 && message.id.length <= 128
@@ -2353,7 +2354,7 @@ export class HarnessSupervisor {
       const createdAt = new Date(frame.createdAt);
       if (!summary || summary !== frame.summary || typeof frame.entryId !== "string" || !frame.entryId
         || frame.entryId.length > 128 || Number.isNaN(createdAt.valueOf())) return null;
-      return { type, entryId: frame.entryId, summary, createdAt: createdAt.toISOString() };
+      return { type, entryId: frame.entryId, summary, createdAt: createdAt.toISOString(), ...birthOrder(frame.harnessBirth) };
     }
     if (type === "agent_message_entry") {
       const createdAt = new Date(frame.createdAt);

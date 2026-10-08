@@ -1,3 +1,4 @@
+import { sanitizePresentationText } from "./presentation-directive.mjs";
 import { randomUUID } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
 import { readFile, realpath } from "node:fs/promises";
@@ -436,6 +437,7 @@ export default function persistentHarnessExtension(pi, owner = null) {
   let client;
   let activeContext;
   let actorDepth;
+  if (owner) owner.projectPublicText = text => actorDepth === 0 ? sanitizePresentationText(text).text : text;
   const actorInputs = createActorInputDelivery({ pi, getClient: () => client, getContext: () => activeContext });
   let knownDeliveredIds = new Set();
   let persistedDeliveredIds = new Set();
@@ -570,6 +572,7 @@ export default function persistentHarnessExtension(pi, owner = null) {
       entryId,
       summary,
       createdAt: typeof entry?.timestamp === "string" ? entry.timestamp : new Date().toISOString(),
+      ...(entry?.data?.harnessBirth ? { harnessBirth: entry.data.harnessBirth } : {}),
     });
   }
 

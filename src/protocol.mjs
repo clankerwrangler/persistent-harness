@@ -1,3 +1,4 @@
+import { conversationBirth } from "./conversation-birth.mjs";
 import { normalizeInputLocation } from "./input-location.mjs";
 import { createHash } from "node:crypto";
 import { MAX_INPUT_REQUEST_BYTES, normalizeInputImages } from "./input-images.mjs";
@@ -118,10 +119,13 @@ function subscribeRootOutput(params) { const value = record(params, "params"); e
 function progressHeading(params) { const value = record(params, "params"); exact(value, new Set(["phase", "turnId", "summary"]), "params"); const phase = string(value.phase, "params.phase", 16); if (!["start", "heading", "settled"].includes(phase)) throw new ProtocolError("invalid_request", "params.phase must be start, heading, or settled"); if (phase === "heading" && value.summary === undefined) throw new ProtocolError("invalid_request", "heading progress requires params.summary"); if (phase !== "heading" && value.summary !== undefined) throw new ProtocolError("invalid_request", `${phase} progress must not include params.summary`); return { phase, turnId: string(value.turnId, "params.turnId", 128), ...(phase === "heading" ? { summary: utf8(value.summary, "params.summary", 512) } : {}) }; }
 function progressEntry(params) {
   const value = record(params, "params");
-  exact(value, new Set(["entryId", "summary", "createdAt"]), "params");
+  exact(value, new Set(["entryId", "summary", "createdAt", "harnessBirth"]), "params");
   const createdAt = string(value.createdAt, "params.createdAt", 64);
   if (Number.isNaN(Date.parse(createdAt))) throw new ProtocolError("invalid_request", "params.createdAt must be an ISO timestamp");
-  return { entryId: string(value.entryId, "params.entryId", 128), summary: utf8(value.summary, "params.summary", 512), createdAt };
+  const birth = conversationBirth(value.harnessBirth);
+  if (value.harnessBirth !== undefined && !birth) throw new ProtocolError("invalid_request", "params.harnessBirth must be a bounded conversation birth");
+  return { entryId: string(value.entryId, "params.entryId", 128), summary: utf8(value.summary, "params.summary", 512), createdAt,
+    ...(birth ? { harnessBirth: birth } : {}) };
 }
 function agentMessageEntry(params) {
   const value = record(params, "params");

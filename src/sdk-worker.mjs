@@ -1,3 +1,4 @@
+import { conversationBirth } from "./conversation-birth.mjs";
 import { normalizeInputLocation } from "./input-location.mjs";
 import { randomUUID } from "node:crypto";
 import { realpath } from "node:fs/promises";
@@ -118,6 +119,11 @@ export function toWorkerRpcEvent(event) {
   if (delta.type === "toolcall_start") {
     const block = (partial ?? event.message)?.content?.[delta.contentIndex];
     if (block?.type === "toolCall") { delta.id ??= block.id; delta.toolName ??= block.name; }
+  }
+  delete delta.harnessBirth;
+  if (["text_start", "text_delta", "text_end"].includes(delta.type)) {
+    const birth = conversationBirth(event.message?.content?.[delta.contentIndex]?.harnessBirth);
+    if (birth) delta.harnessBirth = birth;
   }
   return { type: "message_update", usage: event.usage ?? (partial ?? event.message)?.usage, assistantMessageEvent: delta };
 }

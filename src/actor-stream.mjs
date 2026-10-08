@@ -1,3 +1,4 @@
+import { conversationBirth } from "./conversation-birth.mjs";
 import { isDeepStrictEqual as equal } from "node:util";
 import { THINKING_SIGNATURE_CUSTOM_TYPE, THINKING_SIGNATURE_VERSION } from "./canonical-context.mjs";
 
@@ -106,13 +107,13 @@ function validateCall(call) {
  * rechecks its epoch, and owns all tool dispatch/results.
  * Serializable async/provenance fields never establish admission authority here.
  */
-export function createActorStreamPlanner({ message, createMessageId, createTextId }) {
+export function createActorStreamPlanner({ message, createMessageId, createTextId, createTextBirth }) {
   const base = copy(message);
   requireThat(base?.role === "assistant" && id(base.id) && Array.isArray(base.content) && base.content.length === 0
     && Number.isFinite(base.timestamp) && [base.api, base.provider, base.model].every(id), "ERR_STREAM_BASE_MESSAGE");
   validateUsage(base.usage);
   requireThat(typeof createMessageId === "function" && typeof createTextId === "function", "ERR_STREAM_ID_FACTORY");
-  const slots = new Map(), proofs = new Map(), textIds = new Map(), identities = new Set([base.id]);
+  const slots = new Map(), proofs = new Map(), textIds = new Map(), textBirths = new Map(), identities = new Set([base.id]);
   const bindings = new Map(), entryIds = new Set(), callIds = new Map(), reasoningIds = new Map(), acknowledgedCallIds = new Set();
   let started = false, terminal = false, canceled = false, failed = false, cursor = 0;
   let count = 0, planNumber = 0, segmentNumber = 0, segmentId = base.id, pending = null, latest = base, responseIdentity, nextSegmentId, prepared = false, pendingRemainder;
@@ -128,6 +129,10 @@ export function createActorStreamPlanner({ message, createMessageId, createTextI
       requireThat(typeof block.text === "string", "ERR_STREAM_CONTENT");
       if (!textIds.has(index)) textIds.set(index, newId(createTextId, { sourceIndex: index }));
       result.id = textIds.get(index);
+      // Provider partials can be ahead of observed events. Only a host birth
+      // already assigned to this core ID may survive normalization.
+      delete result.harnessBirth;
+      if (textBirths.has(result.id)) result.harnessBirth = copy(textBirths.get(result.id));
     }
     if (block.type === "image") requireThat(typeof block.data === "string" && id(block.mimeType), "ERR_STREAM_CONTENT");
     if (block.type === "thinking") requireThat(typeof block.thinking === "string", "ERR_STREAM_CONTENT");
@@ -135,6 +140,11 @@ export function createActorStreamPlanner({ message, createMessageId, createTextI
       requireThat(typeof block[key] === "string" && block[key].length <= ACTOR_STREAM_LIMITS.signatureCodeUnits, "ERR_STREAM_SIGNATURE_LIMIT");
     if (block.type === "toolCall" && !admitted) delete result.async;
     return result;
+  }
+  function observeText(block) {
+    if (block.type !== "text" || !block.text.trim() || textBirths.has(block.id)) return;
+    const birth = conversationBirth(createTextBirth?.(block.text));
+    if (birth) { textBirths.set(block.id, freeze(birth)); block.harnessBirth = copy(birth); }
   }
   function envelope(raw, content, stopReason) {
     const result = { ...base, ...raw, id: segmentId, timestamp: base.timestamp, content, stopReason };
@@ -298,8 +308,9 @@ export function createActorStreamPlanner({ message, createMessageId, createTextI
           slot.closed = true;
         }
       }
+      if (kind === "text") observeText(slot.block);
       const content = view(raw), updateEvent = { ...event, contentIndex: index - cursor };
-      delete updateEvent.partial;
+      delete updateEvent.partial; delete updateEvent.harnessBirth;
       if (kind === "text" && phase === "start") updateEvent.id = textIds.get(index);
       const result = { update: { message: envelope(raw, copy(content.slice(cursor)), "pending"), assistantMessageEvent: updateEvent }, amendments: [] };
       let end = cursor;
@@ -345,6 +356,7 @@ export function createActorStreamPlanner({ message, createMessageId, createTextI
           // but never accept an explicitly conflicting core/provider identity.
           if (block.id === undefined) block.id = before.id;
           if (block.textSignature === undefined && Object.hasOwn(before, "textSignature")) block.textSignature = before.textSignature;
+          if (!Object.hasOwn(block, "harnessBirth") && Object.hasOwn(before, "harnessBirth")) block.harnessBirth = copy(before.harnessBirth);
           const { text: oldText, ...oldFields } = before;
           const { text: newText, ...newFields } = block;
           requireThat(equal(oldFields, newFields), "ERR_STREAM_PROTECTED_TEXT_METADATA");
@@ -375,6 +387,9 @@ export function createActorStreamPlanner({ message, createMessageId, createTextI
         if (executable || candidate.stopReason === "length") calls.push({ call: copy(block), native, sourceIndex, contentIndex,
           disposition: executable ? "execute" : "blocked_truncated" });
       });
+      // Terminal-only public text (including supported hook replacements) is
+      // born after validation, not from an unobserved provider partial.
+      for (const block of candidate.content) observeText(block);
       // Recheck aggregate bounds after restoring omitted identity fields.
       pending = freeze({ ...pending, message: copy(candidate), calls }); prepared = true;
       return pending;

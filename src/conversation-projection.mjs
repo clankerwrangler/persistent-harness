@@ -1,3 +1,4 @@
+import { birthOrder, timelineSequence } from "./conversation-birth.mjs";
 import { normalizeInputLocation } from "./input-location.mjs";
 import { createHash } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
@@ -226,7 +227,7 @@ export function assistantTextPart(message, contentIndex, { entryId, timestamp, s
         : Number.isSafeInteger(startedAt) && startedAt >= 0 ? `assistant-${startedAt}-text-${contentIndex}` : undefined;
   if (!base || Number.isNaN(date.valueOf())) return undefined;
   return { id: base, role: "assistant", text: sanitizePresentation ? sanitizePresentationText(part.text).text : part.text,
-    contentIndex, createdAt: date.toISOString(), status: "complete", ...(entryId ? { entryId } : {}) };
+    contentIndex, createdAt: date.toISOString(), ...birthOrder(part.harnessBirth), status: "complete", ...(entryId ? { entryId } : {}) };
 }
 
 export function assistantMessageParts(entry, options = {}) {
@@ -237,8 +238,9 @@ export function assistantMessageParts(entry, options = {}) {
 
 export function sortVisibleHistory(items) {
   return items.sort((left, right) => {
-    const time = (item) => Date.parse(item.kind === "message" ? item.message.createdAt : item.createdAt);
-    const a = time(left); const b = time(right);
-    return Number.isFinite(a) && Number.isFinite(b) ? a - b : 0;
+    const row = item => item.kind === "message" ? item.message : item;
+    const a = Date.parse(row(left).createdAt), b = Date.parse(row(right).createdAt);
+    return Number.isFinite(a) && Number.isFinite(b) ? a - b
+      || timelineSequence(row(left).timelineSequence) - timelineSequence(row(right).timelineSequence) : 0;
   });
 }
