@@ -368,6 +368,23 @@ function incompleteObservations(report) {
   }).map(row => `${row.callId}|${row.itemId}`));
 }
 
+// STOCK Codex emits this diagnostic after its ordinary websocket stream fails.
+// Both STOCK agent-loop and ActorStreamPlanner admit ordinary calls only on a
+// successful terminal, so even complete calls on this failed terminal did not
+// execute. This producer discriminator is deliberately narrower than absence of
+// nativeTransport: a missing/malformed native report is not ordinary evidence.
+function ordinaryFailedTerminal(message) {
+  return message.api === "openai-codex-responses" && message.provider === "openai-codex"
+    && !Object.hasOwn(message, "nativeTransport") && !Object.hasOwn(message, "nativeProviderError")
+    && message.content.every(call => call.type !== "toolCall"
+      || (call.async !== true && !Object.hasOwn(call, "nativeProvenance")
+        && !Object.hasOwn(call, "providerCallId") && !Object.hasOwn(call, "providerItemId")))
+    && Array.isArray(message.diagnostics) && message.diagnostics.some(item =>
+      isRecord(item) && item.type === "provider_transport_failure"
+      && isRecord(item.details) && ["auto", "websocket"].includes(item.details.configuredTransport)
+      && item.details.eventsEmitted === true && item.details.phase === "after_message_stream_start");
+}
+
 function omitUnadmittedCalls(messages, canonical, selected, diagnostics) {
   // Index the FULL selected branch, including calls/results before a compaction
   // cut. Even an orphan result with a plain provider call ID vetoes exclusion.
@@ -410,8 +427,12 @@ function omitUnadmittedCalls(messages, canonical, selected, diagnostics) {
       if (!tuple || tuple.some(alias => aliases.get(alias)?.size !== 1
         || (observedAliases.has(alias) && (observedAliases.get(alias).size !== 1 || !observedAliases.get(alias).has(call.id))))
         || canonical.results.has(call.id)) return true;
-      if (!proof.has(record.message)) proof.set(record.message, incompleteObservations(record.message.nativeTransport));
-      if (!proof.get(record.message).has(call.id)) return true;
+      const ordinary = ordinaryFailedTerminal(record.message)
+        && tuple.every(alias => !observedAliases.has(alias));
+      if (!ordinary) {
+        if (!proof.has(record.message)) proof.set(record.message, incompleteObservations(record.message.nativeTransport));
+        if (!proof.get(record.message).has(call.id)) return true;
+      }
       diagnostics.push({ code: "UNADMITTED_CALL_OMITTED", severity: "info", ...identity(record, true) });
       return false;
     });
