@@ -1096,3 +1096,87 @@ test("stock checkpoint system messages and summary metadata retain exact source 
   assert.equal(actual.messages[1].details.source, "compaction");
   assert.equal(actual.messages[0].details, undefined);
 });
+
+// Exact STOCK ordinary producer shape; strings and call arguments are synthetic.
+function ordinaryFailedSuffix(code = "print(f\"partial") {
+  return chain([user(), { ...assistant("ordinary-failed", [
+    { type: "thinking", thinking: "private reasoning", thinkingSignature: JSON.stringify({ type: "reasoning", id: "rs_ordinary", encrypted_content: "fixture" }) },
+    { type: "text", text: "partial output" },
+    { type: "toolCall", id: "call_ordinary|fc_ordinary", name: "python", arguments: { code } },
+  ]), api: "openai-codex-responses", provider: "openai-codex", model: "fixture",
+    stopReason: "error", errorMessage: "WebSocket error", responseId: "response_ordinary",
+    diagnostics: [{ type: "provider_transport_failure", timestamp: 2,
+      error: { name: "Error", message: "WebSocket error" },
+      details: { configuredTransport: "auto", eventsEmitted: true, phase: "after_message_stream_start", requestBytes: 100 } }] },
+    user("already accepted later input")]);
+}
+
+test("ordinary failed stream omits unadmitted partial AND complete calls without changing canonical bytes", () => {
+  for (const code of ["print(f\"partial", "print('complete')"]) for (const stopReason of ["error", "aborted"])
+    for (const async of [undefined, false]) for (const transport of ["auto", "websocket"]) {
+      const entries = ordinaryFailedSuffix(code), failed = entries[1].message;
+      failed.stopReason = stopReason; failed.diagnostics[0].details.configuredTransport = transport;
+      if (async !== undefined) failed.content[2].async = async;
+      const before = structuredClone(entries);
+      for (const mode of ["ordinary", "native"]) {
+        const view = project(entries, mode);
+        assert.deepEqual(view.messages, [entries[0].message, { ...failed, content: failed.content.slice(0, 2) }, entries[2].message]);
+        assert.deepEqual(view.outstanding, []);
+        assert.deepEqual(view.diagnostics.map(d => [d.code, d.toolCallId]), [["UNADMITTED_CALL_OMITTED", "call_ordinary|fc_ordinary"]]);
+        assert.equal(synthetic(view.messages).length, 0);
+        assert.deepEqual(planUnknownRecovery({ ...input(entries, mode), timestamp: 5 }), []);
+      }
+      assert.deepEqual(projectCanonicalBranch({ entries, leafId: entries.at(-1).id }).entries, before);
+      assert.deepEqual(entries, before);
+    }
+});
+
+test("ordinary failure discriminator does not reinterpret ambiguous, native, or successful records", () => {
+  const cases = [
+    m => { delete m.diagnostics; }, m => { m.diagnostics = [{ type: "provider_transport_failure" }]; },
+    m => { m.api = "other-api"; }, m => { m.provider = "other-provider"; },
+    m => { m.diagnostics[0].details.eventsEmitted = "true"; },
+    m => { m.diagnostics[0].details.phase = "before_message_stream_start"; },
+    m => { m.diagnostics[0].details.configuredTransport = "sse"; },
+    m => { m.nativeTransport = null; }, m => { m.nativeTransport = {}; },
+    m => { m.nativeProviderError = null; },
+    m => { m.content[2].async = true; }, m => { m.content[2].nativeProvenance = {}; },
+    m => { m.content[2].nativeProvenance = null; }, m => { m.content[2].nativeProvenance = undefined; },
+    m => { m.content[2].providerItemId = "fc_ordinary"; }, m => { m.content[2].providerItemId = undefined; },
+    m => { m.content[2].providerCallId = undefined; },
+    m => { m.content.push({ type: "toolCall", id: "call_peer|fc_peer", name: "python", arguments: {}, providerItemId: "fc_peer" }); },
+    m => { m.content.push(call("native-peer")); },
+    m => { m.content[2].providerCallId = "call_ordinary"; },
+    m => { Object.assign(m.content[2], { providerCallId: "call_ordinary", providerItemId: "fc_ordinary" }); },
+    m => { m.nativeTransport = undefined; }, m => { m.nativeProviderError = undefined; },
+    m => { m.content[2].id = "call_ordinary|fc_ordinary|ambiguous"; },
+    m => { m.stopReason = "toolUse"; }, m => { m.stopReason = "stop"; }, m => { m.stopReason = "length"; },
+  ];
+  for (const mutate of cases) {
+    const entries = ordinaryFailedSuffix(); mutate(entries[1].message);
+    const before = structuredClone(entries), view = project(entries, "ordinary");
+    assert.deepEqual(view.messages, entries.map(e => e.message));
+    assert(view.diagnostics.some(d => d.severity === "blocking"));
+    assert.equal(view.diagnostics.some(d => d.code === "UNADMITTED_CALL_OMITTED"), false);
+    assert.deepEqual(entries, before);
+  }
+});
+
+test("ordinary omission is branch scoped and vetoed by results, call aliases, and any native transport observation", () => {
+  for (const conflict of [result("call_ordinary|fc_ordinary"), result("call_ordinary"), result("fc_ordinary"),
+    assistant("collision", [{ type: "toolCall", id: "call_ordinary|other", name: "python", arguments: {} }]),
+    { ...assistant("peer", []), stopReason: "error", nativeTransport: {
+      observedCalls: [{ callId: "call_ordinary", itemId: "fc_ordinary", complete: false, native: false }] } }]) {
+    const entries = ordinaryFailedSuffix(), peer = messageEntry("peer", "e2", conflict);
+    const view = project([...entries, peer], "ordinary");
+    assert(view.messages[1].content.some(p => p.type === "toolCall"));
+    assert(view.diagnostics.some(d => d.code === "ORDINARY_ASSISTANT_NOT_REPLAYABLE"));
+    assert.equal(project([...entries, peer], "ordinary", "e2").diagnostics.some(d => d.severity === "blocking"), false);
+    // The veto includes evidence pruned by compaction, not just retained calls.
+    const reordered = [messageEntry("peer", null, conflict), ...entries.map((e, i) => i ? e : { ...e, parentId: "peer" })];
+    const compact = { type: "compaction", id: "compact-ordinary", parentId: "e2", timestamp,
+      summary: "fixture", tokensBefore: 10, firstKeptEntryId: "e1" };
+    if (conflict.toolCallId === "call_ordinary|fc_ordinary") rejects([...reordered, compact], "ERR_CONTEXT_RESULT_BEFORE_CALL", "ordinary");
+    else assert(project([...reordered, compact], "ordinary").diagnostics.some(d => d.code === "ORDINARY_ASSISTANT_NOT_REPLAYABLE"));
+  }
+});
