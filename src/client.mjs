@@ -25,8 +25,12 @@ export class HarnessClient extends EventEmitter {
   #registrationRejected = false;
   #retryAttempt = 0;
 
-  constructor({ socketPath, reconnectBaseMs = 100, reconnectMaxMs = 2000, heartbeatMs = 15000, requestTimeoutMs = 3000 }) {
-    super(); Object.assign(this, { socketPath, reconnectBaseMs, reconnectMaxMs, heartbeatMs, requestTimeoutMs });
+  constructor({ socketPath, reconnectBaseMs = 100, reconnectMaxMs = 2000, heartbeatMs = 15000, requestTimeoutMs = 3000, historyRequestTimeoutMs = 28_000 }) {
+    super();
+    if (!Number.isInteger(historyRequestTimeoutMs) || historyRequestTimeoutMs < 1 || historyRequestTimeoutMs > 28_000) {
+      throw new Error("historyRequestTimeoutMs must be from 1 through 28000");
+    }
+    Object.assign(this, { socketPath, reconnectBaseMs, reconnectMaxMs, heartbeatMs, requestTimeoutMs, historyRequestTimeoutMs });
   }
   get connectedSession() { return this.#connectedSession; }
   get limits() { return this.#limits; }
@@ -111,8 +115,12 @@ export class HarnessClient extends EventEmitter {
     const socket = this.#socket;
     if (!socket || socket.destroyed) return Promise.reject(new Error("harness is not connected"));
     const id = randomUUID();
+    // Search/open have a 25s server budget plus a bounded transport margin.
+    // Metadata list, registration, heartbeat, and all other RPCs retain 3s.
+    const timeoutMs = type === "session_history" && ["search", "open"].includes(params.operation)
+      ? this.historyRequestTimeoutMs : this.requestTimeoutMs;
     return new Promise((resolve, reject) => {
-      const timer = setTimeout(() => { this.#pending.delete(id); reject(new Error(`${type} request timed out`)); socket.destroy(); }, this.requestTimeoutMs); timer.unref();
+      const timer = setTimeout(() => { this.#pending.delete(id); reject(new Error(`${type} request timed out`)); socket.destroy(); }, timeoutMs); timer.unref();
       this.#pending.set(id, { resolve, reject, timer });
       try { socket.write(encodeFrame({ version: PROTOCOL_VERSION, id, type, params })); }
       catch (error) { clearTimeout(timer); this.#pending.delete(id); reject(error); }

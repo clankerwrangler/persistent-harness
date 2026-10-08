@@ -1,8 +1,13 @@
 import assert from "node:assert/strict";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
+import { setTimeout as sleep } from "node:timers/promises";
+import { HarnessSupervisor } from "../src/supervisor.mjs";
+import { HarnessClient } from "../src/client.mjs";
+import { SessionHistoryIndex } from "../src/session-history-index.mjs";
+import { createHostHandlers } from "../src/host-handlers.mjs";
 import { PythonKernel } from "../src/kernel.mjs";
 import { PythonRuntimeManager } from "../src/python-runtime.mjs";
 import { discoverSkills, discoverSkillsFromDirectory, manifestForSkills } from "../src/skills.mjs";
@@ -89,4 +94,44 @@ print("session-history-contract-ok")
     { operation: "open", includeDeleted: true, includeCurrent: true, sessionId: "session-1",
       entryId: "entry-1", before: 1, after: 2, maxChars: 4096 },
   ]);
+});
+
+
+test("actual Python skill to host to authenticated history RPC survives work beyond the old three-second deadline", { timeout: 180_000 }, async (t) => {
+  const packageRoot = path.resolve(import.meta.dirname, ".."), root = await mkdtemp(path.join(os.tmpdir(), "history-rpc-"));
+  let kernel, client, supervisor, starts = 0;
+  t.after(async () => { await kernel?.close().catch(() => {}); await client?.stop(); await supervisor?.stop(); await rm(root, { recursive: true, force: true }); });
+  const source = path.join(root, "target.jsonl");
+  await writeFile(source, [
+    { type: "session", version: 3, id: "target", timestamp: "2026-01-01T00:00:00Z", cwd: root },
+    { type: "message", id: "answer", parentId: null, timestamp: "2026-01-01T00:00:00Z", message: { role: "user", content: "needle verified canonical reference" } },
+  ].map(JSON.stringify).join("\n") + "\n");
+  class SlowColdIndex extends SessionHistoryIndex {
+    async refresh(sources, { signal } = {}) { await sleep(3100, undefined, { signal }); return super.refresh(sources, { signal }); }
+  }
+  supervisor = new HarnessSupervisor({ socketPath: path.join(root, "s.sock"), databasePath: path.join(root, "state", "h.sqlite"),
+    pidPath: path.join(root, "s.pid"), sessionHistoryIndexFactory: options => new SlowColdIndex(options),
+    actorFactory() { starts++; throw new Error("history must not revive actors"); }, actorInactivityMs: 0 });
+  await supervisor.start();
+  for (const id of ["caller", "target"]) supervisor.store.createRoot({ sessionId: id, sessionFile: path.join(root, `${id}.jsonl`),
+    cwd: root, repositoryRoot: null, name: id, actorToken: `token-${id}`, launch: {} }, 1);
+  client = new HarnessClient({ socketPath: supervisor.socketPath, heartbeatMs: 0 });
+  assert.equal(client.requestTimeoutMs, 3000); assert.equal(client.historyRequestTimeoutMs, 28000);
+  await client.start({ registrationType: "register_actor", sessionId: "caller", sessionFile: path.join(root, "caller.jsonl"),
+    cwd: root, repositoryRoot: null, actorToken: "token-caller", actorGeneration: 1 });
+  const skillPath = path.join(process.env.PI_HARNESS_SKILLS_PATH || path.join(packageRoot, "skills"), "session-history", "SKILL.md");
+  const catalog = await discoverSkills([{ source: "skill", path: skillPath }]); assert.deepEqual(catalog.diagnostics, []);
+  const runtime = await new PythonRuntimeManager({ runtimeDir: path.join(root, "runtime") }).ensure({ skills: catalog.skills, consent: async () => true });
+  kernel = new PythonKernel({ pythonPath: runtime.pythonPath, kernelScript: path.join(packageRoot, "python-runtime", "kernel.py"),
+    runtimeSupportDir: path.join(packageRoot, "python-runtime"), cwd: root, stateDir: path.join(root, "kernel"),
+    manifest: manifestForSkills(catalog.skills), maxOutputBytes: 8192, hostHandlers: createHostHandlers({ cwd: root, getClient: () => client }) });
+  await kernel.start(); const start = performance.now();
+  const result = await kernel.execute(`
+result = await session_history(operation="search", query="needle", session_id="target", limit=1, snippet_chars=80)
+assert result["complete"] is True
+assert result["results"][0]["citation"] == {"sessionId": "target", "entryId": "answer"}
+print("history-rpc-over-three-seconds-ok")
+`);
+  assert.equal(result.ok, true, result.error || result.stderr); assert.match(result.stdout, /history-rpc-over-three-seconds-ok/);
+  assert(performance.now() - start >= 3000); assert.equal(client.isConnected, true); assert.equal(starts, 0);
 });

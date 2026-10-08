@@ -1,3 +1,5 @@
+import fs from "node:fs/promises";
+import { syncBuiltinESMExports } from "node:module";
 import assert from "node:assert/strict";
 import { appendFile, chmod, mkdtemp, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
 import os from "node:os";
@@ -45,10 +47,10 @@ function receiptAwareReader(store) {
     store.getActorInput(inputId, sessionId, { includeDigest: true }) });
 }
 
-class CountingReader {
-  constructor() { this.delegate = new VisibleTranscriptReader(); this.reads = 0; this.clears = 0; }
-  clear(file) { this.clears += 1; this.delegate.clear(file); }
-  async read(options) { this.reads += 1; return this.delegate.read(options); }
+class CountingReader extends VisibleTranscriptReader {
+  constructor() { super(); this.reads = 0; this.hydrations = []; }
+  async read(options) { this.reads += 1; return super.read(options); }
+  async readHistoryEntries(options) { this.hydrations.push(options.entries.length); return super.readHistoryEntries(options); }
 }
 
 test("warm search is FTS-only after refresh and supports literal terms, phrases, prefixes, roles, and citations", async (t) => {
@@ -195,7 +197,8 @@ test("open rereads through an injected reader after restart and bounds active ch
   const opened = await index.open({
     session: source(id, sessionFile), entryId: "target", before: 2, after: 2, maxChars: 12,
   });
-  assert.equal(reader.reads, 1, "a process without a projection cache must reread canonically through VisibleTranscriptReader");
+  assert.equal(reader.reads, 0);
+  assert.deepEqual(reader.hydrations, [5], "restart hydration reads only the requested ordinal window");
   assert.deepEqual(opened.messages.map((item) => item.entryId), ["target"]);
   assert.equal(Array.from(opened.messages[0].text).length, 12);
   assert.match(opened.messages[0].text, /…$/);
@@ -213,7 +216,8 @@ test("open rereads through an injected reader after restart and bounds active ch
 
   const wider = await index.open({ session: source(id, sessionFile), entryId: "target", before: 1, after: 1, maxChars: 200 });
   assert.deepEqual(wider.messages.map((item) => item.entryId), ["m1", "target", "m3"]);
-  assert.equal(reader.reads, 1, "subsequent open must reuse the canonical projection cache");
+  assert.equal(reader.reads, 0, "bounded opens never hydrate the entire archive");
+  assert.deepEqual(reader.hydrations, [5, 5, 3]);
   await assert.rejects(index.open({ session: source(id, sessionFile), entryId: "not-active" }), /does not exist/);
   await assert.rejects(index.open({ session: source(id, sessionFile), entryId: "target", before: 9 }), /before/);
   await assert.rejects(index.open({ session: source(id, sessionFile), entryId: "target", maxChars: 16_001 }), /maxChars/);
@@ -314,7 +318,8 @@ test("complete transcript projections use a strict small least-recently-used cac
   await index.refresh(sources);
   assert.equal(reader.reads, 10);
   await index.open({ session: sources[0], entryId: "m-0", before: 0, after: 0, maxChars: 100 });
-  assert.equal(reader.reads, 11, "the oldest complete projection must be evicted after the eight-session cap");
+  assert.equal(reader.reads, 10);
+  assert.deepEqual(reader.hydrations, [1], "an evicted complete projection uses bounded canonical hydration");
 });
 
 for (const knownReceipt of [false, true]) {
@@ -364,7 +369,7 @@ test("version 1 stale receipt projection rebuilds with an unchanged canonical fi
   const registryWalBefore = await readFile(path.join(f.root, "harness.sqlite-wal"));
   const sessions = [source(id, sessionFile)], reader = receiptAwareReader(store);
   // Seed the known old projected text through the existing derived-index writer.
-  const oldReader = { clear: file => reader.clear(file), async read(options) {
+  const oldReader = { historyReceiptsMatch: (...args) => reader.historyReceiptsMatch(...args), async read(options) {
     const result = await reader.read(options);
     return { ...result, messages: result.messages.map(row => row.id === literal.id ? { ...row, text: "Quoted marker" } : row) };
   } };
@@ -389,4 +394,162 @@ test("version 1 stale receipt projection rebuilds with an unchanged canonical fi
   assert.deepEqual(store.getActorInput(inputId, id), receiptBefore);
   assert.deepEqual(await readFile(path.join(f.root, "harness.sqlite")), registryBefore);
   assert.deepEqual(await readFile(path.join(f.root, "harness.sqlite-wal")), registryWalBefore);
+});
+
+
+test("verified prefixes retain partial lines, diff append rows, and reject rewrite-with-growth, branch switches, truncation and replacement", async (t) => {
+  const { root, id, sessionFile, databasePath } = await fixture(t);
+  const serialize = entries => entries.map(JSON.stringify).join("\n") + "\n";
+  let frames = [header(id), message("u1", null, "user", "retained alpha"), message("u2", "u1", "assistant", "abandoned beta")];
+  await writeFile(sessionFile, serialize(frames));
+  const reader = new CountingReader(), index = new SessionHistoryIndex({ databasePath, reader }); t.after(() => index.close());
+  const sessions = [source(id, sessionFile)]; await index.refresh(sessions);
+  const originalParse = JSON.parse; let parses = 0;
+  JSON.parse = (...args) => { const value = originalParse(...args); if (value?.type && value?.id) parses++; return value; };
+  t.after(() => { JSON.parse = originalParse; });
+  const appended = JSON.stringify(message("u3", "u2", "user", "completed gamma")) + "\n";
+  await appendFile(sessionFile, appended.slice(0, 40));
+  assert.deepEqual((await index.refresh(sessions)).errors, []); assert.equal(parses, 0);
+  await appendFile(sessionFile, appended.slice(40));
+  assert.deepEqual((await index.refresh(sessions)).errors, []); assert.equal(parses, 1, "only the completed suffix frame is parsed");
+  assert.equal((await index.search({ sessions, query: "gamma" })).matches[0].entryId, "u3");
+  const inode = (await stat(sessionFile)).ino;
+  frames = [header(id), message("u1", null, "user", "rewritten delta"), message("u2", "u1", "assistant", "abandoned beta"), message("u3", "u2", "user", "completed gamma"), message("grow", "u3", "user", "growth epsilon")];
+  await writeFile(sessionFile, serialize(frames)); assert.equal((await stat(sessionFile)).ino, inode);
+  await index.refresh(sessions);
+  assert.equal((await index.search({ sessions, query: "alpha" })).matches.length, 0);
+  assert.equal((await index.search({ sessions, query: "delta" })).matches[0].entryId, "u1");
+  parses = 0;
+  await appendFile(sessionFile, serialize([message("branch", "u1", "user", "selected zeta")])); await index.refresh(sessions);
+  assert.equal(parses, 1); assert.equal((await index.search({ sessions, query: "gamma" })).matches.length, 0);
+  await assert.rejects(index.open({ session: sessions[0], entryId: "u2" }), /does not exist/);
+  await writeFile(sessionFile, serialize([header(id), message("short", null, "user", "short eta")])); await index.refresh(sessions);
+  assert.equal((await index.search({ sessions, query: "delta" })).matches.length, 0);
+  const replacement = path.join(root, "replacement.jsonl");
+  await writeFile(replacement, serialize([header(id), message("replace", null, "user", "replacement theta")])); await rename(replacement, sessionFile);
+  await index.refresh(sessions); assert.equal((await index.search({ sessions, query: "theta" })).matches[0].entryId, "replace");
+});
+
+test("large projections and restarted indexes hydrate only matched rows or the bounded ordinal window", async (t) => {
+  const { id, sessionFile, databasePath } = await fixture(t);
+  const frames = [header(id)];
+  for (let i = 0; i < 600; i++) frames.push(message(`m${i}`, i ? `m${i - 1}` : null, "user", `${i === 300 ? "needletarget" : "ordinary"} ${"x".repeat(8192)}`));
+  await writeFile(sessionFile, frames.map(JSON.stringify).join("\n") + "\n");
+  let reader = new CountingReader(), index = new SessionHistoryIndex({ databasePath, reader });
+  const sessions = [source(id, sessionFile)]; await index.refresh(sessions);
+  assert.equal((await index.search({ sessions, query: "needletarget", limit: 1 })).matches[0].entryId, "m300");
+  assert.deepEqual(reader.hydrations, [1]); assert.equal(reader.reads, 1);
+  index.close(); reader = new CountingReader(); index = new SessionHistoryIndex({ databasePath, reader }); t.after(() => index.close());
+  assert.deepEqual((await index.refresh(sessions)).unchanged, [id]);
+  const opened = await index.open({ session: sessions[0], entryId: "m300", before: 1, after: 1, maxChars: 16000 });
+  assert.equal(opened.entryId, "m300"); assert.equal(reader.reads, 0); assert.deepEqual(reader.hydrations, [3]);
+  await appendFile(sessionFile, JSON.stringify(message("new", "m599", "user", "added later")) + "\n");
+  await assert.rejects(index.search({ sessions, query: "needletarget" }), /changed during history hydration/);
+});
+
+test("aborted refresh retains committed rows and cannot publish a partly parsed version", async (t) => {
+  const { id, sessionFile, databasePath } = await fixture(t), sessions = [source(id, sessionFile)];
+  await writeFile(sessionFile, [header(id), message("old", null, "user", "old snapshot")].map(JSON.stringify).join("\n") + "\n");
+  let abortAfterRead;
+  class AbortReader extends VisibleTranscriptReader { async read(options) { const result = await super.read(options); abortAfterRead?.abort(new Error("test cancellation")); return result; } }
+  const index = new SessionHistoryIndex({ databasePath, reader: new AbortReader() }); t.after(() => index.close());
+  await index.refresh(sessions);
+  const db = new DatabaseSync(databasePath, { readOnly: true }); t.after(() => db.close());
+  const snapshot = () => ({ source: db.prepare("SELECT * FROM sources").all(), rows: db.prepare("SELECT * FROM documents").all() });
+  const before = snapshot();
+  await appendFile(sessionFile, JSON.stringify(message("new", "old", "user", "new snapshot")) + "\n");
+  abortAfterRead = new AbortController();
+  await assert.rejects(index.refresh(sessions, { signal: abortAfterRead.signal }), /test cancellation/);
+  assert.deepEqual(snapshot(), before, "abort is not source failure and never deletes committed rows");
+  abortAfterRead = null; await index.refresh(sessions);
+  assert.equal((await index.search({ sessions, query: "new" })).matches[0].entryId, "new");
+});
+
+test("bounded receipt rendering matches complete-inventory projection across restart, ambiguity and receipt-only changes", async (t) => {
+  const { id, sessionFile, databasePath } = await fixture(t), inputId = "legacy-proof";
+  const stamp = "2026-01-01T00:00:00.000Z";
+  let receipt = { sessionId: id, inputId, outcome: "delivered", acceptedAt: Date.parse(stamp), source: "user", origin: null,
+    entryId: null, message: "body", images: [], clientMessageId: null };
+  const inputReceiptReader = candidate => candidate === inputId ? receipt : null;
+  const proven = message("proven", null, "user", `body\n\n<!-- persistent-harness-input:${inputId} -->`, stamp);
+  const literal = message("literal", "proven", "user", `quoted\n\n<!-- persistent-harness-input:${inputId} -->`, stamp);
+  await writeFile(sessionFile, [header(id), proven, literal].map(JSON.stringify).join("\n") + "\n");
+  const selected = source(id, sessionFile); let index;
+  t.after(() => index?.close());
+  const compare = async () => {
+    const baseline = await new VisibleTranscriptReader({ inputReceiptReader }).read({ sessionFile, sessionId: id, maxMessages: 100, maxBytes: 100000 });
+    index?.close(); index = new SessionHistoryIndex({ databasePath, reader: new VisibleTranscriptReader({ inputReceiptReader }) });
+    await index.refresh([selected]);
+    // Restart once more to ensure direct canonical spans, not a full cache, supply the rendering.
+    index.close(); index = new SessionHistoryIndex({ databasePath, reader: new VisibleTranscriptReader({ inputReceiptReader }) });
+    for (const expected of baseline.messages.filter(item => ["user", "assistant"].includes(item.role))) {
+      const actual = (await index.open({ session: selected, entryId: expected.id, before: 0, after: 0 })).messages[0];
+      assert.deepEqual({ text: actual.text, role: actual.role, createdAt: actual.createdAt },
+        { text: expected.text, role: expected.role, createdAt: expected.createdAt });
+    }
+    return baseline;
+  };
+  let baseline = await compare(); assert.equal(baseline.messages[0].text, "body"); assert.equal(baseline.messages[1].text, literal.message.content[0].text);
+  await appendFile(sessionFile, JSON.stringify(message("duplicate", "literal", "user", proven.message.content[0].text, stamp)) + "\n");
+  baseline = await compare(); assert.equal(baseline.messages[0].text, proven.message.content[0].text, "duplicate inventory makes legacy proof ambiguous");
+  const bytes = await readFile(sessionFile);
+  receipt = { ...receipt, entryId: "proven", acceptedAt: receipt.acceptedAt + 1000 };
+  await assert.rejects(index.open({ session: selected, entryId: "proven", before: 0, after: 0 }), /receipt dependency changed/);
+  baseline = await compare(); assert.equal(baseline.messages[0].text, "body"); assert.equal(baseline.messages[0].createdAt, "2026-01-01T00:00:01.000Z");
+  receipt = null;
+  baseline = await compare(); assert.equal(baseline.messages[0].text, proven.message.content[0].text);
+  assert.deepEqual(await readFile(sessionFile), bytes, "receipt-only refresh never mutates canonical bytes");
+});
+
+
+for (const growth of [false, true]) test(`ordinary shared-reader observations cannot certify rewritten cached history${growth ? " plus growth" : " at the same size"}`, async (t) => {
+  const { id, sessionFile, databasePath } = await fixture(t), reader = new VisibleTranscriptReader();
+  const frames = [header(id), message("u1", null, "user", "old marker")];
+  await writeFile(sessionFile, frames.map(JSON.stringify).join("\n") + "\n");
+  const sessions = [source(id, sessionFile)], index = new SessionHistoryIndex({ databasePath, reader }); t.after(() => index.close());
+  await index.refresh(sessions);
+  frames[1] = message("u1", null, "user", "new marker");
+  if (growth) frames.push(message("u2", "u1", "user", "suffix"));
+  await writeFile(sessionFile, frames.map(JSON.stringify).join("\n") + "\n");
+  await reader.read({ sessionFile, sessionId: id, includeTitleTurn: true });
+  await index.refresh(sessions);
+  assert.equal((await index.search({ sessions, query: "old" })).matches.length, 0);
+  assert.equal((await index.search({ sessions, query: "new" })).matches[0].entryId, "u1");
+});
+
+
+test("real prefix reads and incremental FTS transactions stop on cancellation without losing the old version", async (t) => {
+  const { id, sessionFile, databasePath } = await fixture(t), sessions = [source(id, sessionFile)];
+  await writeFile(sessionFile, [header(id), message("padding", null, "toolResult", "x".repeat(1024 * 1024)), message("old", "padding", "user", "old snapshot")].map(JSON.stringify).join("\n") + "\n");
+  const index = new SessionHistoryIndex({ databasePath }); t.after(() => index.close()); await index.refresh(sessions);
+  const db = new DatabaseSync(databasePath, { readOnly: true }); t.after(() => db.close());
+  const snapshot = () => ({ source: db.prepare("SELECT * FROM sources").all(), rows: db.prepare("SELECT * FROM documents").all() });
+  const before = snapshot();
+  await appendFile(sessionFile, JSON.stringify(message("new", "old", "user", "abort-row")) + "\n");
+  const originalOpen = fs.open; const reading = new AbortController(); let reads = 0;
+  fs.open = async function(file, ...args) {
+    const handle = await originalOpen.call(this, file, ...args);
+    if (file === sessionFile) {
+      const read = handle.read.bind(handle);
+      handle.read = async (...args) => { const result = await read(...args); reads++; reading.abort(new Error("cancel prefix")); return result; };
+    }
+    return handle;
+  };
+  syncBuiltinESMExports();
+  try { await assert.rejects(index.refresh(sessions, { signal: reading.signal }), /cancel prefix/); }
+  finally { fs.open = originalOpen; syncBuiltinESMExports(); }
+  assert.equal(reads, 1); assert.deepEqual(snapshot(), before);
+  const originalPrepare = DatabaseSync.prototype.prepare, indexing = new AbortController(); let inserts = 0;
+  DatabaseSync.prototype.prepare = function(sql) {
+    const statement = originalPrepare.call(this, sql);
+    if (sql.startsWith("INSERT INTO message_fts")) {
+      const run = statement.run.bind(statement);
+      statement.run = (...args) => { const result = run(...args); inserts++; indexing.abort(new Error("cancel indexing")); return result; };
+    }
+    return statement;
+  };
+  try { await assert.rejects(index.refresh(sessions, { signal: indexing.signal }), /cancel indexing/); }
+  finally { DatabaseSync.prototype.prepare = originalPrepare; }
+  assert.equal(inserts, 1, "only the appended row needs indexing"); assert.deepEqual(snapshot(), before);
+  await index.refresh(sessions); assert.equal((await index.search({ sessions, query: "abort-row" })).matches[0].entryId, "new");
 });

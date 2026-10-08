@@ -1,9 +1,9 @@
-import { open } from "node:fs/promises";
+import { open, stat as fileStat } from "node:fs/promises";
 import { constants } from "node:fs";
 import { createHash } from "node:crypto";
 import path from "node:path";
 import { MAX_INPUT_REQUEST_BYTES, normalizeInputImages } from "./input-images.mjs";
-import { inputIdForEntry, canonicalUserInputId, createActorInputAssociation, associateVisibleInput, projectVisibleMessage, assistantMessageParts, sortVisibleHistory } from "./conversation-projection.mjs";
+import { inputIdForEntry, canonicalUserInputId, cleanHarnessInput, createActorInputAssociation, associateVisibleInput, projectVisibleMessage, assistantMessageParts, sortVisibleHistory } from "./conversation-projection.mjs";
 import { sanitizePresentationText } from "./presentation-directive.mjs";
 import { durableIncomingMessageId, isSupersededIncomingCustomMessage, projectAgentMessageEntry } from "./agent-message-projection.mjs";
 import { projectProgressEntry } from "./progress-projection.mjs";
@@ -32,6 +32,14 @@ function parseHistoryCursor(value) {
 }
 function historyCursor(record, beforeId) {
   return Buffer.from(JSON.stringify([1, record.sessionId, record.branchId, beforeId])).toString("base64url");
+}
+
+export function transcriptFingerprint(stat) {
+  if (!stat.isFile()) throw new Error("canonical Pi transcript is not a regular file");
+  return Object.fromEntries(["dev", "ino", "size", "mtimeNs", "ctimeNs"].map(key => [key, String(stat[key])]));
+}
+export function sameTranscriptFingerprint(left, right) {
+  return Boolean(left && right && ["dev", "ino", "size", "mtimeNs", "ctimeNs"].every(key => left[key] === right[key]));
 }
 
 function sameFile(record, stat) {
@@ -90,10 +98,11 @@ export function boundVisibleMessages(messages, options) {
   return { messages: bounded.messages, truncated: bounded.truncated };
 }
 
-function newRecord(filePath, stat, sessionId) {
+function newRecord(filePath, stat, sessionId, verifySource = false) {
   return {
     filePath, sessionId, dev: stat.dev, ino: stat.ino, offset: 0,
     headerValidated: false, branchId: null, entries: new Map(), incomingMessageIds: new Set(), leafId: null,
+    hash: verifySource ? createHash("sha256") : null, fingerprint: null, verified: false,
     pendingParts: [], pendingBytes: 0, pendingLineOffset: null, touchedAt: Date.now(),
   };
 }
@@ -113,13 +122,64 @@ export class VisibleTranscriptReader {
 
   async read(options) { return (await this.#readSnapshot(options)).projection; }
 
-  async #readSnapshot({ sessionFile, sessionId, maxMessages = 512, maxBytes = 48 * 1024, sanitizePresentation = false, includeTitleTurn = false, before = null, publicView = false }) {
+  historyReceiptsMatch(sessionId, dependencies) {
+    return dependencies.every(row => this.#receiptHash(this.inputReceiptReader?.(row.input_id, sessionId)) === row.receipt_hash);
+  }
+
+  #receiptHash(receipt) { return createHash("sha256").update(JSON.stringify(receipt ?? null)).digest("hex"); }
+
+  /** Hydrate only rows of an already verified active-branch index version. */
+  async readHistoryEntries({ sessionFile, sessionId, fingerprint, entries, sanitizePresentation, signal }) {
+    if (!Array.isArray(entries) || entries.length > 1000) throw new Error("history hydration exceeds the entry limit");
+    const handle = await open(sessionFile, "r");
+    try {
+      const check = async () => {
+        signal?.throwIfAborted();
+        if (!sameTranscriptFingerprint(fingerprint, transcriptFingerprint(await handle.stat({ bigint: true })))
+          || !sameTranscriptFingerprint(fingerprint, transcriptFingerprint(await fileStat(sessionFile, { bigint: true })))) {
+          throw new Error("canonical Pi transcript changed during history hydration");
+        }
+      };
+      await check();
+      const messages = [];
+      for (const row of entries) {
+        signal?.throwIfAborted();
+        if (row.session_id !== sessionId || !Number.isSafeInteger(row.source_offset) || row.source_offset < 0
+          || !Number.isSafeInteger(row.source_length) || row.source_length < 1 || row.source_length > MAX_JSONL_LINE_BYTES
+          || row.source_offset + row.source_length > Number(fingerprint.size)) throw new Error("invalid history source span");
+        const buffer = Buffer.allocUnsafe(row.source_length);
+        let offset = 0;
+        while (offset < buffer.length) {
+          signal?.throwIfAborted();
+          const { bytesRead } = await handle.read(buffer, offset, Math.min(READ_CHUNK_BYTES, buffer.length - offset), row.source_offset + offset);
+          if (!bytesRead) throw new Error("canonical Pi transcript was truncated during history hydration");
+          offset += bytesRead;
+        }
+        const line = buffer.at(-1) === 0x0d ? buffer.subarray(0, -1) : buffer;
+        if (createHash("sha256").update(line).digest("hex") !== row.source_hash) throw new Error("canonical history entry changed");
+        const entry = JSON.parse(utf8.decode(line));
+        if (entry.id !== row.entry_id) throw new Error("canonical history entry identity changed");
+        let message = projectVisibleMessage(entry, { imageReferences: true, sanitizePresentation });
+        if (!message || message.role !== row.role) throw new Error("canonical history entry role changed");
+        // This bit was produced by complete-inventory receipt association, not
+        // marker matching. The index additionally checks the projected digest.
+        if (row.strip_marker) message = { ...message, text: cleanHarnessInput(message.text) };
+        messages.push({ ...message, createdAt: row.created_at });
+      }
+      await check();
+      return { messages };
+    } finally { await handle.close(); }
+  }
+
+  async #readSnapshot({ sessionFile, sessionId, maxMessages = 512, maxBytes = 48 * 1024, sanitizePresentation = false, includeTitleTurn = false, before = null, publicView = false, verifySource = false, historyIndex = false, signal }) {
     const cursor = before === null ? null : parseHistoryCursor(before);
     const filePath = path.resolve(sessionFile);
-    const options = { sessionFile: filePath, sessionId, maxMessages, maxBytes, sanitizePresentation, includeTitleTurn, before, publicView };
-    const projectionKey = JSON.stringify([sessionId, maxMessages, maxBytes, sanitizePresentation, includeTitleTurn, before, publicView]);
+    const options = { sessionFile: filePath, sessionId, maxMessages, maxBytes, sanitizePresentation, includeTitleTurn, before, publicView, verifySource, historyIndex, signal };
+    const projectionKey = JSON.stringify([sessionId, maxMessages, maxBytes, sanitizePresentation, includeTitleTurn, before, publicView, verifySource, historyIndex]);
     const active = this.#inflight.get(filePath);
     if (active) {
+      // Independently owned history requests must never share an abort signal.
+      if (signal) { await active.promise.catch(() => {}); signal.throwIfAborted(); return this.#readSnapshot(options); }
       let trailing = active.trailing.get(projectionKey);
       if (!trailing) {
         // Serialize file access, not request outcomes. A stale cursor must not
@@ -130,8 +190,8 @@ export class VisibleTranscriptReader {
       return trailing;
     }
     const state = { promise: null, trailing: new Map() };
-    state.promise = this.#read(filePath, sessionId, { maxMessages, maxBytes, sanitizePresentation, includeTitleTurn, cursor, publicView })
-      .catch((error) => { if (error.code !== "history_cursor_stale") this.#records.delete(filePath); throw error; })
+    state.promise = this.#read(filePath, sessionId, { maxMessages, maxBytes, sanitizePresentation, includeTitleTurn, cursor, publicView, verifySource, historyIndex, signal })
+      .catch((error) => { if (!verifySource && error.code !== "history_cursor_stale") this.#records.delete(filePath); throw error; })
       .finally(() => { if (this.#inflight.get(filePath) === state) this.#inflight.delete(filePath); });
     this.#inflight.set(filePath, state);
     return state.promise;
@@ -220,7 +280,7 @@ export class VisibleTranscriptReader {
     return { ...turn, input: canonicalRetryInput(entry, { sessionId, inputReceipt, inputAssociation: snapshot.associations.get(inputId) }) };
   }
 
-  async #readCanonicalEntry(record, entryId, { handle: sharedHandle } = {}) {
+  async #readCanonicalEntry(record, entryId, { handle: sharedHandle, signal } = {}) {
     const selected = record?.entries.get(entryId);
     const limit = selected?.inputCandidate?.kind === "user-id" ? MAX_JSONL_LINE_BYTES : MAX_INPUT_REQUEST_BYTES;
     if (!selected?.source || selected.source.length > limit) throw new Error("canonical input source exceeds the input limit");
@@ -231,7 +291,8 @@ export class VisibleTranscriptReader {
       const buffer = Buffer.allocUnsafe(selected.source.length);
       let offset = 0;
       while (offset < buffer.length) {
-        const { bytesRead } = await handle.read(buffer, offset, buffer.length - offset, selected.source.offset + offset);
+        signal?.throwIfAborted();
+        const { bytesRead } = await handle.read(buffer, offset, Math.min(READ_CHUNK_BYTES, buffer.length - offset), selected.source.offset + offset);
         if (bytesRead === 0) throw new Error("canonical input source changed during read");
         offset += bytesRead;
       }
@@ -265,8 +326,9 @@ export class VisibleTranscriptReader {
     return image;
   }
 
-  async #inputAssociations(record, handle) {
-    const associations = new Map(); if (!this.inputReceiptReader) return associations;
+  async #inputAssociations(record, handle, signal, dependencies = null) {
+    const associations = new Map();
+    if (!this.inputReceiptReader && !dependencies) return associations;
     const groups = new Map();
     for (const entry of record.entries.values()) {
       const candidate = entry.inputCandidate; if (!candidate) continue;
@@ -274,7 +336,10 @@ export class VisibleTranscriptReader {
       group.push(entry); groups.set(candidate.inputId, group);
     }
     for (const [inputId, entries] of groups) {
-      const inputReceipt = this.inputReceiptReader(inputId, record.sessionId); if (!inputReceipt) continue;
+      signal?.throwIfAborted();
+      const inputReceipt = this.inputReceiptReader?.(inputId, record.sessionId);
+      if (dependencies) dependencies.push({ input_id: inputId, receipt_hash: this.#receiptHash(inputReceipt) });
+      if (!inputReceipt) continue;
       const verifier = createActorInputAssociation({ sessionId: record.sessionId, inputReceipt });
       for (const entry of entries) {
         const candidate = entry.inputCandidate;
@@ -284,7 +349,7 @@ export class VisibleTranscriptReader {
         }
         // Canonical user identity neither rereads nor retains expanded payloads.
         const canonical = candidate.kind === "user-id" ? candidate.entry
-          : await this.#readCanonicalEntry(record, candidate.entry.id, { handle });
+          : await this.#readCanonicalEntry(record, candidate.entry.id, { handle, signal });
         verifier.add(canonical);
       }
       associations.set(inputId, verifier.result());
@@ -295,27 +360,43 @@ export class VisibleTranscriptReader {
   async #read(filePath, sessionId, bounds) {
     const handle = await open(filePath, "r");
     try {
-      const stat = await handle.stat();
-      if (!stat.isFile()) throw new Error(`canonical Pi transcript is not a regular file: ${filePath}`);
+      bounds.signal?.throwIfAborted();
+      const fingerprint = transcriptFingerprint(await handle.stat({ bigint: true }));
+      const stat = { dev: Number(fingerprint.dev), ino: Number(fingerprint.ino), size: Number(fingerprint.size) };
       let record = this.#records.get(filePath);
-      if (!record || record.sessionId !== sessionId || !sameFile(record, stat)) {
-        record = newRecord(filePath, stat, sessionId);
-        this.#records.set(filePath, record);
+      if (!record || record.sessionId !== sessionId || !sameFile(record, stat) || (bounds.verifySource && !record.hash)) record = newRecord(filePath, stat, sessionId, bounds.verifySource);
+      if (bounds.verifySource && record.offset && (!record.verified || !sameTranscriptFingerprint(record.fingerprint, fingerprint))) {
+        // Arbitrary same-inode rewrites (including rewrite + growth) are legal.
+        // Verify every accepted prefix byte before reusing parsed metadata.
+        const hash = createHash("sha256"), buffer = Buffer.allocUnsafe(READ_CHUNK_BYTES);
+        let offset = 0;
+        while (offset < record.offset) {
+          bounds.signal?.throwIfAborted();
+          const { bytesRead } = await handle.read(buffer, 0, Math.min(buffer.length, record.offset - offset), offset);
+          if (!bytesRead) throw new Error("canonical Pi transcript changed during prefix verification");
+          hash.update(buffer.subarray(0, bytesRead)); offset += bytesRead;
+        }
+        if (hash.digest("hex") !== record.hash.copy().digest("hex")) record = newRecord(filePath, stat, sessionId, bounds.verifySource);
       }
+      if (bounds.verifySource) record = { ...record, entries: new Map(record.entries), incomingMessageIds: new Set(record.incomingMessageIds),
+        pendingParts: [...record.pendingParts], hash: record.hash.copy() };
       const target = stat.size;
+      // Observing new metadata is not proof of the cached bytes, even when a
+      // non-history consumer sees a same-size rewrite and parses no suffix.
+      if (!sameTranscriptFingerprint(record.fingerprint, fingerprint)) record.verified = false;
       while (record.offset < target) {
+        bounds.signal?.throwIfAborted();
         const length = Math.min(READ_CHUNK_BYTES, target - record.offset);
         const buffer = Buffer.allocUnsafe(length);
         const { bytesRead } = await handle.read(buffer, 0, length, record.offset);
-        if (bytesRead === 0) break;
-        record.offset += bytesRead;
-        this.#consume(record, buffer.subarray(0, bytesRead), record.offset - bytesRead);
+        if (bytesRead === 0) throw new Error("canonical Pi transcript changed during read");
+        const chunk = buffer.subarray(0, bytesRead);
+        record.hash?.update(chunk); record.offset += bytesRead;
+        this.#consume(record, chunk, record.offset - bytesRead);
       }
       if (!record.headerValidated) throw new Error(`canonical Pi transcript header is incomplete: ${filePath}`);
-      record.touchedAt = Date.now();
-      this.#touch(filePath, record);
-      this.#evict();
-      const associations = await this.#inputAssociations(record, handle);
+      const receiptDependencies = bounds.historyIndex ? [] : null;
+      const associations = await this.#inputAssociations(record, handle, bounds.signal, receiptDependencies);
       const visible = this.#visibleBranch(record, bounds, associations);
       const title = bounds.includeTitleTurn
         ? { titleTurn: rootTitleExcerpt(firstCompletedTitleTurn(visible.filter((item) => item.kind === "message").map((item) => item.message))),
@@ -330,7 +411,7 @@ export class VisibleTranscriptReader {
         end = visible.findIndex((item) => (item.kind === "message" ? item.message.id : item.id) === cursor.beforeId);
         if (end < 0) throw historyError("history_cursor_stale", "history changed; load the conversation again");
       }
-      const page = boundVisibleHistory(visible.slice(0, end), bounds);
+      const page = bounds.historyIndex ? { ...historyProjection(visible), truncated: false } : boundVisibleHistory(visible.slice(0, end), bounds);
       if (end > 0 && page.history.length === 0) throw historyError("history_page_too_small", "history row exceeds the page byte limit");
       const hasMore = page.truncated;
       const historyPage = { hasMore, nextCursor: hasMore ? historyCursor(record, page.history[0].id) : null, branchId: record.branchId };
@@ -340,6 +421,27 @@ export class VisibleTranscriptReader {
         inputEntries: Object.fromEntries(proven.map(([inputId, result]) => [inputId, result.entryId])),
         inputDeliveries: Object.fromEntries(proven.map(([inputId, result]) => [inputId, { entryId: result.entryId, deliveredAt: result.deliveredAt }])),
         inputAssociationStates: Object.fromEntries([...associations].map(([inputId, result]) => [inputId, result.state])) };
+      bounds.signal?.throwIfAborted();
+      if (bounds.verifySource) {
+        if (!sameTranscriptFingerprint(fingerprint, transcriptFingerprint(await handle.stat({ bigint: true })))
+          || !sameTranscriptFingerprint(fingerprint, transcriptFingerprint(await fileStat(filePath, { bigint: true })))) {
+          throw new Error("canonical Pi transcript changed during verified read");
+        }
+        bounds.signal?.throwIfAborted(); record.verified = true;
+      }
+      record.fingerprint = fingerprint; record.touchedAt = Date.now();
+      this.#touch(filePath, record); this.#evict();
+      if (bounds.historyIndex) {
+        projection.sourceEntries = new Map(projection.messages.map(message => {
+          const entry = record.entries.get(message.id);
+          return [message.id, { ...entry.source, stripMarker: entry.inputCandidate
+            && associations.get(entry.inputCandidate.inputId)?.state === "proven"
+            && associations.get(entry.inputCandidate.inputId)?.entryId === message.id
+            && associations.get(entry.inputCandidate.inputId)?.proof.kind === "legacy-marker" ? 1 : 0 }];
+        }));
+        projection.fingerprint = fingerprint;
+        projection.receiptDependencies = receiptDependencies;
+      }
       return { projection, record, associations };
     } finally {
       await handle.close();
