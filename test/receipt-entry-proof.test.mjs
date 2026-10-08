@@ -367,3 +367,37 @@ test("authoritative expansion larger than the legacy input read limit retains pr
   assert(retry.input.message === expanded, "The original canonical expansion is not truncated or digest-compared");
   assert.deepEqual(retry.input.images, [image]); assert.equal(retry.input.originalInputId, inputId);
 });
+
+test("startup reporter skips historical receipts while retaining full evidence for later appends", async (t) => {
+  const f = await fixture(t), entries = [], lookups = [], reports = [];
+  for (let index = 0; index < 1000; index++) entries.push({ type: "message", id: `history-${index}`, parentId: null, timestamp,
+    message: { role: "user", id: `completed-${index}`, content: "Historical input" } });
+  const input = f.store.createActorInput("s", { inputId: "pending", message: "Exact pending body" }, acceptedAt);
+  entries.push(user("weak-old", input.inputId, input.message));
+  const ctx = { sessionManager: { getSessionId: () => "s", getEntries: () => entries } };
+  const client = { isConnected: true, async request(type, params) {
+    if (type === "get_actor_input") { lookups.push(params.inputId); return { input: f.store.getActorInput(params.inputId, "s") }; }
+    assert.equal(type, "record_input_delivery");
+    const canonical = await f.reader.read({ sessionFile: f.sessionFile, sessionId: "s" });
+    assert.equal(canonical.inputDeliveries[params.inputId]?.entryId, params.entryId);
+    reports.push(params.entryId); f.store.completeActorInput(params.inputId, "s", Date.parse(params.deliveredAt), params.entryId);
+    return { accepted: true };
+  } };
+  const helper = createActorInputDelivery({ pi: { sendMessage() { assert.fail("Reporter cannot replay input"); } }, getClient: () => client, getContext: () => ctx });
+  await f.read(entries);
+  helper.reset(entries);
+  await helper.flush(); assert.deepEqual(lookups, [], "startup must not query completed historical receipts");
+  // A candidate appended while registration awaited must be noticed. Historical
+  // evidence is still part of uniqueness resolution, not hidden by the cursor.
+  entries.push(user("weak-new", input.inputId, input.message));
+  await f.read(entries); await helper.flush();
+  assert.deepEqual(reports, []); assert.equal(f.store.getActorInput(input.inputId, "s").deliveredAt, null);
+  client.isConnected = false;
+  entries.push({ type: "message", id: "strong-new", parentId: "weak-new", timestamp,
+    message: { role: "user", id: input.inputId, content: "Expanded input" } });
+  await f.read(entries); await helper.flush();
+  client.isConnected = true; await helper.flush(); await helper.flush();
+  assert.deepEqual(reports, ["strong-new"]);
+  assert.deepEqual(lookups, ["pending", "pending"]);
+  helper.reset(entries); await helper.flush(); assert.equal(lookups.length, 2, "later starts skip already-completed history too");
+});

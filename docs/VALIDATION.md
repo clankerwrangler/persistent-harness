@@ -109,3 +109,11 @@ is joined, and a later settled callback cannot reenter readiness after Stop.
 Registration leaves the mutation queue before readiness waits. The existing
 `supervisor-settled-stop.test.mjs` cases also verify that a real stopped writer
 cannot append and that only explicit later activation revives it.
+
+`ActorInputReconciliation` models startup without a historical actor receipt
+sweep, retained supervisor reconciliation, receipt loss across actor generations,
+ambiguous evidence, and an unchanged compaction barrier. Disabling historical
+supervisor reconciliation fails its recovery invariant. Reporter tests cover
+appends during registration, complete-history ambiguity, and offline reporting;
+a real stock-worker test requires native, legacy, and custom historical pending
+receipts to complete through supervisor reconciliation without reinjection.
