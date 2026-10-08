@@ -600,3 +600,34 @@ test("chunk boundaries preserve UTF-8, CRLF source hashes, and incomplete append
   assert.deepEqual((await reader.readBranch({ ...options, leafId: second.id })).entries, [padding, first, second],
     "canonical offsets and hashes still reread the exact CRLF-delimited source");
 });
+
+test("embedded births survive cold pagination and stay on their active canonical branch", async t => {
+  const { file, id } = await fixture(t);
+  const at = "2026-01-01T00:00:10.000Z";
+  const birth = sequence => ({ version: 1, createdAt: at, sequence });
+  const progress = (key, parentId, sequence) => ({ type: "custom", customType: PROGRESS_ENTRY_TYPE, id: key,
+    parentId, timestamp: at, data: { summary: key, harnessBirth: birth(sequence) } });
+  const assistant = { ...message("a", "q", "assistant", ""), message: { role: "assistant", timestamp: 1, content: [
+    { type: "text", id: "text-a", text: "A", harnessBirth: birth(2) },
+    { type: "text", id: "text-b", text: "B", harnessBirth: birth(4) },
+  ] } };
+  await writeFile(file, [header(id), message("u", null, "user", "User"), progress("p", "u", 1), progress("q", "p", 3), assistant].map(JSON.stringify).join("\n") + "\n");
+  const reader = new VisibleTranscriptReader(), args = { sessionFile: file, sessionId: id, maxMessages: 2, publicView: true };
+  let before; const rows = []; let initial;
+  do {
+    const page = await reader.read({ ...args, ...(before ? { before } : {}) }); initial ??= page;
+    rows.unshift(...page.history.map(row => row.kind === "message" ? page.messages.find(message => message.id === row.id) : row));
+    before = page.historyPage.nextCursor;
+    assert.equal(Boolean(before), page.historyPage.hasMore);
+  } while (before);
+  assert.deepEqual(rows.map(row => row.text ?? row.summary), ["User", "p", "A", "q", "B"]);
+  assert.deepEqual(rows.slice(1).map(row => [row.createdAt, row.timelineSequence]), [1, 2, 3, 4].map(sequence => [at, sequence]));
+  const cold = await new VisibleTranscriptReader().read({ ...args, maxMessages: 20 });
+  assert.deepEqual(cold.history.map(row => row.id), rows.map(row => row.id));
+  await appendFile(file, JSON.stringify({ ...message("alternate", "p", "user", "Alternate branch"), timestamp: "2026-01-01T00:00:11.000Z" }) + "\n");
+  const branch = await reader.read({ ...args, maxMessages: 20 });
+  assert.deepEqual(branch.history.map(row => row.kind === "message" ? branch.messages.find(message => message.id === row.id).text : row.summary), ["User", "p", "Alternate branch"]);
+  assert.equal(branch.history.find(row => row.kind === "progress").timelineSequence, 1);
+  assert.notEqual(branch.historyPage.branchId, initial.historyPage.branchId);
+  await assert.rejects(reader.read({ ...args, before: initial.historyPage.nextCursor }), { code: "history_cursor_stale" });
+});

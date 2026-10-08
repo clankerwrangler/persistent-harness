@@ -1,3 +1,4 @@
+import { birthOrder } from "./conversation-birth.mjs";
 const MAX_HEADING_CHARACTERS = 160;
 const MAX_HEADING_BYTES = 512;
 const MAX_PENDING_LINE_CHARACTERS = 512;
@@ -22,7 +23,7 @@ export function projectProgressEntry(entry) {
   const summary = normalizeProgressHeading(entry.data.summary);
   const createdAt = new Date(entry.timestamp);
   if (!summary || Number.isNaN(createdAt.valueOf())) return undefined;
-  return { kind: "progress", id: entry.id, summary, createdAt: createdAt.toISOString() };
+  return { kind: "progress", id: entry.id, summary, createdAt: createdAt.toISOString(), ...birthOrder(entry.data.harnessBirth) };
 }
 
 function headingFromLine(line) {

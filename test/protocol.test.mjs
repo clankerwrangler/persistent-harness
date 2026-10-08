@@ -181,3 +181,14 @@ test("notification list views are exact, bounded, and default to the compatible 
   for (const view of [null, "", "INBOX", "pending", [], {}, 1, true]) assert.throws(() => validateRequest(frame("list_notifications", { view })), /view/);
   for (const params of [{ view: "inbox", unknown: true }, { limit: 101 }, { limit: 0 }, { before: 0 }, { before: "42" }]) assert.throws(() => validateRequest(frame("list_notifications", params)), ProtocolError);
 });
+
+test("progress metadata is optional, exact, and bounded", () => {
+  const params = { entryId: "progress", summary: "Working", createdAt: "2026-01-01T00:00:00.000Z" };
+  const harnessBirth = { version: 1, createdAt: params.createdAt, sequence: 2 };
+  assert.deepEqual(validateRequest(frame("record_progress_entry", { ...params, harnessBirth })).params.harnessBirth, harnessBirth);
+  for (const invalid of [null, {}, { ...harnessBirth, version: 2 }, { ...harnessBirth, sequence: 0 },
+    { ...harnessBirth, sequence: Number.MAX_SAFE_INTEGER + 1 }, { ...harnessBirth, sequence: 1.5 },
+    { ...harnessBirth, createdAt: "yesterday" }, { ...harnessBirth, createdAt: "x".repeat(1024) }, { ...harnessBirth, secret: "extra" }]) {
+    assert.throws(() => validateRequest(frame("record_progress_entry", { ...params, harnessBirth: invalid })), /harnessBirth/);
+  }
+});
