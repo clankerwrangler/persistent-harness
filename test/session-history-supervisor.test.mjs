@@ -3,7 +3,9 @@ import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
+import { setTimeout as sleep } from "node:timers/promises";
 import { HarnessClient, HarnessRequestError } from "../src/client.mjs";
+import { SessionHistoryIndex } from "../src/session-history-index.mjs";
 import { HarnessSupervisor } from "../src/supervisor.mjs";
 
 const launch = { model: null, thinking: { requested: null, resolved: null, source: "settings" }, capabilities: [] };
@@ -181,4 +183,102 @@ test("derived runtime and close failures are generic to agents and never mask co
   assert(errors.some((message) => message.includes("private-transcript.jsonl")), "internal details belong only in server logs");
   await supervisor.stop();
   assert(errors.some((message) => message.includes("injected close failure")));
+});
+
+
+const historySearch = { operation: "search", sessionId: "target", query: "needle", kind: "any", includeDeleted: false,
+  includeCurrent: false, roles: ["user", "assistant"], limit: 1, sort: "newest", snippetChars: 80 };
+async function ownedHistoryFixture(t, index, options = {}) {
+  const root = await mkdtemp(path.join(os.tmpdir(), "hist-owner-"));
+  const supervisor = new HarnessSupervisor({ socketPath: path.join(root, "s.sock"), databasePath: path.join(root, "state", "h.sqlite"),
+    pidPath: path.join(root, "s.pid"), sessionHistoryIndex: index, actorInactivityMs: 0, logger: { error() {} },
+    actorFactory() { throw new Error("history must not start an actor"); }, ...options });
+  await supervisor.start(); const clients = [];
+  t.after(async () => { for (const client of clients) await client.stop(); await supervisor.stop(); await rm(root, { recursive: true, force: true }); });
+  for (const id of ["caller-a", "caller-b", "target"]) supervisor.store.createRoot({ sessionId: id, sessionFile: path.join(root, `${id}.jsonl`),
+    cwd: root, repositoryRoot: null, name: id, actorToken: `token-${id}`, launch }, 1);
+  for (const id of ["caller-a", "caller-b"]) {
+    const client = new HarnessClient({ socketPath: supervisor.socketPath, heartbeatMs: 0 }); clients.push(client);
+    await client.start({ registrationType: "register_actor", sessionId: id, sessionFile: path.join(root, `${id}.jsonl`),
+      cwd: root, repositoryRoot: null, actorToken: `token-${id}`, actorGeneration: 1 });
+  }
+  return { supervisor, clients };
+}
+
+test("history disconnect aborts and drains only its caller while queued callers and metadata remain usable", async (t) => {
+  const entered = Promise.withResolvers(), aborted = Promise.withResolvers(), release = Promise.withResolvers();
+  let refreshes = 0, searches = 0, settled = false, active = 0;
+  const index = {
+    async refresh(sessions, { signal }) {
+      assert.equal(active++, 0, "one owner spans refresh and hydration");
+      const call = ++refreshes;
+      try {
+        if (call === 1) {
+          entered.resolve(); signal.addEventListener("abort", () => aborted.resolve(), { once: true });
+          await release.promise; signal.throwIfAborted();
+        }
+        return { errors: [] };
+      } finally { if (call === 1) { settled = true; active--; } }
+    },
+    async search({ signal }) { signal.throwIfAborted(); searches++; active--; return { matches: [], truncated: false }; },
+    close() { assert.equal(active, 0); },
+  };
+  const { clients: [a, b] } = await ownedHistoryFixture(t, index);
+  t.after(() => release.resolve());
+  const first = a.request("session_history", historySearch).catch(error => error);
+  await entered.promise;
+  const second = b.request("session_history", historySearch);
+  const start = performance.now();
+  const listed = await b.request("session_history", { operation: "list", kind: "any", includeDeleted: false, includeCurrent: false, limit: 10 });
+  assert.equal(listed.results.length, 2); assert(performance.now() - start < 1000, "metadata does not queue behind history I/O");
+  await a.stop(); await aborted.promise; assert.equal(settled, false); assert.equal(refreshes, 1);
+  release.resolve(); assert(await first instanceof Error);
+  assert.equal((await second).complete, true); assert.equal(refreshes, 2); assert.equal(searches, 1); assert.equal(settled, true);
+});
+
+for (const cause of ["deadline", "stop"]) test(`history ${cause} cancels work and drains before index close`, async (t) => {
+  const entered = Promise.withResolvers(), aborted = Promise.withResolvers(), release = Promise.withResolvers();
+  let settled = false, closed = false, searches = 0;
+  const index = {
+    async refresh(sessions, { signal }) {
+      entered.resolve(); signal.addEventListener("abort", () => aborted.resolve(), { once: true });
+      try { await release.promise; signal.throwIfAborted(); return { errors: [] }; }
+      finally { settled = true; }
+    },
+    async search() { searches++; return { matches: [], truncated: false }; },
+    close() { assert.equal(settled, true); closed = true; },
+  };
+  const { supervisor, clients: [client] } = await ownedHistoryFixture(t, index, { sessionHistoryTimeoutMs: cause === "deadline" ? 40 : 25000 });
+  t.after(() => release.resolve());
+  const response = client.request("session_history", historySearch).catch(error => error);
+  await entered.promise;
+  const stop = cause === "stop" ? supervisor.stop() : null;
+  await aborted.promise; assert.equal(closed, false); assert.equal(settled, false);
+  release.resolve(); const result = await response;
+  assert(result instanceof Error, "cancellation is never a complete or partial empty success");
+  if (cause === "deadline") assert.equal(result.code, "session_history_unavailable");
+  await (stop ?? supervisor.stop()); assert.equal(closed, true); assert.equal(searches, 0);
+});
+
+
+test("concurrent callers cannot mix a changed source with an earlier query's citations", async (t) => {
+  const entered = Promise.withResolvers(), release = Promise.withResolvers(); let refreshes = 0;
+  class HeldIndex extends SessionHistoryIndex {
+    async refresh(sources, options) {
+      const result = await super.refresh(sources, options);
+      if (++refreshes === 1) { entered.resolve(); await release.promise; }
+      return result;
+    }
+  }
+  const { supervisor, clients: [a, b] } = await ownedHistoryFixture(t, null, { sessionHistoryIndexFactory: options => new HeldIndex(options) });
+  t.after(() => release.resolve());
+  const sessionFile = supervisor.store.getSession("target").sessionFile;
+  const header = { type: "session", version: 3, id: "target", timestamp: "2026-01-01T00:00:00Z", cwd: path.dirname(sessionFile) };
+  const entry = id => ({ type: "message", id, parentId: null, timestamp: "2026-01-01T00:00:00Z", message: { role: "user", content: "needle" } });
+  await writeFile(sessionFile, [header, entry("old")].map(JSON.stringify).join("\n") + "\n");
+  const old = a.request("session_history", historySearch).catch(error => error); await entered.promise;
+  const next = b.request("session_history", historySearch);
+  await writeFile(sessionFile, [header, entry("new")].map(JSON.stringify).join("\n") + "\n");
+  release.resolve(); assert.equal((await old).code, "session_history_unavailable");
+  const result = await next; assert.equal(result.complete, true); assert.deepEqual(result.results.map(row => row.citation), [{ sessionId: "target", entryId: "new" }]);
 });

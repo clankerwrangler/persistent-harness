@@ -126,3 +126,14 @@ real Node processes for unsafe-path rejection, operator controls, same-length
 source changes, normal exit writes, and concurrent fresh evaluation. A supervisor
 regression holds both worker close and startup to verify disposal ordering; stock
 worker, recovery, and Stop tests retain their existing runtime assertions.
+
+`SessionHistory` models independently cancelled callers, serialized history
+ownership, verified canonical/receipt dependency versions, atomic publication,
+citation-version consistency, and shutdown after drain. Its finite abstraction
+does not prove SHA-256 collision resistance, filesystem atomicity, or wall-clock
+latency. Reader/index tests cover partial lines, same-inode rewrites with and
+without growth, mixed ordinary/history readers, branch changes, bounded restart
+hydration, receipt ambiguity and receipt-only changes, and cancellation during
+prefix I/O and FTS transactions. Supervisor tests hold disconnect, deadline,
+shutdown, and competing source versions; a real Python skill-to-RPC test crosses
+the former three-second deadline without reviving a transcript actor.

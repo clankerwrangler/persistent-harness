@@ -58,6 +58,39 @@ Archive snapshots retain complete detached records, including opaque extension d
 
 The complete returned `{messages, outstanding, diagnostics}` view defaults to an aggregate 64 Mi UTF-16 string/key code-unit budget, with 2,000,000 visited values and depth 64 measured from that view's root, after summary metadata and ordinary-mode result ordering. The [process configuration](DEPENDENCIES.md#persistent-configuration) can select a materialized string budget from 64 Mi through 256 Mi code units. One value is captured before each projection and governs both the initial helper-output copy and the final complete view; archive-record and signature limits do not change. An archive's lifetime strings are not one model context, and these limits are not total-archive or heap-memory bounds. Oversized data is rejected, not truncated, skipped, or repaired.
 
+## Session-history retrieval
+
+Actor-authenticated `session_history` list, search, and open requests use the
+caller's existing family scope without starting transcript actors. List reads
+registry metadata. Search and open share one supervisor-owned history queue;
+each caller has an independent 25-second budget, including queue time, and a
+28-second client deadline. Disconnect, deadline, and shutdown abort further
+history work. Shutdown drains that work before closing the index and store.
+Other RPCs keep their existing deadlines and do not join this queue.
+
+`SessionHistoryIndex` is a disposable, contentless FTS5 index of active-branch
+user and assistant projections. Schema 3 stores canonical byte spans, entry and
+projected-text hashes, and hashed rendering dependencies for input receipts.
+It stores no raw transcript, image, tool, or receipt payloads. The directory is
+private (`0700`); database, WAL, and shared-memory files are `0600`.
+
+Changed sources verify the cached prefix with a bounded-buffer SHA-256 pass
+before parsing complete appended frames. This still reads O(archive bytes), but
+avoids reparsing unchanged historical JSON and rewriting unchanged FTS rows.
+Replacement, truncation, or a prefix mismatch rebuilds the projection. Partial
+lines, branch changes, and receipt-only changes remain part of the verified
+version. Ordinary shared-reader observations cannot certify new fingerprints.
+The existing reader cache remains session-bounded; complete index projections
+retain the eight-session/4 MiB cap.
+
+Cache misses and restarts hydrate only matched entries or open's bounded ordinal
+window. Source fingerprints, entry hashes, identity, role, receipt dependency
+hashes, and projected-text hashes must agree before a citation is returned.
+Receipt association still requires the existing complete canonical inventory;
+rendering metadata never establishes input delivery. Aborted or unstable work
+cannot publish partial rows. Cancelled requests fail rather than returning an
+empty successful search.
+
 ## Current-session projection service
 
 Explicit extensions that serialize canonical history can use the synchronous `pi.events` channel `persistent-harness:project-canonical-context:v1`. Emit a mutable request with `entries`, `leafId`, and `mode` (`"native"` or `"ordinary"`). The active actor returns `request.result` containing detached `messages`, `outstanding`, and `diagnostics`, or `request.error` with code `canonical_context_unavailable`. Missing service is not a successful projection.
