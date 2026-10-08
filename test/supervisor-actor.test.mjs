@@ -1,7 +1,7 @@
 
 import assert from "node:assert/strict";
 import { EventEmitter, once } from "node:events";
-import { appendFile, mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { appendFile, lstat, mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import net from "node:net";
 import os from "node:os";
 import path from "node:path";
@@ -834,11 +834,14 @@ test("existing root actors reconcile additions, hashes, removals, and invalid pa
   await writeGuidanceSkill(skillsPath, "alpha", "Alpha skill.");
   const socketPath = path.join(root, "run", "supervisor.sock");
   const actors = new Map();
-  let runtimeReady = true;
+  let runtimeReady = true, runtimeDeclines = 0;
+  let declineEntered = false; const declineRelease = Promise.withResolvers();
+  t.after(() => declineRelease.resolve());
   const supervisor = new HarnessSupervisor({
     socketPath, databasePath: path.join(root, "state", "harness.sqlite"), pidPath: path.join(root, "run", "supervisor.pid"),
     skillsPath, actorInactivityMs: 0, runtimeProvisioner: async () => {
-      if (!runtimeReady) throw new Error("Python runtime installation was not approved; provision the skill catalog first");
+      if (!runtimeReady) { declineEntered = true; await declineRelease.promise; runtimeDeclines++;
+        throw new Error("Python runtime installation was not approved; provision the skill catalog first"); }
       return { ready: true };
     },
     actorFactory: (options) => {
@@ -909,7 +912,12 @@ test("existing root actors reconcile additions, hashes, removals, and invalid pa
   await writeGuidanceSkill(skillsPath, "delta", "Requires a provisioned runtime.");
   const beforeProvision = actors.get(id)[4].actor;
   await client.request("submit_input", { sessionId: id, message: "before provisioning", behavior: "auto", clientRequestId: "skills-6" });
+  await eventually(() => declineEntered);
+  assert.equal((await client.request("get_status")).diagnostics.some((item) => item.code === "skill_catalog_not_ready"), false);
+  declineRelease.resolve();
   await eventually(() => beforeProvision.submits.some((item) => item.message.includes("before provisioning")));
+  // A prior delivery can consume the new input before its coalesced readiness wake finishes.
+  await eventually(() => runtimeDeclines > 0);
   assert.equal(actors.get(id).length, 5, "an unprovisioned catalog must not replace a working grant");
   assert((await client.request("get_status")).diagnostics.some((item) => item.code === "skill_catalog_not_ready"));
 
@@ -1703,4 +1711,43 @@ test("Fast mutation is serialized, durable before acknowledgement, target-scoped
   assert.equal((await client.request("get_session_inference", { sessionId: "fast-grandchild" })).selection.fastMode, true);
   const oldExpected = { ...cleared.selection }; delete oldExpected.fastMode;
   await assert.rejects(toggle(true, oldExpected), /fastMode/);
+});
+
+test("supervisor shares one private compile cache and drains workers and pending launches before disposal", { timeout: 15000, skip: typeof process.geteuid !== "function" }, async t => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "cc-owner-")), skillsPath = path.join(root, "skills");
+  await mkdir(skillsPath);
+  const saved = { NODE_COMPILE_CACHE: process.env.NODE_COMPILE_CACHE, NODE_DISABLE_COMPILE_CACHE: process.env.NODE_DISABLE_COMPILE_CACHE };
+  delete process.env.NODE_COMPILE_CACHE; delete process.env.NODE_DISABLE_COMPILE_CACHE;
+  const started = Promise.withResolvers(), exited = Promise.withResolvers(); const actors = [];
+  let closeCalls = 0, stopped = false;
+  class HeldCacheActor extends FakePiActor {
+    constructor(options) { super(options); this.cache = options.env.PI_HARNESS_ACTOR_COMPILE_CACHE;
+      assert.equal(options.env.NODE_COMPILE_CACHE, undefined); actors.push(this); }
+    async start() { this.isRunning = true; await started.promise;
+      return { sessionId: this.session.sessionId, sessionFile: this.session.sessionFile, isStreaming: false, model: null, thinkingLevel: "off" }; }
+    async close() { closeCalls++; await exited.promise; return super.close(); }
+  }
+  const socketPath = path.join(root, "s.sock");
+  const supervisor = new HarnessSupervisor({ socketPath, databasePath: path.join(root, "h.sqlite"), pidPath: path.join(root, "s.pid"),
+    skillsPath, actorInactivityMs: 0, actorFactory: options => new HeldCacheActor(options), runtimeProvisioner: async () => ({}),
+    logger: { error() {} }, processIdentityFactory: async pid => ({ version: 1, pid, processGroup: pid, startTime: "fake", ownerToken: "fake" }),
+    processTerminator: async () => ({ terminated: true }) });
+  let client;
+  t.after(async () => { started.resolve(); exited.resolve(); await client?.stop(); await supervisor.stop();
+    for (const [key, value] of Object.entries(saved)) { if (value === undefined) delete process.env[key]; else process.env[key] = value; }
+    await rm(root, { recursive: true, force: true }); });
+  await supervisor.start(); client = new HarnessClient({ socketPath, heartbeatMs: 0 });
+  await client.start({ registrationType: "register_client", clientInstanceId: "cache-drain" });
+  for (const sessionId of ["cache-a", "cache-b"]) supervisor.store.createRoot({ sessionId, sessionFile: path.join(root, sessionId + ".jsonl"),
+    cwd: root, repositoryRoot: null, name: sessionId, actorToken: sessionId, launch: {} });
+  const pending = ["cache-a", "cache-b"].map(sessionId => client.request("get_actor_state", { sessionId }).catch(() => {}));
+  await eventually(() => actors.length === 2 && actors.every(actor => actor.isRunning));
+  const cache = actors[0].cache; assert.equal(typeof cache, "string"); assert.equal(actors[1].cache, cache);
+  const info = await lstat(cache); assert.equal(info.mode & 0o7777, 0o700); assert.equal(info.uid, process.geteuid());
+  const stopping = supervisor.stop().then(() => { stopped = true; });
+  await eventually(() => closeCalls >= 2); assert.equal(stopped, false); assert((await lstat(cache)).isDirectory());
+  exited.resolve(); await eventually(() => actors.every(actor => !actor.isRunning));
+  assert.equal(stopped, false); assert((await lstat(cache)).isDirectory(), "Pending startup can still own module/exit work");
+  started.resolve(); await stopping; await Promise.all(pending);
+  await assert.rejects(lstat(cache), { code: "ENOENT" });
 });
