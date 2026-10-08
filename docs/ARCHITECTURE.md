@@ -12,6 +12,22 @@ Reuse stock Pi capabilities through public APIs and supported extension points b
 - `PythonKernel` owns the real interpreter, FIFO execution, and namespace checkpoint tail. A result can be delivered before its background save completes; the next Python operation and graceful shutdown still drain that tail.
 - Pi owns canonical JSONL session identities and public SDK data formats. The harness appends standard messages and versioned metadata through the one manager.
 
+The supervisor lazily owns one disposable Node compile-cache directory shared by
+its actors. The actor enables it before importing the SDK worker; tools and the
+supervisor do not enable it through this path. Node owns code/source/version
+invalidation, while each generation still creates fresh runtime objects and runs
+normal resource, model, credential, skill, session, and recovery validation. No
+session data or live runtime objects are cached. The first actor populates an empty
+cache, normally written at process exit; later actors can reuse compiled code.
+
+The directory is a real, effective-user-owned `0700` temporary directory. Setup,
+validation, or cleanup failures leave ordinary startup/shutdown intact. Shutdown
+removes only the original owned directory after actors and pending launches drain;
+uncertain writer exit leaves it in place. Abrupt supervisor loss can leave an
+orphan; there is no orphan sweep, eviction policy, or hard disk quota. A new
+supervisor starts with a new directory. Platforms without effective-UID validation
+skip this optimization. See [Node cache controls](DEPENDENCIES.md#node-compile-cache).
+
 These are same-user local processes, not a multi-tenant security boundary. The Python and shell capabilities execute with the service account's privileges.
 
 ## Extension prompt preparation

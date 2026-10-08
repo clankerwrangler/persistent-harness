@@ -50,6 +50,17 @@ The setting applies to helper-output messages and the complete returned projecti
 
 The zero-argument `getCanonicalContextStringCodeUnits()` export in `src/canonical-context.mjs` reports the effective process value. Configure the process environment, not only an in-process SDK loader's `env` object. Offline validators must receive the same explicit value; containers do not inherit it automatically. Seal that selection with the source/configuration receipt. Existing workers retain their environment until recreated through the [controlled update workflow](OPERATIONS.md#develop-and-promote-one-source-revision).
 
+### Node compile cache
+
+Actors use a supervisor-owned temporary Node compile cache by default; its
+[lifetime and fallback](ARCHITECTURE.md#owners) do not change session ownership.
+`NODE_DISABLE_COMPILE_CACHE=1` disables it. Use that setting when collecting precise
+V8 coverage: Node warns that cached functions can produce less precise coverage.
+An explicitly configured `NODE_COMPILE_CACHE` (including an empty value) takes
+precedence over the harness default. Node handles that setting normally; the
+harness neither repairs nor removes an operator-managed cache. The harness does
+not set `NODE_COMPILE_CACHE` for the supervisor or tool subprocesses.
+
 ## External extensions and clients
 
 `PI_HARNESS_ACTOR_EXTENSIONS` selects additional extension entry paths as a JSON array or a platform-delimited list. For example:

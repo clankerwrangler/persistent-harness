@@ -30,14 +30,24 @@ test("background completion monitor durably queues one follow-up and survives a 
   t.after(() => rm(directory, { recursive: true, force: true }));
   const id = "bg-0123456789ab";
   await createJob(directory, id);
-  const deliveries = [];
-  const monitor = new BackgroundCompletionMonitor({ directory, intervalMs: 100, dispatch: async (job) => { deliveries.push(job); return "sent"; } });
+  const deliveries = [], releaseDispatch = Promise.withResolvers();
+  t.after(() => releaseDispatch.resolve());
+  const monitor = new BackgroundCompletionMonitor({ directory, intervalMs: 100, dispatch: async (job) => {
+    deliveries.push(job); await releaseDispatch.promise; return "sent";
+  } });
   monitor.start(); t.after(() => monitor.stop());
   await eventually(() => deliveries.length === 1);
   assert.equal(deliveries[0].sessionId, "session-a");
   assert.equal(deliveries[0].message, backgroundCompletionMessage(deliveries[0]));
   assert.match(deliveries[0].message, /completed successfully/);
-  assert.deepEqual(JSON.parse(await readFile(path.join(directory, id, "notification.json"), "utf8")).state, "sent");
+  const notification = path.join(directory, id, "notification.json");
+  await assert.rejects(readFile(notification), { code: "ENOENT" });
+  releaseDispatch.resolve();
+  await eventually(async () => {
+    try { await readFile(notification); return true; }
+    catch (error) { if (error.code === "ENOENT") return false; throw error; }
+  });
+  assert.deepEqual(JSON.parse(await readFile(notification, "utf8")).state, "sent");
   await new Promise((resolve) => setTimeout(resolve, 250));
   assert.equal(deliveries.length, 1);
 

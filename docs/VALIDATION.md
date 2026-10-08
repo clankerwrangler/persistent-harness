@@ -117,3 +117,12 @@ supervisor reconciliation fails its recovery invariant. Reporter tests cover
 appends during registration, complete-history ambiguity, and offline reporting;
 a real stock-worker test requires native, legacy, and custom historical pending
 receipts to complete through supervisor reconciliation without reinjection.
+
+`ActorCompileCache` checks one supervisor cache owner, cleanup after pending
+launches and writers drain, generation-local runtime identity, unchanged readiness
+validation, source-current loads, and disabled/unavailable fallback. Node's cache
+format and source/version validation are abstracted, not proved. Helper tests use
+real Node processes for unsafe-path rejection, operator controls, same-length
+source changes, normal exit writes, and concurrent fresh evaluation. A supervisor
+regression holds both worker close and startup to verify disposal ordering; stock
+worker, recovery, and Stop tests retain their existing runtime assertions.

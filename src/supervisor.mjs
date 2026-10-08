@@ -4,6 +4,7 @@ import net from "node:net";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { createActorCompileCache } from "./actor-compile-cache.mjs";
 import { resolveChildLaunchPolicy } from "./child-policy.mjs";
 import { createContextFork } from "./context-fork.mjs";
 import {
@@ -345,6 +346,7 @@ export class HarnessSupervisor {
   #startQueue = [];
   #startingActors = new Set();
   #activeStarts = 0;
+  #actorCompileCache;
   #drainingStarts = false;
   #launchPromises = new Map();
   #passivationTimers = new Map();
@@ -1708,9 +1710,11 @@ export class HarnessSupervisor {
     if (!session.sessionFile) throw new Error(`session ${session.sessionId} has no canonical Pi session file`);
     args.push("--session", session.sessionFile); return args;
   }
-  #actorEnv(session) {
+  #actorEnv(session, compileCache) {
     const env = { ...process.env, PI_HARNESS_SOCKET: this.socketPath, PI_HARNESS_AUTO_START: "0", PI_HARNESS_ACTOR_ID: session.sessionId, PI_HARNESS_ACTOR_TOKEN: session.actorToken, PI_HARNESS_ACTOR_GENERATION: String(session.actorGeneration) };
     delete env.PI_SESSION_ID; delete env.PI_SESSION_FILE;
+    delete env.PI_HARNESS_ACTOR_COMPILE_CACHE;
+    if (compileCache) env.PI_HARNESS_ACTOR_COMPILE_CACHE = compileCache.directory;
     env.PI_HARNESS_ACTOR_SKILL_GRANT = sessionSidecarPaths(session.sessionFile).skillGrantPath;
     return env;
   }
@@ -1725,8 +1729,9 @@ export class HarnessSupervisor {
       this.#broadcastNavigator("actor_error");
       throw error;
     }
+    const compileCache = await (this.#actorCompileCache ??= createActorCompileCache());
     const session = this.store.getActorLaunch(sessionId); if (!session || session.lifecycle !== "starting" || this.store.isSessionDeleting(sessionId)) return;
-    const worker = this.actorFactory({ command: process.execPath, args: [STOCK_ACTOR_WORKER, ...this.#actorArgs(session)], cwd: session.cwd, env: { ...this.#actorEnv(session), PI_HARNESS_PI_COMMAND: this.piCommand }, requestTimeoutMs: this.actorStartupTimeoutMs, promptPreflightTimeoutMs: this.actorPromptPreflightTimeoutMs,
+    const worker = this.actorFactory({ command: process.execPath, args: [STOCK_ACTOR_WORKER, ...this.#actorArgs(session)], cwd: session.cwd, env: { ...this.#actorEnv(session, compileCache), PI_HARNESS_PI_COMMAND: this.piCommand }, requestTimeoutMs: this.actorStartupTimeoutMs, promptPreflightTimeoutMs: this.actorPromptPreflightTimeoutMs,
       shutdownTimeoutMs: this.actorShutdownTimeoutMs, session });
     const record = { worker, generation: session.actorGeneration, rootOutputSession: Object.freeze({ sessionId: session.sessionId, kind: session.kind, depth: session.depth }), expectedLifecycle: null, exitError: null, eventSeq: 0, eventRing: [], eventRingBytes: 0, progressSummary: undefined, progressTurnId: null,
       skillGrantFingerprint: skillGrant.fingerprint, skillGrantSkills: skillGrant.skills, skillRefreshPending: false,
@@ -2433,6 +2438,10 @@ export class HarnessSupervisor {
       await Promise.all([...this.#actors.keys()].map((id) => this.#stopActor(id, "passivated"))); await Promise.all([...this.#launchPromises.values()]);
       await Promise.allSettled([...this.#actorInputWakes.values()].map((wake) => wake.done));
       await Promise.allSettled([...this.#actorReadyPromises.values()]);
+      // A failed close can leave a writer; do not remove its cache.
+      if ([...this.#actors.values()].every(({ worker }) => worker.isRunning === false)) {
+        await (await this.#actorCompileCache)?.dispose();
+      }
       for (const state of this.#sockets) state.socket.destroy();
       if (this.#server) await new Promise((resolve) => this.#server.close(resolve)); this.#server = undefined;
       if (this.#ownedSocketPath) try { await unlink(this.#ownedSocketPath); } catch {}
