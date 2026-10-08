@@ -6,6 +6,7 @@ import path from "node:path";
 import test from "node:test";
 import { HarnessClient } from "../src/client.mjs";
 import { HarnessSupervisor } from "../src/supervisor.mjs";
+import { PiSessionActor } from "../src/session-actor.mjs";
 import { actorInputCustomPayload } from "../src/protocol.mjs";
 import { normalizeInputImages } from "../src/input-images.mjs";
 
@@ -134,4 +135,64 @@ test("real reader and supervisor recover historical inputs, skip only ambiguity,
   assert.equal(actor.closes, 0); assert.equal(actors.length, 1); assert.equal(supervisor.store.getSession(sessionId).lifecycle, "resident");
   const log = await readFile(path.join(directory, "supervisor.jsonl"), "utf8");
   assert.match(log, /actor_input_unresolved/); assert.doesNotMatch(log, /Ambiguous exact body|Scheduled original work|Completed original work|"digest"/);
+});
+
+test("real worker startup leaves historical pending proof to supervisor reconciliation without replay", { timeout: 30000 }, async t => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), "receipt-worker-startup-"));
+  const agentDir = path.join(directory, "agent"), skillsPath = path.join(directory, "skills");
+  await mkdir(agentDir); await mkdir(skillsPath);
+  const previous = process.env.PI_CODING_AGENT_DIR; process.env.PI_CODING_AGENT_DIR = agentDir;
+  const ready = Promise.withResolvers(), actors = [], completions = [];
+  let client, started = false;
+  const socketPath = path.join(directory, "s.sock");
+  const supervisor = new HarnessSupervisor({ socketPath, databasePath: path.join(directory, "h.sqlite"),
+    pidPath: path.join(directory, "s.pid"), skillsPath, actorInactivityMs: 0,
+    actorExtensionPaths: [path.join(import.meta.dirname, "fixtures/fake-provider.ts")],
+    actorFactory: options => {
+      const actor = new PiSessionActor(options), start = actor.start.bind(actor);
+      actor.start = async () => { await ready.promise; return start(); };
+      actor.submit = async () => assert.fail("Canonical or ambiguous history must never be replayed");
+      const request = actor.request.bind(actor);
+      actor.request = (type, ...args) => { assert.notEqual(type, "prompt", "Historical internal input must not be reinjected"); return request(type, ...args); };
+      actors.push(actor); return actor;
+    } });
+  t.after(async () => {
+    ready.resolve(); await client?.stop(); await supervisor.stop();
+    if (previous === undefined) delete process.env.PI_CODING_AGENT_DIR; else process.env.PI_CODING_AGENT_DIR = previous;
+    await rm(directory, { recursive: true, force: true });
+  });
+  await supervisor.start();
+  const markStarted = supervisor.store.markActorStarted.bind(supervisor.store);
+  supervisor.store.markActorStarted = (...args) => { const result = markStarted(...args); started = true; return result; };
+  const complete = supervisor.store.completeActorInput.bind(supervisor.store);
+  supervisor.store.completeActorInput = (...args) => { completions.push({ inputId: args[0], started }); return complete(...args); };
+  client = new HarnessClient({ socketPath, heartbeatMs: 0, requestTimeoutMs: 20000 });
+  await client.start({ registrationType: "register_client", clientInstanceId: "real-startup-proof" });
+  const { admission } = await client.request("create_root", { cwd: directory, repositoryRoot: null, name: "Synthetic startup proof",
+    provider: "harness-fake", model: "fake-model", thinkingLevel: null });
+  const sessionId = admission.sessionId, file = supervisor.store.getSession(sessionId).sessionFile;
+  const prior = (await readFile(file, "utf8")).trim().split("\n").map(JSON.parse);
+  const timestamp = new Date().toISOString(); let parentId = prior.at(-1).type === "session" ? null : prior.at(-1).id;
+  const reserve = (inputId, extra = {}) => supervisor.store.createActorInput(sessionId, { inputId, message: "Synthetic original", ...extra });
+  const native = reserve("native"), legacy = reserve("legacy", { source: "cron", origin: { jobId: "job", runId: "run" } });
+  const custom = reserve("custom", { source: "background", origin: { jobId: "job" } }), ambiguous = reserve("ambiguous");
+  const entries = [];
+  const append = (id, fields) => { entries.push({ id, parentId, timestamp, ...fields }); parentId = id; };
+  append("native-entry", { type: "message", message: { role: "user", id: native.inputId, content: "Synthetic expanded body", timestamp: Date.now() } });
+  append("legacy-entry", { type: "message", message: { role: "user", content: legacy.message + `\n\n<!-- persistent-harness-input:${legacy.inputId} -->`, timestamp: Date.now() } });
+  append("custom-entry", { type: "custom_message", ...actorInputCustomPayload(custom) });
+  for (const id of ["ambiguous-a", "ambiguous-b"]) append(id, { type: "message", message: { role: "user", id: ambiguous.inputId, content: ambiguous.message, timestamp: Date.now() } });
+  // Simulate transport acceptance followed by a lost receipt, before this writer starts.
+  for (const input of [native, legacy, custom, ambiguous]) supervisor.store.markActorInputAccepted(input.inputId, sessionId, admission.actorGeneration);
+  await appendFile(file, entries.map(JSON.stringify).join("\n") + "\n");
+  ready.resolve(); await client.request("get_actor_state", { sessionId });
+  await eventually(() => [native, legacy, custom].every(input => supervisor.store.getActorInput(input.inputId, sessionId).state === "completed"));
+  for (const input of [native, legacy, custom]) assert.equal(supervisor.store.getActorInput(input.inputId, sessionId).entryId, `${input.inputId}-entry`);
+  assert.equal(supervisor.store.getActorInput(ambiguous.inputId, sessionId).deliveredAt, null);
+  assert.equal(supervisor.store.getActorInput(ambiguous.inputId, sessionId).state, "accepted");
+  assert.deepEqual(completions, [native, legacy, custom].map(input => ({ inputId: input.inputId, started: true })),
+    "Supervisor pending reconciliation, not the actor's completed-history startup sweep, owns historical proof");
+  assert.equal(actors.length, 1); assert.equal(supervisor.store.getSession(sessionId).lifecycle, "resident");
+  const canonical = (await readFile(file, "utf8")).trim().split("\n").map(JSON.parse);
+  for (const entry of entries) assert.equal(canonical.filter(row => row.id === entry.id).length, 1);
 });

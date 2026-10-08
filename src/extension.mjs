@@ -361,6 +361,7 @@ export function createActorInputDelivery({ pi, getClient, getContext }) {
       const inputId = inputIdForEntry(entry);
       if (typeof inputId === "string" && inputId && inputId.length <= 128) pendingReports.add(inputId);
     }
+    if (!pendingReports.size) return;
     const receipts = new Map();
     for (const inputId of pendingReports) {
       const client = getClient(); if (!client?.isConnected) return;
@@ -408,7 +409,12 @@ export function createActorInputDelivery({ pi, getClient, getContext }) {
   return {
     handle: deliver,
     flush,
-    reset() { enqueued.clear(); pendingReports.clear(); cursor = { index: 0, anchor: null }; },
+    reset(entries) {
+      enqueued.clear(); pendingReports.clear();
+      // The supervisor reconciles durable pending inputs against full canonical
+      // history before submission. This actor reports only subsequent appends.
+      cursor = appendedSessionEntries(entries).cursor;
+    },
   };
 }
 
@@ -997,10 +1003,10 @@ ${catalog.diagnostics.map((item) => item.error).join("\n")}`);
     namespaceRecovery = undefined;
     if (client) await client.stop();
     activeContext = ctx;
-    actorInputs.reset();
     registerPythonTool(ctx.model);
     enforceHarnessTools(ctx.model);
     const entries = ctx.sessionManager.getEntries();
+    actorInputs.reset(entries);
     knownDeliveredIds = deliveredMessageIds(entries);
     persistedDeliveredIds = new Set(knownDeliveredIds);
     knownUsageEntryIds = recordedUsageEntryIds(entries);

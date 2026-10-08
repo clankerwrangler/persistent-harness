@@ -75,6 +75,15 @@ supervisor shutdown drain or cancel owned wakes before releasing their state. Re
 from gracefully passivated sessions; explicitly stopped sessions remain stopped.
 Canonical delivery evidence and ambiguous-input replay guards remain authoritative.
 
+Before submitting pending input, the supervisor reconciles its receipt against
+complete canonical history, including inactive branches. Proven incorporation
+completes the receipt without replay; ambiguous incorporation remains pending.
+Actor startup takes an append cursor instead of querying every historical input
+receipt again. Subsequent actor appends still use full historical evidence for
+identity resolution and the supervisor verifies the exact entry before delivery.
+This avoids duplicate startup work without changing compaction, delivery, or
+provider-request boundaries.
+
 ### User location attachment
 
 `submit_input` accepts optional `location` on a genuine user message. It contains
