@@ -372,3 +372,215 @@ SkillResult({}, {"application/json": [1e20] * 170000, "image/png": "${PNG_A}", "
   assert.equal(encodeFrame(legacyTool).length > 0, true);
   assert.deepEqual(legacyTool.content.filter(part => part.type === "image").map(part => part.data), [PNG_A]);
 });
+
+
+// Ownership checks run inside the actual interpreter: wire equality alone
+// cannot distinguish twenty equal retained strings from one shared value.
+test("actual MIME history shares repeated display and final formatting without changing Out", { timeout: 60_000 }, async (t) => {
+  const kernel = await fixture(t);
+  const run = async (code) => {
+    const result = await kernel.execute(code);
+    assert.equal(result.ok, true, JSON.stringify(result));
+    return result;
+  };
+  await run(`from IPython.display import Image as _Image, display as _display
+import base64 as _base64, gc as _gc, weakref as _weakref
+_image = _Image(data=_base64.b64decode("${PNG_A}") + b"x" * 65536)
+def _image_records():
+    return [o for outputs in get_ipython().history_manager.outputs.values() for o in outputs if "image/png" in o.bundle]
+`);
+  let wire;
+  for (let i = 0; i < 6; i++) {
+    const result = await run("_display(_image)");
+    wire ??= result.mime["image/png"];
+    assert.equal(result.mime["image/png"], wire);
+    assert.equal(result.truncated, false);
+  }
+  for (let i = 0; i < 6; i++) {
+    const result = await run("_image");
+    assert.equal(result.mime["image/png"], wire);
+    assert.equal(result.truncated, false);
+  }
+  await run(`def _check_history():
+    records = _image_records()
+    assert len(records) == 12
+    assert len({id(o) for o in records}) == 12
+    assert len({id(o.bundle) for o in records}) == 12
+    assert len({id(o.bundle["image/png"]) for o in records}) == 1
+    assert len({id(o.bundle["text/plain"]) for o in records}) == 1
+    assert [o.output_type for o in records] == ["display_data"] * 6 + ["execute_result"] * 6
+    assert len(Out) == 6 and all(v is _image for v in Out.values())
+    assert _ is _image and __ is _image and ___ is _image
+    assert all(get_ipython().user_ns["_" + str(n)] is v for n, v in Out.items())
+    for n, text in get_ipython().history_manager.output_hist_reprs.items():
+        assert text is get_ipython().history_manager.outputs[n][-1].bundle["text/plain"]
+_check_history()
+_pool = get_ipython().display_pub.publish.__globals__["mime_history"]
+def _remove_first():
+    history = get_ipython().history_manager.outputs
+    first = _image_records()[0]
+    ref = _weakref.ref(first)
+    for outputs in history.values():
+        outputs[:] = [o for o in outputs if o is not first]
+    return ref
+_first = _remove_first()
+_gc.collect()
+assert _first() is None
+`);
+  await run("_display(_image)");
+  await run(`assert len({id(o.bundle["image/png"]) for o in _image_records()}) == 1
+_refs = [_weakref.ref(o) for o in _image_records()]
+get_ipython().history_manager.outputs.clear()
+_gc.collect()
+assert all(ref() is None for ref in _refs)
+assert _pool._buckets == {}
+assert len(Out) == 6 and _ is _image
+`);
+  // Truncation controls only transport. Full equal history values still share.
+  await run('_oversized = _Image(data=_image.data + b"y" * 900000)');
+  for (let i = 0; i < 3; i++) {
+    const result = await run("_display(_oversized)");
+    assert.equal(result.truncated, true);
+    assert.deepEqual(images(result), []);
+  }
+  await run(`assert len(_image_records()) == 3
+assert len({id(o.bundle["image/png"]) for o in _image_records()}) == 1
+assert len(_image_records()[0].bundle["image/png"]) > 1024 * 1024
+get_ipython().history_manager.outputs.clear()
+_gc.collect()
+assert _pool._buckets == {}
+`);
+});
+
+test("actual MIME history validates mutable bundles, collisions, exact types, and weak owner cleanup", { timeout: 60_000 }, async (t) => {
+  const kernel = await fixture(t);
+  const result = await kernel.execute(`import gc as _gc, weakref as _weakref
+_pub = get_ipython().display_pub
+_pool = _pub.publish.__globals__["mime_history"]
+_history = get_ipython().history_manager.outputs
+# Force even unlike types and content into one digest bucket.
+_original_signature = _pool._signature
+_pool._signature = lambda v: ("collision", b"fixed") if type(v) is str or type(v) is bytes else None
+class _String(str):
+    def __eq__(self, other):
+        raise AssertionError("str subclass must not be compared")
+class _Bytes(bytes):
+    def __eq__(self, other):
+        raise AssertionError("bytes subclass must not be compared")
+def _fresh():
+    return "".join(["A" * 5000, "\\ud800"])
+def _publish():
+    data = {"application/x-string": _fresh(), "application/x-bytes": bytes(bytearray(b"A" * 5000)),
+            "application/json": [1, {"mutable": True}], "application/x-subclass": _String("subclass"),
+            "application/x-byte-subclass": _Bytes(b"subclass")}
+    _pub.publish(data)
+    owner = _history[get_ipython().execution_count - 1][-1]
+    assert owner.bundle is data
+    return owner
+try:
+    def _check():
+        a, b = _publish(), _publish()
+        assert a is not b and a.bundle is not b.bundle
+        assert a.bundle["application/x-string"] is b.bundle["application/x-string"]
+        assert a.bundle["application/x-bytes"] is b.bundle["application/x-bytes"]
+        assert a.bundle["application/json"] is not b.bundle["application/json"]
+        assert a.bundle["application/x-subclass"] is not b.bundle["application/x-subclass"]
+        assert a.bundle["application/x-byte-subclass"] is not b.bundle["application/x-byte-subclass"]
+        original_bundle = a.bundle
+        a.bundle = {"changed": "different" * 1000}
+        c = _publish()
+        assert c.bundle["application/x-string"] is b.bundle["application/x-string"]
+        assert c.bundle["application/x-bytes"] is b.bundle["application/x-bytes"]
+        del b.bundle["application/x-string"]
+        d = _publish()
+        assert d.bundle["application/x-string"] is c.bundle["application/x-string"]
+        assert original_bundle["application/x-string"] is c.bundle["application/x-string"]
+        # Different content survives a forced collision byte for byte.
+        unique = {"application/x-string": "unique" * 5000, "application/x-bytes": b"unique" * 5000}
+        _pub.publish(unique)
+        assert unique == {"application/x-string": "unique" * 5000, "application/x-bytes": b"unique" * 5000}
+        assert type(d.bundle["application/x-string"]) is str
+        assert type(d.bundle["application/x-bytes"]) is bytes
+        # Deletion and non-dict public replacement must not retain old payloads.
+        a.bundle.clear()
+        b.bundle = None
+        return [_weakref.ref(o) for outputs in _history.values() for o in outputs]
+    _refs = _check()
+    _history.clear()
+    _gc.collect()
+    assert all(ref() is None for ref in _refs)
+    assert _pool._buckets == {}
+    _pool._signature = _original_signature
+    def _normal_mutation():
+        a, b = _publish(), _publish()
+        old = b.bundle["application/x-string"]
+        a.bundle = {"application/x-string": "changed" * 1000}
+        c = _publish()
+        assert c.bundle["application/x-string"] is old
+        assert a.bundle["application/x-string"] == "changed" * 1000
+        b.bundle.clear()
+        c.bundle = None
+        d = _publish()
+        assert d.bundle["application/x-string"] == old
+        assert d.bundle["application/x-string"] is not old
+        # Old owners have no matching current value under the original digest.
+        signature = _pool._signature(old)
+        assert all(ref() is d for ref in _pool._buckets[signature].values())
+        return [_weakref.ref(o) for outputs in _history.values() for o in outputs]
+    _refs = _normal_mutation()
+    _history.clear()
+    _gc.collect()
+    assert all(ref() is None for ref in _refs)
+    assert _pool._buckets == {}
+    # Repeated allocation/collection must not accumulate registration metadata.
+    for _iteration in range(20):
+        _publish()
+        _history.clear()
+        _gc.collect()
+        assert _pool._buckets == {}
+    from concurrent.futures import ThreadPoolExecutor as _Threads
+    def _thread_publish(unused):
+        _pub.publish({"application/x-string": _fresh()})
+    with _Threads(max_workers=4) as _threads:
+        list(_threads.map(_thread_publish, range(32)))
+    assert len({id(o.bundle["application/x-string"]) for outputs in _history.values() for o in outputs}) == 1
+    _history.clear()
+    _gc.collect()
+    assert _pool._buckets == {}
+finally:
+    _pool._signature = _original_signature
+`);
+  assert.equal(result.ok, true, JSON.stringify(result));
+});
+
+test("actual MIME history preserves logger, repr history, and mutable bundle ownership", { timeout: 30_000 }, async (t) => {
+  const kernel = await fixture(t);
+  const result = await kernel.execute(`_shell = get_ipython()
+_hook = _shell.displayhook
+_calls = []
+_logger = _shell.logger
+_log_write, _log_output = _logger.log_write, _logger.log_output
+_shared = [1, {"mutable": True}]
+_bundle = {"text/plain": "logger-text", "application/json": _shared}
+def _write(text, kind):
+    _calls.append((text, kind))
+    # A logger can itself publish. The index must track the execute_result
+    # record, not whichever record happens to be last after logging returns.
+    _shell.display_pub.publish({"application/json": ["nested"]})
+try:
+    _logger.log_output = True
+    _logger.log_write = _write
+    _hook.log_output(_bundle)
+    _hook.log_output({"application/json": _shared})
+    assert _calls == [("logger-text", "output")]
+    assert _shell.history_manager.output_hist_reprs[_hook.prompt_count] is _bundle["text/plain"]
+    assert any(o.output_type == "execute_result" and o.bundle is _bundle
+               for outputs in _shell.history_manager.outputs.values() for o in outputs)
+    assert _bundle["application/json"] is _shared
+    _shared.append(2)
+    assert _bundle["application/json"][-1] == 2
+finally:
+    _logger.log_write, _logger.log_output = _log_write, _log_output
+`);
+  assert.equal(result.ok, true, JSON.stringify(result));
+});

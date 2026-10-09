@@ -24,7 +24,7 @@ from IPython.core.interactiveshell import InteractiveShell
 from IPython.core.displayhook import DisplayHook
 from IPython.core.formatters import BaseFormatter, DisplayFormatter
 from IPython.core.displaypub import DisplayPublisher
-from IPython.core.history import HistoryOutput
+from _mime_history import MimeHistory
 
 from _persistent_harness import SkillProxy, bootstrap_skills, configure_control, _execution_id
 
@@ -42,6 +42,7 @@ control = os.fdopen(3, "r+b", buffering=0)
 configure_control(control)
 active_output_id = None
 max_output_frame_bytes = config.get("maxOutputFrameBytes", 1024 * 1024)
+mime_history = MimeHistory()
 
 
 def emit(frame):
@@ -138,7 +139,7 @@ class ProtocolStream(io.TextIOBase):
 class ProtocolDisplayPublisher(DisplayPublisher):
     def publish(self, data, metadata=None, source=None, *, transient=None, update=False, **kwargs):
         self.shell.history_manager.outputs[self.shell.execution_count - 1].append(
-            HistoryOutput(output_type="display_data", bundle=data))
+            mime_history.record("display_data", data))
         for mime, handler in getattr(self.shell, "mime_renderers", {}).items():
             if mime in data:
                 handler(data[mime], (metadata or {}).get(mime))
@@ -176,6 +177,18 @@ class ProtocolDisplayHook(DisplayHook):
 
     def write_format_data(self, format_dict, md_dict=None):
         publish_mime(format_dict, explicit=False)
+
+    def log_output(self, format_dict):
+        # Keep IPython's history, logger, and text-repr semantics together so
+        # the weak index observes the exact stored record, even with a
+        # reentrant logger. Out and underscore ownership stay in DisplayHook.
+        self.shell.history_manager.outputs[self.prompt_count].append(
+            mime_history.record("execute_result", format_dict))
+        if "text/plain" not in format_dict:
+            return
+        if self.shell.logger.log_output:
+            self.shell.logger.log_write(format_dict["text/plain"], "output")
+        self.shell.history_manager.output_hist_reprs[self.prompt_count] = format_dict["text/plain"]
 
     def finish_displayhook(self):
         sys.stdout.flush()
