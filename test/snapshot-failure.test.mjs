@@ -462,6 +462,7 @@ import sys
 from pathlib import Path
 
 kernel_path, fixture_root = map(Path, sys.argv[1:])
+sys.path.insert(0, str(kernel_path.parent))
 tree = ast.parse(kernel_path.read_text("utf-8"), filename=str(kernel_path))
 constant_names = {"SNAPSHOT_VERSION", "PER_VARIABLE_LIMIT", "TOTAL_SNAPSHOT_LIMIT", "MANIFEST_LIMIT"}
 nodes = []
@@ -599,6 +600,7 @@ import sys
 from pathlib import Path
 
 kernel_path, fixture_root = map(Path, sys.argv[1:])
+sys.path.insert(0, str(kernel_path.parent))
 tree = ast.parse(kernel_path.read_text("utf-8"), filename=str(kernel_path))
 constant_names = {"SNAPSHOT_VERSION", "PER_VARIABLE_LIMIT", "TOTAL_SNAPSHOT_LIMIT", "MANIFEST_LIMIT"}
 nodes = []
