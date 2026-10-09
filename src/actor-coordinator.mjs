@@ -49,6 +49,7 @@ export class ActorCoordinator {
     this.manager = session.sessionManager;
     this.birthClock = new ConversationBirthClock(this.manager.getBranch());
     this.activeTools = new Set(); this.queue = []; this.tasks = new Map(); this.seenCalls = new Set();
+    // Undelivered turn_end results belong to the logical run, not an inference flight.
     this.completedResults = [];
     this.toolTail = Promise.resolve(); this.commitTail = Promise.resolve();
     this.drivePromise = null; this.running = false; this.closed = false; this.stopping = false; this.compacting = false;
@@ -622,6 +623,10 @@ export class ActorCoordinator {
   async settle() {
     if (this.tasks.size || this.flight || !this.running) return;
     await this.commitTail;
+    // Tasks can commit after abort or an earlier turn_end. Once all run work is
+    // fenced, no later turn can consume these originals; canonical clones remain.
+    // Release before asynchronous end hooks, including when a hook rejects.
+    this.completedResults.length = 0;
     await this.emit({ type: "agent_end", messages: this.manager.buildSessionProjection().messages });
     this.running = false; this.stopping = false;
     await this.emit({ type: "agent_settled" }); this.notifyIdle();
