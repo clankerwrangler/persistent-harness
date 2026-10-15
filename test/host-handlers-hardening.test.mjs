@@ -1,5 +1,7 @@
 import assert from "node:assert/strict";
-import { access, link, mkdir, mkdtemp, readFile, rename, rm, symlink, unlink, writeFile } from "node:fs/promises";
+import workerThreads from "node:worker_threads";
+import { syncBuiltinESMExports } from "node:module";
+import { access, link, lstat, mkdir, mkdtemp, readFile, rename, rm, symlink, unlink, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -228,34 +230,40 @@ test("files.grep never follows root or descriptor-relative directory symlink swa
   await mkdir(root);
   await mkdir(outside);
   await writeFile(path.join(outside, "secret.txt"), "RACE_NEEDLE\n");
-  for (let index = 0; index < 1_000; index += 1) {
-    await writeFile(path.join(root, `prefix-${String(index).padStart(4, "0")}.txt`), "ordinary\n");
-  }
-  const candidate = path.join(root, "zzz");
-  const held = path.join(root, "zzz-held");
-  await mkdir(candidate);
-  await writeFile(path.join(candidate, "safe.txt"), "ordinary\n");
-
-  let swapping = true;
-  const swapper = (async () => {
-    while (swapping) {
-      try {
-        await rename(candidate, held);
-        await symlink(outside, candidate);
-        await new Promise((resolve) => setImmediate(resolve));
-        await unlink(candidate);
-        await rename(held, candidate);
-      } catch {}
-    }
-  })();
+  const candidate = path.join(root, "zzz"), held = path.join(root, "zzz-held");
+  await mkdir(candidate); await writeFile(path.join(candidate, "safe.txt"), "ordinary\n");
+  const observations = [], RealWorker = workerThreads.Worker;
+  const wrapped = t.mock.method(workerThreads, "Worker", function (entry, options) {
+    assert.equal(path.basename(entry.pathname), "grep-worker.mjs");
+    const worker = new RealWorker(`
+      const fs = require("node:fs/promises"), { syncBuiltinESMExports } = require("node:module");
+      const { parentPort, workerData } = require("node:worker_threads");
+      const readdir = fs.readdir; let swaps = 0;
+      fs.readdir = async (...args) => {
+        const names = await readdir(...args);
+        if (names.includes("zzz")) {
+          await fs.rename(workerData.candidate, workerData.held);
+          await fs.symlink(workerData.outside, workerData.candidate);
+          swaps++;
+        }
+        return names;
+      };
+      const post = parentPort.postMessage.bind(parentPort);
+      parentPort.postMessage = message => post({ ...message, fixtureSwaps: swaps });
+      syncBuiltinESMExports();
+      import(workerData.entry);
+    `, { ...options, eval: true, workerData: { ...options.workerData, entry: entry.href, candidate, held, outside } });
+    worker.once("message", message => observations.push(message.fixtureSwaps));
+    return worker;
+  });
+  syncBuiltinESMExports();
   let result;
-  try {
-    result = await handlers["files.grep"]({ path: "root", pattern: "RACE_NEEDLE", limit: 10 }, context());
-  } finally {
-    swapping = false;
-    await swapper;
-  }
+  try { result = await handlers["files.grep"]({ path: "root", pattern: "RACE_NEEDLE", limit: 10 }, context()); }
+  finally { wrapped.mock.restore(); syncBuiltinESMExports(); }
+  assert.deepEqual(observations, [1], "the real worker must enumerate before the directory becomes a symlink");
   assert.deepEqual(result.matches, []);
+  assert.equal(result.stats.visitedEntries, 1, "the swapped directory entry must be visited, not avoided");
+  assert.equal((await lstat(candidate)).isSymbolicLink(), true);
 
   const rootLink = path.join(cwd, "root-link");
   await symlink(outside, rootLink);

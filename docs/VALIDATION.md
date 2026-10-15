@@ -25,6 +25,15 @@ This suite uses synthetic loopback Responses transport and real Python. It cover
 
 Compaction regressions hold a summary while an authenticated family message arrives, require the canonical snapshot to remain unchanged, and then verify one summary, one delivery, acknowledgement, and resumed inference. Coordinator checks cover queued bookkeeping after success, failure, and cancellation, plus a durable automatic-compaction error and recovery on later input. Cancellation checks distinguish manual callback rejection, threshold continuation without a loop, and overflow termination with the original provider failure and no retry. Public stock-runner tests cover structured and forced prompt chains, final observer ordering, first and subsequent requests, fresh resources, idle tool metadata, and input delivered during owner preparation.
 
+Filesystem race fixtures order the adversarial operation at the actual syscall
+boundary: parent detachment completes after link/rename and before publication
+verification; the real grep worker enumerates a directory before that child is
+replaced by a symlink. They retain real filesystem operations and worker resource
+limits without relying on inotify delivery or a busy rename loop. The transport
+callback regression retains all 511 queued compactions and verifies their
+correlated order and completion. Callback responsiveness keeps its existing
+bounds; batch completion uses the existing request and outer-test deadlines.
+
 The broader private integration checkpoint also exercised a browser client. Browser assets, its HTTP adapter, and browser-only tests are intentionally not part of this harness-only repository. Client-neutral protocol/history tests remain.
 
 ## Models
@@ -37,6 +46,13 @@ java -cp "$TLA2TOOLS" tlc2.TLC -workers 1 -config specification/FirstInputSnapsh
 ```
 
 Use each model's matching configuration. Model checks prove only their finite abstraction, not arbitrary provider behavior, filesystem crash atomicity, or remote exactly-once execution. Keep test and model results tied to the source bytes under test.
+
+`ConcurrencyFixtures` checks publication/detach/verification ordering, a child
+symlink replacement after enumeration, and independent callback admission followed
+by exactly-once backlog drain under fair scheduling. Its configured backlog is
+511. The `NoRendezvous`, `FollowLink`, and `BlockCallback` configurations must fail
+their corresponding safety or completion checks. The model abstracts OS timing;
+filesystem, worker, and socket tests exercise the actual boundaries.
 
 `MessageLocation` models one submission and one acquisition: separate acquisition
 and Send deadlines (including native callbacks before delayed timer delivery),
