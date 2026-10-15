@@ -31,7 +31,7 @@ test("read-only metadata lookup does not migrate old tables or change journal mo
   const writer = new HarnessStore(file);
   writer.createRoot(rootInput(root), 1); writer.close();
   const legacy = new DatabaseSync(file);
-  legacy.exec("PRAGMA journal_mode = DELETE; PRAGMA user_version = 1; ALTER TABLE sessions DROP COLUMN last_activity_at; DROP TABLE actor_input_receipts;");
+  legacy.exec("PRAGMA journal_mode = DELETE; PRAGMA user_version = 1; ALTER TABLE sessions DROP COLUMN last_activity_at; DROP TABLE actor_input_receipts; DROP INDEX sessions_parent;");
   legacy.close();
   const before = await snapshot(root);
   const reader = new HarnessStore(file, { readOnly: true });

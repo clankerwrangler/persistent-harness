@@ -210,6 +210,7 @@ const CURRENT_SCHEMA = `
   CREATE UNIQUE INDEX root_name ON sessions(display_name) WHERE kind = 'root' AND lifecycle <> 'deleted';
   CREATE UNIQUE INDEX child_name_per_parent ON sessions(parent_session_id, display_name) WHERE kind = 'child' AND lifecycle <> 'deleted';
   CREATE INDEX sessions_family ON sessions(family_id, kind, created_at);
+  CREATE INDEX sessions_parent ON sessions(parent_session_id, lifecycle, id);
   CREATE INDEX sessions_lifecycle ON sessions(lifecycle, quiet_since, created_at, id);
   CREATE TABLE children (
     session_id TEXT PRIMARY KEY REFERENCES sessions(id) ON DELETE CASCADE
@@ -355,6 +356,8 @@ export class HarnessStore {
     if (!sessionColumns.has("actor_token") || !sessionColumns.has("actor_generation") || !inputTable) {
       throw new Error("unreleased split-architecture database is unsupported; preserve session files, then recreate harness.sqlite");
     }
+    // Full parent edges serve active counts and deletion through tombstones.
+    this.#db.exec("CREATE INDEX IF NOT EXISTS sessions_parent ON sessions(parent_session_id, lifecycle, id)");
     let inputColumns = new Set(this.#db.prepare("PRAGMA table_info(actor_inputs)").all().map((row) => row.name));
     if (!inputColumns.has("wake_error_generation")) this.#db.exec("ALTER TABLE actor_inputs ADD COLUMN wake_error_generation INTEGER");
     if (!inputColumns.has("location_json")) this.#db.exec("ALTER TABLE actor_inputs ADD COLUMN location_json TEXT");
