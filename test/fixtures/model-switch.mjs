@@ -1,0 +1,54 @@
+import { writeFile } from "node:fs/promises";
+import path from "node:path";
+import { slimFixture, until } from "./slim-stream.mjs";
+
+/** Real stock worker, loopback transport, and a held persistent Python call. */
+export async function modelSwitchFixture(t) {
+  let releasePath;
+  const call = (id, code, native) => ({ type: "function_call", id: `fc_${id}`, call_id: id,
+    name: "ipython", arguments: JSON.stringify({ code }), ...(native ? { async: true } : {}) });
+  const complete = (f, response, output) => {
+    f.send(response, { type: "response.completed", response: { id: `response-${f.responses.length}`, status: "completed", output,
+      usage: { input_tokens: 10, output_tokens: 2, total_tokens: 12 } } }); response.end();
+  };
+  const f = await slimFixture(t, "model-switch", ({ response, index, send, item }) => {
+    if (index === 1) {
+      const code = `import os, time
+persistent_probe = 41
+print("HOLD_STARTED", flush=True)
+while not os.path.exists(${JSON.stringify(releasePath)}): time.sleep(0.05)
+print("HOLD_DONE", persistent_probe)`;
+      const tool = call("held-python", code, true);
+      send(response, { type: "response.output_item.added", output_index: 0, item: { ...tool, arguments: "" } });
+      send(response, { type: "response.output_item.done", output_index: 0, item: tool });
+    } else if (index === 2) {
+      const tool = call("read-python", 'print("KEPT_NAMESPACE", persistent_probe + 1)', false);
+      send(response, { type: "response.output_item.added", output_index: 0, item: { ...tool, arguments: "" } });
+      send(response, { type: "response.output_item.done", output_index: 0, item: tool });
+      send(response, { type: "response.completed", response: { id: "response-2", status: "completed", output: [tool],
+        usage: { input_tokens: 10, output_tokens: 2, total_tokens: 12 } } }); response.end();
+    } else {
+      const answer = item(0, "SWITCH_DONE");
+      send(response, { type: "response.output_item.added", output_index: 0, item: { ...answer, content: [] } });
+      send(response, { type: "response.output_item.done", output_index: 0, item: answer });
+      send(response, { type: "response.completed", response: { id: "response-3", status: "completed", output: [answer],
+        usage: { input_tokens: 10, output_tokens: 2, total_tokens: 12 } } }); response.end();
+    }
+  }, { models: ["gpt-6-astra", "gpt-6.1-sol"], maxRequests: 3 });
+  releasePath = path.join(f.cwd, "release-tool");
+  t.after(() => writeFile(releasePath, "release").catch(() => {}));
+  const inference = () => f.client.request("get_session_inference", { sessionId: f.sessionId });
+  return { ...f, inference,
+    async start() {
+      await f.client.request("submit_input", { sessionId: f.sessionId, message: "Test model switching with retained Python", behavior: "auto", clientRequestId: "model-switch-input" });
+      await until(() => f.rawEvents.some(e => e.type === "tool_execution_update" && JSON.stringify(e.partialResult).includes("HOLD_STARTED")), "Python reaches its held execution");
+    },
+    finishStream() {
+      const response = f.responses[0];
+      complete(f, response, []);
+    },
+    async releaseTool() { await writeFile(releasePath, "release"); },
+    async toolFinished() { await until(() => f.rawEvents.some(e => e.type === "message_end" && e.message?.role === "toolResult" && e.message.toolCallId.startsWith("held-python")), "held tool finishes"); },
+    async settled() { await until(() => f.events.some(e => e.type === "agent_settled"), "model-switch settlement"); },
+  };
+}

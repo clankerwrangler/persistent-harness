@@ -202,6 +202,31 @@ metadata exposes the same values as `launch.fastMode`,
 `launch.fastModeRootSessionId`, and `launch.fastModeSupported`. Unknown metadata
 stays null; a model label does not establish support.
 
+`set_session_inference` accepts a validated model and reasoning selection during
+active work. It saves a revisioned `launch.pendingInference` before acknowledging
+it. `selection` and the ordinary launch model/thinking fields remain the last
+acknowledged active selection; `pending` reports the desired selection and any
+application error. Later accepted choices replace pending intent. Choosing the
+active selection also queues a revision, so cancellation remains valid during an
+older asynchronous apply.
+
+The existing coordinator applies pending intent with public Pi session setters
+when no provider flight, tool task, compaction, or service mutation owns the
+actor. It checks before another inference and at settlement, without replacing
+the actor, clearing input, or recreating Python. Native inference can continue on
+the active model while asynchronous tools still run. Already-started requests
+retain their model. Selection changes do not alter saved defaults for new sessions.
+
+Generation-bound applied receipts update active launch policy and clear only the
+matching pending revision. The public picker and its expected-selection check use
+that acknowledged policy even during awaited model observers. Pending intent
+survives reconnect and supervisor restart; normal actor revival starts the last
+active policy and queues pending intent before input delivery. Existing uncertain
+work is not replayed. Failed application retains visible intent and the current
+run; a new choice, a settings read after failure, or actor revival retries it.
+Revival still requires the last active launch model to be available. Model-only
+writes use the current catalog snapshot; opening settings retains catalog refresh.
+
 `set_session_fast_mode` is an authenticated client-only mutation with
 `{sessionId, fastMode, expected}`. Its expected selection must include all four
 selection fields. Stale selections are rejected. Existing model/thinking mutations

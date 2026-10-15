@@ -1028,25 +1028,31 @@ export class HarnessSupervisor {
     }
   }
 
-  async #inferenceSnapshot(sessionId, actor = null) {
+  async #inferenceSnapshot(sessionId, actor = null, refresh = true) {
     const active = actor ?? await this.#ensureActorReady(sessionId);
     const [available, state] = await Promise.all([
-      active.worker.request("get_available_models"), active.worker.request("get_state"),
+      active.worker.request("get_available_models", { refresh }), active.worker.request("get_state"),
     ]);
     const models = projectAvailableModels(available?.models);
-    const current = resolveModelSelection(available?.models, { provider: state?.model?.provider, id: state?.model?.id });
-    validateInferenceEffort(state?.thinkingLevel, current);
     const session = this.store.getSession(sessionId);
     if (!session || session.lifecycle === "deleted") throw requestFailure("not_found", "session does not exist");
+    // The acknowledged launch policy owns the public active selection. Pi can
+    // mutate its model before awaited observers publish the applied receipt.
+    const current = resolveModelSelection(available?.models, session.launch?.model?.resolved
+      ?? { provider: state?.model?.provider, id: state?.model?.id });
+    const thinkingLevel = session.launch?.thinking?.resolved ?? state?.thinkingLevel;
+    validateInferenceEffort(thinkingLevel, current);
     const busy = Boolean(state?.isStreaming || state?.isCompacting || Number(state?.pendingMessageCount) > 0
       || ["working", "delegating"].includes(session.activity) || this.store.hasPendingSessionWork(sessionId));
-    return { selection: { provider: current.provider, model: current.id, thinkingLevel: state.thinkingLevel, fastMode: session.launch?.fastMode ?? null },
+    return { selection: { provider: current.provider, model: current.id, thinkingLevel, fastMode: session.launch?.fastMode ?? null },
+      pending: session.launch?.pendingInference ?? null,
       fastModeRootSessionId: session.launch?.fastModeRootSessionId ?? null,
-      fastModeSupported: supportsFastMode(state.model) && current.fastModeSupported, models, busy, telemetry: this.store.getSessionTelemetry(sessionId) };
+      fastModeSupported: current.fastModeSupported, models, busy, telemetry: this.store.getSessionTelemetry(sessionId) };
   }
 
   async #getSessionInference(sessionId) {
     const actor = await this.#ensureActorReady(sessionId);
+    if (this.store.getSession(sessionId)?.launch?.pendingInference?.error) await this.#sendPendingInference(sessionId, actor);
     return this.#inferenceSnapshot(sessionId, actor);
   }
 
@@ -1063,22 +1069,24 @@ export class HarnessSupervisor {
     if (session.launch?.fastModeRootSessionId !== params.sessionId) {
       throw requestFailure("invalid_request", "only the root session can change family Fast mode");
     }
-    const selection = { provider: state?.model?.provider, model: state?.model?.id,
-      thinkingLevel: state?.thinkingLevel, fastMode: session.launch?.fastMode ?? null };
+    const selection = { provider: session.launch?.model?.resolved?.provider ?? state?.model?.provider,
+      model: session.launch?.model?.resolved?.id ?? state?.model?.id,
+      thinkingLevel: session.launch?.thinking?.resolved ?? state?.thinkingLevel, fastMode: session.launch?.fastMode ?? null };
     if (Object.keys(selection).some(key => selection[key] !== params.expected[key])) {
       throw requestFailure("stale_inference", "session inference selection changed; refresh and try again");
     }
-    const fastModeSupported = supportsFastMode(state.model);
+    const fastModeSupported = session.launch?.fastModeSupported ?? supportsFastMode(state.model);
     const changed = selection.fastMode !== params.fastMode;
     if (changed) this.store.updateSessionFastMode(params.sessionId, params.fastMode, selection.fastMode);
     // The durable receipt is authoritative. No post-commit actor RPC can turn success into failure.
     this.#broadcastNavigator("inference_changed");
-    return { selection: { ...selection, fastMode: params.fastMode }, fastModeRootSessionId: params.sessionId, fastModeSupported, changed };
+    return { selection: { ...selection, fastMode: params.fastMode }, pending: session.launch?.pendingInference ?? null,
+      fastModeRootSessionId: params.sessionId, fastModeSupported, changed };
   }
 
   async #setSessionInference(params) {
     const actor = await this.#ensureActorReady(params.sessionId);
-    const current = await this.#inferenceSnapshot(params.sessionId, actor);
+    const current = await this.#inferenceSnapshot(params.sessionId, actor, false);
     if (current.selection.provider !== params.expected.provider || current.selection.model !== params.expected.model
       || current.selection.thinkingLevel !== params.expected.thinkingLevel) {
       throw requestFailure("stale_inference", "session inference selection changed; refresh and confirm again");
@@ -1091,38 +1099,25 @@ export class HarnessSupervisor {
     } catch (error) {
       throw requestFailure("unsupported_inference", error instanceof Error ? error.message : String(error));
     }
-    if (target.provider === current.selection.provider && target.id === current.selection.model
-      && params.thinkingLevel === current.selection.thinkingLevel) return { ...current, changed: false };
-    if (current.busy) throw requestFailure("session_busy", "session must be fully idle before changing model or reasoning");
-    const launchBefore = this.store.getActorLaunch(params.sessionId)?.launch;
-    const previousModel = current.models.find((model) => model.provider === current.selection.provider && model.id === current.selection.model);
-    let persistedTargetLaunch = null;
-    try {
-      await this.#stopActor(params.sessionId, "passivated");
-      persistedTargetLaunch = this.store.updateSessionInference(params.sessionId,
-        { provider: target.provider, model: target.id, thinkingLevel: params.thinkingLevel, contextWindow: target.contextWindow, fastModeSupported: target.fastModeSupported }, launchBefore).launch;
-      this.#requestActorStart(params.sessionId, true);
-      const replacement = await this.#ensureActorReady(params.sessionId);
-      const result = await this.#inferenceSnapshot(params.sessionId, replacement);
-      if (result.selection.provider !== target.provider || result.selection.model !== target.id
-        || result.selection.thinkingLevel !== params.thinkingLevel) throw new Error("replacement actor inference verification failed");
-      this.#broadcastNavigator("inference_changed");
-      return { ...result, changed: true };
-    } catch (error) {
-      try {
-        await this.#stopActor(params.sessionId, "passivated");
-        if (persistedTargetLaunch) this.store.restoreSessionLaunch(params.sessionId, launchBefore,
-          persistedTargetLaunch, previousModel?.contextWindow);
-        this.#requestActorStart(params.sessionId, true);
-        const restored = await this.#ensureActorReady(params.sessionId);
-        const restoredState = await restored.worker.request("get_state");
-        if (restoredState?.model?.provider !== current.selection.provider || restoredState?.model?.id !== current.selection.model
-          || restoredState?.thinkingLevel !== current.selection.thinkingLevel) throw new Error("rollback actor inference verification failed");
-        this.#broadcastNavigator("inference_rollback");
-      } catch (rollbackError) {
-        this.logger.error?.(`inference rollback failed for ${params.sessionId}: ${rollbackError instanceof Error ? rollbackError.message : String(rollbackError)}`);
-      }
-      throw requestFailure("actor_replacement_failed", error instanceof Error ? error.message : String(error));
+    const same = target.provider === current.selection.provider && target.id === current.selection.model
+      && params.thinkingLevel === current.selection.thinkingLevel;
+    if (same && !current.pending) return { ...current, changed: false };
+    const pending = this.store.queueSessionInference(params.sessionId,
+      { provider: target.provider, model: target.id, thinkingLevel: params.thinkingLevel });
+    this.#broadcastNavigator("inference_pending");
+    await this.#sendPendingInference(params.sessionId, actor, pending);
+    return { ...await this.#inferenceSnapshot(params.sessionId, actor, false), changed: true };
+  }
+
+  async #sendPendingInference(sessionId, actor, pending = this.store.getSession(sessionId)?.launch?.pendingInference) {
+    if (!pending) return;
+    try { await actor.worker.request("select_inference", pending); }
+    catch (error) {
+      // The durable intent remains accepted even when its worker receipt is lost.
+      // Reconnect and startup retry it without replaying conversation input.
+      this.store.recordSessionInferenceResult(sessionId, actor.generation, { requestId: pending.requestId, error: true });
+      this.#broadcastNavigator("inference_pending");
+      this.logger.error?.(`inference delivery failed for ${sessionId}: ${error instanceof Error ? error.message : String(error)}`);
     }
   }
 
@@ -1784,6 +1779,7 @@ export class HarnessSupervisor {
       this.store.assertSessionAvailable(sessionId);
       const processIdentity = await this.processIdentityFactory(worker.pid, session.actorToken);
       this.store.markActorStarted(sessionId, session.actorGeneration, { pid: worker.pid, sessionFile: state.sessionFile, processIdentity });
+      await this.#sendPendingInference(sessionId, record);
       await this.#deliverActorInputs(sessionId, record);
       setImmediate(() => this.#retryQueuedMessages(sessionId));
       await this.#log("actor_started", { sessionId, generation: session.actorGeneration, kind: session.kind }); this.#broadcastNavigator("actor_resident"); this.#syncPassivationTimers();
@@ -2014,6 +2010,10 @@ export class HarnessSupervisor {
       }
     }
     try {
+      if (["inference_selection_applied", "inference_selection_failed"].includes(frame?.type)) {
+        if (this.store.recordSessionInferenceResult(sessionId, record.generation, { requestId: frame.requestId,
+          selection: frame.selection, ...(frame.type === "inference_selection_failed" ? { error: true } : {}) })) this.#broadcastNavigator("inference_changed");
+      }
       if (["agent_start", "tool_execution_start", "tool_execution_end"].includes(frame?.type)
         || frame?.type === "message_end" && frame.message?.role === "assistant") this.store.recordSessionActivity(sessionId);
       if (["progress_entry", "agent_message_entry", "child_creation_entry"].includes(frame?.type)) {

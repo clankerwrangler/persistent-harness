@@ -17,16 +17,16 @@ async function fixture(t, { prepareRequest, script, retry, compaction, compactio
   const model = { id: "fixture", name: "Fixture", provider: "coordinator-test", api: "coordinator-test-api", reasoning: false,
     input: ["text"], cost: usage().cost, contextWindow: 32000, maxTokens: 1000 };
   const models = await sdk.ModelRuntime.create({ credentials: new api.InMemoryCredentialStore(), modelsPath: null, allowModelNetwork: false });
-  const requests = [], events = []; const held = deferred(), toolStarted = deferred(); let runs = 0, coor;
-  models.registerProvider(model.provider, { api: model.api, apiKey: "offline-fixture", baseUrl: "https://example.invalid", models: [model],
+  const requests = [], requestModels = [], events = []; const held = deferred(), toolStarted = deferred(); let runs = 0, coor;
+  models.registerProvider(model.provider, { api: model.api, apiKey: "offline-fixture", baseUrl: "https://example.invalid", models: [model, { ...model, id: "alternate", name: "Alternate" }],
     streamSimple(_model, context, options = {}) {
       const stream = api.createAssistantMessageEventStream();
       void (async () => {
         await options.onPayload?.({ tools: context.tools?.map(tool => ({ type: "function", name: tool.name })) ?? [] });
-        requests.push(structuredClone(context)); const n = requests.length;
+        requests.push(structuredClone(context)); requestModels.push(_model.id); const n = requests.length;
         const scripted = script?.(context, n);
         const content = Array.isArray(scripted) ? scripted : scripted?.content ?? (n === 1 ? [{ type: "toolCall", id: "call-one", name: "hold", arguments: {} }] : [{ type: "text", text: "done" }]);
-        const message = { role: "assistant", content, provider: model.provider, api: model.api, model: model.id,
+        const message = { role: "assistant", content, provider: _model.provider, api: _model.api, model: _model.id,
           usage: scripted?.usage ?? usage(), timestamp: Date.now(), stopReason: scripted?.stopReason ?? (content.some(p => p.type === "toolCall") ? "toolUse" : "stop"),
           ...(scripted?.errorMessage ? { errorMessage: scripted.errorMessage } : {}) };
         stream.push({ type: "start", partial: { ...message, content: [] } });
@@ -63,7 +63,7 @@ async function fixture(t, { prepareRequest, script, retry, compaction, compactio
     basePromptOptions: basePromptOptions ?? { contextFiles: [], cwd: root }, isProjectTrusted: () => false, compactionDriver, automaticCompactionAllowed });
   await coor.start(); await runner.emit({ type: "session_start", reason: "startup" });
   t.after(async () => { held.resolve(); await coor.close(); await rm(root, { recursive: true, force: true }); });
-  return { coor, requests, events, manager, held, toolStarted, capture, runs: () => runs };
+  return { coor, requests, requestModels, events, manager, held, toolStarted, capture, runs: () => runs };
 }
 
 test("ordinary input keeps real result barrier and compatible canonical events", async t => {
@@ -594,4 +594,76 @@ test("a failed canonical append leaves already-published text visible and report
   assert.deepEqual(f.manager.getEntries().filter(entry => entry.type === "custom").map(entry => entry.customType),
     ["persistent-harness.inference-retry-v1"], "only the existing failure decision is recorded; no metadata write or repair");
   assert(!f.manager.getBranch().some(entry => entry.message?.id === attempted.id), "uncommitted text is not claimed durable");
+});
+
+for (const cancel of [false, true]) test(`pending inference ${cancel ? "cancellation" : "change"} preserves tools and applies before continuation`, async t => {
+  const f = await fixture(t);
+  await f.coor.submit("start", "auto", [], "original-input");
+  await wait(f.toolStarted.promise, "tool did not start");
+  const choose = (requestId, id) => f.coor.selectInference({ requestId,
+    model: f.coor.models.getModel("coordinator-test", id), thinkingLevel: "off" });
+  choose("first", "alternate");
+  if (cancel) choose("latest", "fixture");
+  assert.equal(f.coor.session.model.id, "fixture");
+  assert.equal(f.requests.length, 1); assert.equal(f.runs(), 1);
+  f.held.resolve(); await wait(f.coor.waitForIdle(), "actor did not settle");
+  assert.deepEqual(f.requestModels, ["fixture", cancel ? "fixture" : "alternate"]);
+  assert.equal(f.runs(), 1);
+  assert.equal(f.requests[1].messages.filter(m => m.role === "toolResult").length, 1);
+  assert.equal(f.events.filter(e => e.type === "agent_start").length, 1);
+  assert.deepEqual(f.events.filter(e => e.type === "inference_selection_applied").map(e => e.requestId), [cancel ? "latest" : "first"]);
+});
+
+test("selection during an asynchronous apply converges to latest desired, including displayed-active cancellation", async t => {
+  const f = await fixture(t), entered = deferred(), release = deferred();
+  const original = f.coor.session.setModel.bind(f.coor.session);
+  f.coor.session.setModel = async (...args) => { entered.resolve(); await release.promise; return original(...args); };
+  f.coor.selectInference({ requestId: "old", model: f.coor.models.getModel("coordinator-test", "alternate"), thinkingLevel: "off" });
+  await wait(entered.promise, "apply did not start");
+  f.coor.selectInference({ requestId: "latest", model: f.coor.session.model, thinkingLevel: "off" });
+  release.resolve(); await wait(f.coor.waitForIdle(), "apply did not finish");
+  assert.equal(f.coor.session.model.id, "fixture");
+  assert.deepEqual(f.events.filter(e => e.type === "inference_selection_applied").map(e => e.requestId), ["old", "latest"]);
+  assert.equal(f.requests.length, 0, "selection must not create a conversation turn");
+});
+
+test("failed model selection retains desired state without failing or repeatedly retrying the run", async t => {
+  const f = await fixture(t); let attempts = 0;
+  f.coor.session.setModel = async () => { attempts++; throw new Error("private credential diagnostic"); };
+  f.coor.selectInference({ requestId: "failed", model: f.coor.models.getModel("coordinator-test", "alternate"), thinkingLevel: "off" });
+  await wait(f.coor.waitForIdle(), "failed apply did not settle");
+  assert.equal(attempts, 1); assert.equal(f.coor.pendingInference.requestId, "failed");
+  assert.equal(f.coor.failure, null); assert.equal(f.coor.session.model.id, "fixture");
+  assert.doesNotMatch(JSON.stringify(f.events), /private credential diagnostic/);
+  await f.coor.submit("still usable"); f.held.resolve(); await wait(f.coor.waitForIdle(), "run failed after selection failure");
+  assert.equal(attempts, 1); assert.equal(f.requests.length, 2);
+});
+
+test("abort during pending model application cannot start a new provider request", async t => {
+  const entered = deferred(), release = deferred(); let owner;
+  const f = await fixture(t, { script: () => [{ type: "text", text: "must not run" }], hooks: pi => {
+    pi.on("before_agent_start", () => owner.selectInference({ requestId: "pending",
+      model: owner.models.getModel("coordinator-test", "alternate"), thinkingLevel: "off" }));
+  } }); owner = f.coor;
+  const original = owner.session.setModel.bind(owner.session);
+  owner.session.setModel = async (...args) => { entered.resolve(); await release.promise; return original(...args); };
+  await owner.submit("start"); await wait(entered.promise, "selection did not start");
+  assert.equal(owner.running, true); assert.equal(owner.flight, null);
+  const aborting = owner.abort(); release.resolve(); await wait(aborting, "abort did not settle");
+  assert.equal(f.requests.length, 0);
+});
+
+test("latest choice during awaited active model_select observer wins after Pi mutates the model", async t => {
+  const entered = deferred(), release = deferred();
+  const f = await fixture(t, { hooks: pi => pi.on("model_select", async event => {
+    if (event.model.id === "alternate") { entered.resolve(); await release.promise; }
+  }) });
+  const original = f.coor.session.model;
+  f.coor.selectInference({ requestId: "old", model: f.coor.models.getModel("coordinator-test", "alternate"), thinkingLevel: "off" });
+  await wait(entered.promise, "model observer did not start");
+  assert.equal(f.coor.session.model.id, "alternate");
+  f.coor.selectInference({ requestId: "latest", model: original, thinkingLevel: "off" });
+  release.resolve(); await wait(f.coor.waitForIdle(), "selection did not settle");
+  assert.equal(f.coor.session.model.id, "fixture");
+  assert.deepEqual(f.events.filter(e => e.type === "inference_selection_applied").map(e => e.requestId), ["old", "latest"]);
 });

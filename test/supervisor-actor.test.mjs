@@ -603,8 +603,19 @@ class InferencePiActor extends FakePiActor {
     return { sessionId: this.session.sessionId, sessionFile: this.session.sessionFile, isStreaming: false,
       model: this.session.launch.model.resolved, thinkingLevel: this.session.launch.thinking.resolved };
   }
-  async request(type) {
+  applySelection() {
+    const pending = this.pendingInference;
+    if (!pending) return;
+    this.session.launch.model.resolved = { provider: pending.provider, id: pending.model };
+    this.session.launch.thinking.resolved = pending.thinkingLevel;
+    this.pendingInference = null;
+    this.emit("event", { type: "inference_selection_applied", requestId: pending.requestId,
+      selection: { provider: pending.provider, model: pending.model, thinkingLevel: pending.thinkingLevel,
+        contextWindow: pending.model === "alpha" ? 200000 : 100000, fastModeSupported: false } });
+  }
+  async request(type, params) {
     this.requests.push(type);
+    if (type === "select_inference") { this.pendingInference = params; if (!this.busy) this.applySelection(); return { accepted: true }; }
     if (type === "get_available_models") return { models: [
       { provider: "fake", id: "alpha", name: "Alpha", reasoning: true, contextWindow: 200000,
         thinkingLevelMap: { xhigh: "xhigh", max: null }, apiKey: "must-not-leak", baseUrl: "https://secret" },
@@ -749,14 +760,13 @@ test("supervisor projects native Pi progress globally and clears it on settle", 
 });
 
 
-test("selected-session inference changes replace only an idle actor and serialize new input", async (t) => {
+test("selected-session inference accepts busy changes, persists latest intent and never replaces the actor", async (t) => {
   const root = await mkdtemp(path.join(os.tmpdir(), "harness-inference-control-"));
-  const socketPath = path.join(root, "run", "supervisor.sock"); const family = []; let failNextStart = false;
+  const socketPath = path.join(root, "run", "supervisor.sock"); const family = [];
   const supervisor = new HarnessSupervisor({ socketPath, databasePath: path.join(root, "state", "harness.sqlite"),
     pidPath: path.join(root, "run", "supervisor.pid"), actorInactivityMs: 0,
     actorFactory: (options) => {
       const actor = new InferencePiActor(options, family);
-      if (failNextStart) { failNextStart = false; actor.start = async () => { actor.isRunning = false; throw new Error("injected replacement failure"); }; }
       return actor;
     },
     processIdentityFactory: async (pid) => ({ version: 1, pid, processGroup: pid, startTime: "fake", ownerToken: "fake" }),
@@ -775,51 +785,52 @@ test("selected-session inference changes replace only an idle actor and serializ
   assert.deepEqual(first.models[0], { provider: "fake", id: "alpha", name: "Alpha", reasoning: true,
     thinkingLevels: ["off", "minimal", "low", "medium", "high", "xhigh"], contextWindow: 200000, fastModeSupported: false });
   assert.doesNotMatch(JSON.stringify(first), /must-not-leak|authorization|baseUrl|apiKey/);
-  targetFamily()[0].busy = true;
-  await assert.rejects(client.request("set_session_inference", { sessionId: id, provider: "fake", model: "beta", thinkingLevel: "off",
-    expected: first.selection }), (error) => error.code === "session_busy");
-  assert.equal(supervisor.store.getSession(id).actorGeneration, initialGeneration); targetFamily()[0].busy = false;
-  await assert.rejects(client.request("set_session_inference", { sessionId: id, provider: "fake", model: "beta", thinkingLevel: "off",
-    expected: { ...first.selection, model: "stale" } }), (error) => error.code === "stale_inference");
-  await assert.rejects(client.request("set_session_inference", { sessionId: id, provider: "fake", model: "beta", thinkingLevel: "high",
-    expected: first.selection }), (error) => error.code === "unsupported_inference");
-  supervisor.store.createRoot({ sessionId: "message-sender", sessionFile: path.join(root, "message-sender.jsonl"), cwd: root,
-    repositoryRoot: null, name: "message-sender", actorToken: "message-token", launch: { ...created.admission.launch } }, 1);
-  const pendingMessage = supervisor.store.createMessage("message-sender", { target: id, body: "do not interrupt replacement", deliveryMode: "auto" });
-  supervisor.store.recordMessageSenderEntry("message-sender", { messageId: pendingMessage.messageId, entryId: "pending-entry",
-    peerId: id, relationship: "sibling", body: "do not interrupt replacement" });
-  await assert.rejects(client.request("set_session_inference", { sessionId: id, provider: "fake", model: "beta", thinkingLevel: "off",
-    expected: first.selection }), (error) => error.code === "session_busy");
-  supervisor.store.markMessageDelivered(pendingMessage.messageId, id); supervisor.store.acknowledgeMessage(pendingMessage.messageId, id);
-  const changed = await client.request("set_session_inference", { sessionId: id, provider: "fake", model: "beta", thinkingLevel: "off",
-    expected: first.selection });
-  assert.equal(changed.changed, true); assert.deepEqual(changed.selection, { provider: "fake", model: "beta", thinkingLevel: "off", fastMode: false });
-  assert.equal(supervisor.store.getSession(id).actorGeneration, initialGeneration + 1); assert.equal(targetFamily()[0].isRunning, false);
-  failNextStart = true;
-  await assert.rejects(client.request("set_session_inference", { sessionId: id, provider: "fake", model: "alpha", thinkingLevel: "high",
-    expected: changed.selection }), (error) => error.code === "actor_replacement_failed");
-  await eventually(() => targetFamily().length === 4 && targetFamily()[3].isRunning);
-  const rolledBack = await client.request("get_session_inference", { sessionId: id });
-  assert.deepEqual(rolledBack.selection, changed.selection); assert.equal(supervisor.store.getSession(id).lifecycle, "resident");
-  const rollbackInput = await client.request("submit_input", { sessionId: id, message: "rollback remains usable", behavior: "auto",
-    clientRequestId: "after-failed-model-change" });
-  assert(rollbackInput.accepted);
-  await eventually(() => targetFamily()[3].submits.some((item) => item.message.includes("rollback remains usable")));
-  supervisor.store.completeActorInput(rollbackInput.inputId, id);
-  const rollbackSubmitCount = targetFamily()[3].submits.length;
-  const beforeConcurrent = changed.selection;
-  const [changedAgain, input] = await Promise.all([
-    client.request("set_session_inference", { sessionId: id, provider: "fake", model: "alpha", thinkingLevel: "high", expected: beforeConcurrent }),
-    client.request("submit_input", { sessionId: id, message: "new generation only", behavior: "auto", clientRequestId: "after-model-change" }),
-  ]);
-  assert.equal(changedAgain.changed, true); assert(input.accepted); assert.equal(targetFamily().length, 5);
-  assert.equal(targetFamily()[3].submits.length, rollbackSubmitCount);
-  await eventually(() => targetFamily()[4].submits.some((item) => item.message.includes("new generation only")));
-  const same = await client.request("set_session_inference", { sessionId: id, provider: "fake", model: "alpha", thinkingLevel: "high",
-    expected: changedAgain.selection });
-  assert.equal(same.changed, false); assert.equal(targetFamily().length, 5);
+  const actor = targetFamily()[0]; actor.busy = true;
+  const change = (model, thinkingLevel = "off", expected = first.selection) => client.request("set_session_inference",
+    { sessionId: id, provider: "fake", model, thinkingLevel, expected });
+  const start = performance.now();
+  const queued = await change("beta");
+  assert(performance.now() - start < 1000, "busy acceptance must not await turn completion");
+  assert.equal(queued.selection.model, "alpha"); assert.equal(queued.pending.model, "beta");
+  assert.equal(supervisor.store.getSession(id).launch.model.resolved.id, "alpha");
+  assert.equal(supervisor.store.getSession(id).launch.pendingInference.requestId, queued.pending.requestId);
+  await assert.rejects(change("missing"), error => error.code === "unsupported_inference");
+  await assert.rejects(change("beta", "high"), error => error.code === "unsupported_inference");
+  assert.equal(supervisor.store.getSession(id).launch.pendingInference.requestId, queued.pending.requestId);
+  // Pi mutates model state before awaited model_select observers finish.
+  actor.session.launch.model.resolved = { provider: "fake", id: "beta" };
+  assert.equal((await client.request("get_session_inference", { sessionId: id })).selection.model, "alpha");
+  const cancelled = await change("alpha");
+  assert.equal(cancelled.pending.model, "alpha");
+  actor.emit("event", { type: "inference_selection_applied", requestId: queued.pending.requestId,
+    selection: { provider: "fake", model: "beta", thinkingLevel: "off", contextWindow: 100000, fastModeSupported: false } });
+  assert.equal(supervisor.store.getSession(id).launch.pendingInference.requestId, cancelled.pending.requestId);
+  actor.busy = false; actor.applySelection();
+  const unchanged = await client.request("get_session_inference", { sessionId: id });
+  assert.equal(unchanged.pending, null); assert.equal(unchanged.selection.model, "alpha");
+  const changed = await change("beta");
+  assert.equal(changed.selection.model, "beta"); assert.equal(changed.pending, null);
+  assert.equal(supervisor.store.getSession(id).actorGeneration, initialGeneration);
+  assert.equal(targetFamily().length, 1); assert.equal(actor.isRunning, true);
+  await assert.rejects(change("alpha"), error => error.code === "stale_inference");
+  const input = await client.request("submit_input", { sessionId: id, message: "same actor", behavior: "auto", clientRequestId: "same-actor" });
+  assert(input.accepted); await eventually(() => actor.submits.some(item => item.message.includes("same actor")));
+  supervisor.store.completeActorInput(input.inputId, id);
+  const same = await change("beta", "off", changed.selection);
+  assert.equal(same.changed, false); assert.equal(targetFamily().length, 1);
+  actor.busy = true;
+  const retained = await change("alpha", "high", changed.selection);
+  // Simulate a lost worker receipt: the durable pending intent survives the next generation.
+  await client.request("stop_session", { sessionId: id });
+  await client.request("revive_session", { sessionId: id });
+  await eventually(() => targetFamily().length === 2 && targetFamily()[1].isRunning);
+  const resumed = await client.request("get_session_inference", { sessionId: id });
+  assert.equal(resumed.selection.model, "alpha"); assert.equal(resumed.selection.thinkingLevel, "high");
+  assert.equal(resumed.pending, null);
+  actor.emit("event", { type: "inference_selection_applied", requestId: retained.pending.requestId,
+    selection: { provider: "fake", model: "beta", thinkingLevel: "off" } });
+  assert.equal(supervisor.store.getSession(id).launch.model.resolved.id, "alpha", "old generation cannot change active state");
 });
-
 
 async function writeGuidanceSkill(root, name, description) {
   const directory = path.join(root, name);
@@ -1620,8 +1631,15 @@ class FastPiActor extends FakePiActor {
   failRead = false;
   selected() { return { ...this.session.launch.model.resolved, api: this.session.launch.model.resolved.provider === "openai-codex" ? "openai-codex-responses" : "fixture-api" }; }
   async start() { this.isRunning = true; return { sessionId: this.session.sessionId, model: this.selected(), thinkingLevel: "off", sessionFile: this.session.sessionFile }; }
-  async request(type) {
+  async request(type, params) {
     this.requests.push(type);
+    if (type === "select_inference") {
+      this.session.launch.model.resolved = { provider: params.provider, id: params.model };
+      this.emit("event", { type: "inference_selection_applied", requestId: params.requestId,
+        selection: { provider: params.provider, model: params.model, thinkingLevel: params.thinkingLevel,
+          contextWindow: 32000, fastModeSupported: params.provider === "openai-codex" } });
+      return { accepted: true };
+    }
     if (type === "get_state") { if (this.failRead) throw new Error("injected state read failure");
       return { model: this.selected(), thinkingLevel: "off", isStreaming: this.busy, isCompacting: false, pendingMessageCount: 0 }; }
     if (type === "get_available_models") return { models: [

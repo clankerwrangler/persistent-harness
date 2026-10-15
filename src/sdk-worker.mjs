@@ -1,3 +1,4 @@
+import { projectAvailableModels, validateInferenceEffort } from "./inference-options.mjs";
 import { conversationBirth } from "./conversation-birth.mjs";
 import { normalizeInputLocation } from "./input-location.mjs";
 import { randomUUID } from "node:crypto";
@@ -251,11 +252,19 @@ export class SDKWorker {
       case "get_available_models": {
         let warning;
         try {
-          const result = await models.refresh({ signal: AbortSignal.timeout(15_000) });
-          if (result.aborted || result.errors.size || models.getError()) warning = "Model catalog refresh failed; showing cached models.";
+          const result = command.refresh === false ? null : await models.refresh({ signal: AbortSignal.timeout(15_000) });
+          if (result && (result.aborted || result.errors.size || models.getError())) warning = "Model catalog refresh failed; showing cached models.";
         } catch { warning = "Model catalog refresh failed; showing cached models."; }
         if (warning) this.broker.ui.notify(warning, "warning");
         return { models: [...models.getAvailableSnapshot()], ...(warning ? { warning } : {}) };
+      }
+      case "select_inference": {
+        const requestId = string(command.requestId, "requestId");
+        const model = models.getAvailableSnapshot().find(model => model.provider === command.provider && model.id === command.model);
+        if (!model) throw new Error("Model is unavailable");
+        validateInferenceEffort(command.thinkingLevel, projectAvailableModels([model])[0]);
+        coordinator.selectInference({ requestId, model, thinkingLevel: command.thinkingLevel });
+        return { accepted: true };
       }
       case "get_thinking_level": return { level: session.thinkingLevel };
       case "get_available_thinking_levels": return { levels: session.getAvailableThinkingLevels() };
