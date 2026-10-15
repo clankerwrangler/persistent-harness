@@ -23,6 +23,10 @@ export function visibleContentText(content, { sanitizePresentation = false } = {
   return sanitizePresentation ? sanitizePresentationText(text).text : text;
 }
 
+function imageContentHash(image) {
+  return createHash("sha256").update(image.mimeType).update("\0").update(image.data, "base64").digest("hex");
+}
+
 function visibleUserImages(content, { references = false, entryId } = {}) {
   if (!Array.isArray(content)) return [];
   const candidates = content.filter((part) => part?.type === "image")
@@ -31,7 +35,7 @@ function visibleUserImages(content, { references = false, entryId } = {}) {
     return normalizeInputImages(candidates).map((image, index) => ({
       type: "image", mimeType: image.mimeType, name: `Pasted image ${index + 1}`,
       size: Buffer.from(image.data, "base64").length,
-      ...(references ? { ref: { entryId, index } } : { data: image.data }),
+      ...(references ? { ref: { entryId, index }, contentHash: imageContentHash(image) } : { data: image.data }),
     }));
   } catch { return []; }
 }
@@ -165,7 +169,7 @@ export function pendingInputMessage(input) {
     createdAt: iso(input.acceptedAt ?? input.createdAt), status: "complete", delivery: input.delivery,
     source: input.source, origin: input.origin, behavior: input.behavior, ...(input.clientMessageId ? { clientMessageId: input.clientMessageId } : {}),
     ...(input.images?.length ? { images: input.images.map((image, index) => ({ type: "image", mimeType: image.mimeType,
-      ref: { entryId: input.inputId, index }, size: Buffer.from(image.data, "base64").length })) } : {}) };
+      ref: { entryId: input.inputId, index }, contentHash: imageContentHash(image), size: Buffer.from(image.data, "base64").length })) } : {}) };
 }
 export function projectVisibleMessage(entry, { streaming = false, imageReferences = false, sanitizePresentation = false,
   inputAssociation, canonicalEntries, sessionId, inputReceipt, allowToolImages = false } = {}) {

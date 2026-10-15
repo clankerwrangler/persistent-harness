@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { mkdtemp, writeFile, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -41,6 +42,14 @@ test("new user identity does not rewrite literal marker text and keeps canonical
   assert.deepEqual(pending.images[0].ref, { entryId: inputId, index: 0 });
   assert.equal(pending.images[0].mimeType, "image/png");
   assert.equal(pending.images[0].size, Buffer.from(PNG, "base64").length);
+  const expectedHash = createHash("sha256").update("image/png\0").update(PNG, "base64").digest("hex");
+  assert.equal(pending.images[0].contentHash, expectedHash);
+  assert.equal(visible.messages[0].images[0].contentHash, expectedHash, "entry-reference changes do not change content identity");
+  const replacement = Buffer.from(PNG, "base64"); replacement[replacement.length - 1] ^= 1;
+  const changed = pendingInputMessage({ ...receipt(inputId), images: [{ type: "image", mimeType: "image/png", data: replacement.toString("base64") }] });
+  assert.equal(changed.images[0].size, pending.images[0].size);
+  assert.notEqual(changed.images[0].contentHash, expectedHash, "content identity distinguishes equal-size bytes");
+  assert.equal(projectVisibleMessage(entry).images[0].contentHash, undefined, "inline images do not add reference metadata");
 });
 
 test("custom background and cron entries retain explicit non-user provenance", () => {
