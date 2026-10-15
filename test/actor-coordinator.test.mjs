@@ -4,6 +4,7 @@ import { mkdtemp, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { createAgentStartPromptCapture } from "../src/actor-prompt.mjs";
+import { projectCanonicalContext } from "../src/canonical-context.mjs";
 import { ActorCoordinator } from "../src/actor-coordinator.mjs";
 import { createCompactionDriver, createCompactionPreparationCapture } from "../src/actor-compaction.mjs";
 import { projectVisibleMessage } from "../src/conversation-projection.mjs";
@@ -12,9 +13,9 @@ const { sdk, api, core } = await loadExternalPi();
 const deferred = () => Promise.withResolvers();
 const wait = async (promise, message) => Promise.race([promise, new Promise((_, reject) => { const timer = setTimeout(() => reject(new Error(message)), 5000); timer.unref(); })]);
 const usage = () => ({ input: 1, output: 1, cacheRead: 0, cacheWrite: 0, totalTokens: 2, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } });
-async function fixture(t, { prepareRequest, script, retry, compaction, compactionDriver, hooks, promptExtensions = [], captureFirst = false, basePromptOptions, automaticCompactionAllowed } = {}) {
+async function fixture(t, { prepareRequest, script, retry, compaction, compactionDriver, hooks, promptExtensions = [], captureFirst = false, basePromptOptions, automaticCompactionAllowed, model: suppliedModel } = {}) {
   const root = await mkdtemp(path.join(os.tmpdir(), "sc-"));
-  const model = { id: "fixture", name: "Fixture", provider: "coordinator-test", api: "coordinator-test-api", reasoning: false,
+  const model = suppliedModel ?? { id: "fixture", name: "Fixture", provider: "coordinator-test", api: "coordinator-test-api", reasoning: false,
     input: ["text"], cost: usage().cost, contextWindow: 32000, maxTokens: 1000 };
   const models = await sdk.ModelRuntime.create({ credentials: new api.InMemoryCredentialStore(), modelsPath: null, allowModelNetwork: false });
   const requests = [], events = []; const held = deferred(), toolStarted = deferred(); let runs = 0, coor;
@@ -28,7 +29,8 @@ async function fixture(t, { prepareRequest, script, retry, compaction, compactio
         const content = Array.isArray(scripted) ? scripted : scripted?.content ?? (n === 1 ? [{ type: "toolCall", id: "call-one", name: "hold", arguments: {} }] : [{ type: "text", text: "done" }]);
         const message = { role: "assistant", content, provider: model.provider, api: model.api, model: model.id,
           usage: scripted?.usage ?? usage(), timestamp: Date.now(), stopReason: scripted?.stopReason ?? (content.some(p => p.type === "toolCall") ? "toolUse" : "stop"),
-          ...(scripted?.errorMessage ? { errorMessage: scripted.errorMessage } : {}) };
+          ...(scripted?.errorMessage ? { errorMessage: scripted.errorMessage } : {}),
+          ...(scripted?.diagnostics ? { diagnostics: scripted.diagnostics } : {}) };
         stream.push({ type: "start", partial: { ...message, content: [] } });
         for (const event of scripted?.events?.(message) ?? []) stream.push(event);
         if (message.stopReason === "error") stream.push({ type: "error", reason: "error", error: message });
@@ -594,4 +596,39 @@ test("a failed canonical append leaves already-published text visible and report
   assert.deepEqual(f.manager.getEntries().filter(entry => entry.type === "custom").map(entry => entry.customType),
     ["persistent-harness.inference-retry-v1"], "only the existing failure decision is recorded; no metadata write or repair");
   assert(!f.manager.getBranch().some(entry => entry.message?.id === attempted.id), "uncommitted text is not claimed durable");
+});
+
+for (const completion of ["partial", "complete"]) test(`STOCK-shaped failed ordinary ${completion} producer dispatches no call and allows the next request`, async t => {
+  const partial = { type: "toolCall", id: "call_partial|fc_partial", name: "hold", arguments: { code: completion === "partial" ? "print(f\"partial" : "print(1)" } };
+  const f = await fixture(t, { retry: { enabled: false },
+    model: { id: "fixture", name: "Fixture", provider: "openai-codex", api: "openai-codex-responses", reasoning: false,
+      input: ["text"], cost: usage().cost, contextWindow: 32000, maxTokens: 1000 },
+    script: (_context, n) => n === 1 ? { content: [partial], stopReason: "error", errorMessage: "WebSocket error",
+      events: message => {
+        const pending = { ...message, stopReason: "pending" };
+        return [{ type: "toolcall_start", contentIndex: 0, partial: pending }, completion === "complete"
+          ? { type: "toolcall_end", contentIndex: 0, toolCall: partial, partial: pending }
+          : { type: "toolcall_delta", contentIndex: 0, delta: "partial arguments", partial: pending }];
+      },
+      diagnostics: [{ type: "provider_transport_failure", details: {
+        configuredTransport: "auto", eventsEmitted: true, phase: "after_message_stream_start" } }] }
+      : [{ type: "text", text: "RECOVERED" }],
+  });
+  f.coor.projectContext = projectCanonicalContext;
+  await f.coor.submit("original fixture input", "auto", [], "original-input");
+  await wait(f.coor.waitForIdle(), "failed stream did not settle");
+  assert.equal(f.requests.length, 1); assert.equal(f.runs(), 0);
+  const before = structuredClone(f.manager.getEntries());
+  const failed = before.find(e => e.message?.stopReason === "error");
+  assert.deepEqual(failed.message.content, [partial]);
+  assert.equal(failed.message.errorMessage, "WebSocket error");
+  assert.equal(before.filter(e => e.message?.role === "toolResult").length, 0);
+  assert.equal(f.events.filter(e => e.type === "tool_execution_start").length, 0);
+  await f.coor.submit("new explicit fixture input", "auto", [], "next-input");
+  await wait(f.coor.waitForIdle(), "next inference did not settle");
+  assert.equal(f.requests.length, 2); assert.equal(f.runs(), 0); assert.equal(f.coor.failure, null);
+  assert.deepEqual(f.manager.getEntries().slice(0, before.length), before);
+  assert.deepEqual(f.requests[1].messages.filter(m => m.role === "user").map(m => m.id), ["original-input", "next-input"]);
+  assert.equal(f.requests[1].messages.some(m => m.role === "toolResult" || m.content?.some?.(p => p.type === "toolCall")), false);
+
 });
