@@ -78,7 +78,12 @@ The `RecursiveSessionDeletion-*.cfg` configurations cover root and direct-child 
 `DescendantTraversal` checks deduplicated expansion over finite parent graphs,
 including cycles, deleted intermediates, and working-node subsets. It verifies
 termination, at-most-once expansion, and exclusion of the queried session from
-its own descendant count. A bounded subprocess regression checks cycle-member
+its own descendant count. It also compares indexed parent-edge traversal with
+a full-scan oracle, retaining deleted edges in the index for subtree deletion.
+SQLite owns index maintenance; the model does not prove its query planner or
+crash behavior. Store tests verify fresh creation, idempotent migration, covering
+index selection, and read-only reopening without an index. A bounded subprocess
+regression checks cycle-member
 session projections without risking a hung test runner and preserves acyclic and
 deleted-intermediate counts.
 
