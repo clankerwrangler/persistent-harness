@@ -16,8 +16,9 @@ test("owned process identity survives PID checks and refuses mismatched reuse id
     env: { ...process.env, PI_HARNESS_ACTOR_TOKEN: token },
     stdio: "ignore",
   });
-  const exited = once(child, "exit");
+  const exited = once(child, "exit"), closed = once(child, "close");
   t.after(() => {
+    if (child.exitCode !== null || child.signalCode !== null) return;
     try { process.kill(-child.pid, "SIGKILL"); } catch {}
   });
   await once(child, "spawn");
@@ -33,6 +34,9 @@ test("owned process identity survives PID checks and refuses mismatched reuse id
   assert.equal(await verifyOwnedProcessIdentity(identity), true, "mismatched identities must never kill a live process");
   const terminated = await terminateOwnedProcess(identity, { graceMs: 500 });
   assert.equal(terminated.terminated, true);
+  await closed;
+  assert.equal(child.exitCode, null);
+  assert.notEqual(child.signalCode, null, "close proves the signal exit already occurred before the retained exit await");
   await exited;
   assert.equal(await verifyOwnedProcessIdentity(identity), false);
 });
