@@ -205,7 +205,7 @@ stays null; a model label does not establish support.
 `set_session_inference` accepts a validated model and reasoning selection during
 active work. It saves a revisioned `launch.pendingInference` before acknowledging
 it. `selection` and the ordinary launch model/thinking fields remain the last
-acknowledged active selection; `pending` reports the desired selection and any
+acknowledged active selection while a change is pending; `pending` reports the desired selection and any
 application error. Later accepted choices replace pending intent. Choosing the
 active selection also queues a revision, so cancellation remains valid during an
 older asynchronous apply.
@@ -219,7 +219,10 @@ retain their model. Selection changes do not alter saved defaults for new sessio
 
 Generation-bound applied receipts update active launch policy and clear only the
 matching pending revision. The public picker and its expected-selection check use
-that acknowledged policy even during awaited model observers. Pending intent
+that acknowledged policy even during awaited model observers. Without pending
+intent, settings reads retain the existing live worker model/effort behavior.
+Explicit picker admission captures that live baseline; merely reading or using
+idle service setters does not change their existing persistence behavior. Pending intent
 survives reconnect and supervisor restart; normal actor revival starts the last
 active policy and queues pending intent before input delivery. Existing uncertain
 work is not replayed. Failed application retains visible intent and the current

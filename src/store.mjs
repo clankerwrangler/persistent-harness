@@ -691,10 +691,17 @@ export class HarnessStore {
     } catch (error) { this.#db.exec("ROLLBACK"); throw error; }
   }
 
-  queueSessionInference(sessionId, selection, now = Date.now()) {
+  queueSessionInference(sessionId, selection, activeSelection, now = Date.now()) {
     const row = this.#sessionRow(sessionId);
     if (!row || row.lifecycle === "deleted") throw new Error("session does not exist");
     const launch = parseJson(row.launch_json, {});
+    // Capture the observed active baseline only when accepting explicit picker
+    // intent. Existing idle service setters retain their session-only lifetime.
+    if (!launch.pendingInference) {
+      launch.model = { ...launch.model, resolved: { provider: activeSelection.provider, id: activeSelection.model } };
+      launch.thinking = { ...launch.thinking, resolved: activeSelection.thinkingLevel };
+      launch.fastModeSupported = activeSelection.fastModeSupported === true;
+    }
     launch.pendingInference = { requestId: randomUUID(), provider: selection.provider,
       model: selection.model, thinkingLevel: selection.thinkingLevel };
     this.#db.prepare("UPDATE sessions SET launch_json = ?, updated_at = ? WHERE id = ?")

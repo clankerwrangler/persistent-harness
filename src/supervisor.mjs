@@ -1038,9 +1038,10 @@ export class HarnessSupervisor {
     if (!session || session.lifecycle === "deleted") throw requestFailure("not_found", "session does not exist");
     // The acknowledged launch policy owns the public active selection. Pi can
     // mutate its model before awaited observers publish the applied receipt.
-    const current = resolveModelSelection(available?.models, session.launch?.model?.resolved
-      ?? { provider: state?.model?.provider, id: state?.model?.id });
-    const thinkingLevel = session.launch?.thinking?.resolved ?? state?.thinkingLevel;
+    const pending = session.launch?.pendingInference;
+    const current = resolveModelSelection(available?.models, pending ? session.launch?.model?.resolved
+      : { provider: state?.model?.provider, id: state?.model?.id });
+    const thinkingLevel = pending ? session.launch?.thinking?.resolved : state?.thinkingLevel;
     validateInferenceEffort(thinkingLevel, current);
     const busy = Boolean(state?.isStreaming || state?.isCompacting || Number(state?.pendingMessageCount) > 0
       || ["working", "delegating"].includes(session.activity) || this.store.hasPendingSessionWork(sessionId));
@@ -1069,13 +1070,14 @@ export class HarnessSupervisor {
     if (session.launch?.fastModeRootSessionId !== params.sessionId) {
       throw requestFailure("invalid_request", "only the root session can change family Fast mode");
     }
-    const selection = { provider: session.launch?.model?.resolved?.provider ?? state?.model?.provider,
-      model: session.launch?.model?.resolved?.id ?? state?.model?.id,
-      thinkingLevel: session.launch?.thinking?.resolved ?? state?.thinkingLevel, fastMode: session.launch?.fastMode ?? null };
+    const pending = session.launch?.pendingInference;
+    const selection = { provider: pending ? session.launch?.model?.resolved?.provider : state?.model?.provider,
+      model: pending ? session.launch?.model?.resolved?.id : state?.model?.id,
+      thinkingLevel: pending ? session.launch?.thinking?.resolved : state?.thinkingLevel, fastMode: session.launch?.fastMode ?? null };
     if (Object.keys(selection).some(key => selection[key] !== params.expected[key])) {
       throw requestFailure("stale_inference", "session inference selection changed; refresh and try again");
     }
-    const fastModeSupported = session.launch?.fastModeSupported ?? supportsFastMode(state.model);
+    const fastModeSupported = pending ? session.launch?.fastModeSupported : supportsFastMode(state.model);
     const changed = selection.fastMode !== params.fastMode;
     if (changed) this.store.updateSessionFastMode(params.sessionId, params.fastMode, selection.fastMode);
     // The durable receipt is authoritative. No post-commit actor RPC can turn success into failure.
@@ -1103,7 +1105,8 @@ export class HarnessSupervisor {
       && params.thinkingLevel === current.selection.thinkingLevel;
     if (same && !current.pending) return { ...current, changed: false };
     const pending = this.store.queueSessionInference(params.sessionId,
-      { provider: target.provider, model: target.id, thinkingLevel: params.thinkingLevel });
+      { provider: target.provider, model: target.id, thinkingLevel: params.thinkingLevel },
+      { ...current.selection, fastModeSupported: current.fastModeSupported });
     this.#broadcastNavigator("inference_pending");
     await this.#sendPendingInference(params.sessionId, actor, pending);
     return { ...await this.#inferenceSnapshot(params.sessionId, actor, false), changed: true };
