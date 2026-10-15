@@ -1,29 +1,36 @@
 --------------------- MODULE FailedCallProjection ---------------------
 EXTENDS Naturals, Sequences, FiniteSets, TLC
-\* Two provider call identities abstract the completed native prefix and the
-\* interrupted suffix. Original records, results, and signatures never change.
-\* Evidence is usable only for a failed turn, a fenced/retired exact attempt,
-\* an explicitly incomplete nonnative observation, and no contrary admission.
+\* Native incomplete observations need a retired/fenced attempt. An ordinary
+\* failed terminal from a recognized non-streaming-dispatch producer admits no
+\* calls, whether its call arguments are complete or partial. Ambiguous producer
+\* history is not in ordinary. Contrary admission/result/alias evidence vetoes
+\* both paths. The selected canonical archive is never modified or executed.
+\* stock means the typed STOCK Codex after-start websocket failure witness:
+\* exact API/provider, eventsEmitted=true, transport auto/websocket. Missing or
+\* malformed evidence is ambiguous. Own native envelope/error/provider IDs or
+\* native call provenance are native; neither category grants STOCK omission.
 CONSTANT Calls
-VARIABLES admitted, results, failed, incomplete, conflicting, fenced,
+VARIABLES admitted, results, failed, incomplete, ordinary, witnessKind, conflicting, fenced,
           selected, kept, mode, phase, canonical, projected, skipped, blocking,
           outstanding, effects
-vars == <<admitted, results, failed, incomplete, conflicting, fenced,
+vars == <<admitted, results, failed, incomplete, ordinary, witnessKind, conflicting, fenced,
           selected, kept, mode, phase, canonical, projected, skipped, blocking,
           outstanding, effects>>
-Unadmitted == IF fenced THEN
-  (selected \cap failed \cap incomplete) \ (admitted \cup results \cup conflicting)
-  ELSE {}
+StockEvidence == IF witnessKind = "stock" THEN ordinary ELSE {}
+Evidence == StockEvidence \cup (IF fenced THEN incomplete ELSE {})
+Unadmitted == (selected \cap failed \cap Evidence) \ (admitted \cup results \cup conflicting)
 Init == /\ admitted \in SUBSET Calls
         /\ results \in SUBSET Calls
         /\ failed \in SUBSET Calls
         /\ incomplete \in SUBSET Calls
+        /\ ordinary \in SUBSET Calls
+        /\ witnessKind \in {"stock", "ambiguous", "native"}
         /\ conflicting \in SUBSET Calls
         /\ fenced \in BOOLEAN
         /\ selected \in {Calls, {"prefix"}, {"suffix"}}
         /\ kept \in {Calls, {"suffix"}, {}}
         /\ mode \in {"native", "ordinary"}
-        /\ canonical = <<selected, admitted, results, failed, incomplete, conflicting>>
+        /\ canonical = <<selected, admitted, results, failed, incomplete, ordinary, witnessKind, conflicting>>
         /\ phase = "input" /\ projected = {} /\ skipped = {}
         /\ outstanding = {} /\ blocking = {} /\ effects = {}
 Project == /\ phase = "input"
@@ -33,13 +40,13 @@ Project == /\ phase = "input"
            /\ blocking' = IF mode = "native" THEN {} ELSE
                 ((selected \cap kept) \ Unadmitted) \cap (failed \cup (Calls \ results))
            /\ phase' = "projected"
-           /\ UNCHANGED <<admitted, results, failed, incomplete, conflicting,
+           /\ UNCHANGED <<admitted, results, failed, incomplete, ordinary, witnessKind, conflicting,
                  fenced, selected, kept, mode, canonical, effects>>
 Next == Project \/ (phase = "projected" /\ UNCHANGED vars)
 Spec == Init /\ [][Next]_vars
-CanonicalPreserved == canonical = <<selected, admitted, results, failed, incomplete, conflicting>>
+CanonicalPreserved == canonical = <<selected, admitted, results, failed, incomplete, ordinary, witnessKind, conflicting>>
 NoExecution == effects = {}
-PositiveEvidenceOnly == skipped \subseteq failed \cap incomplete
+PositiveEvidenceOnly == skipped \subseteq failed \cap Evidence
 AdmissionPreserved == phase = "projected" =>
   selected \cap kept \cap (admitted \cup results \cup conflicting) \subseteq projected
 NoInvention == projected \subseteq selected \cap kept
@@ -49,4 +56,6 @@ UnknownStillOutstanding == phase = "projected" => outstanding = (selected \cap a
 NoCompactionBypass == phase = "projected" /\ mode = "ordinary" =>
   \A c \in projected : (c \in failed \/ c \notin results) => c \in blocking
 BranchScoped == skipped \subseteq selected
+OrdinaryCompleteAlsoUnadmitted == phase = "projected" =>
+  ((selected \cap kept \cap failed \cap StockEvidence) \ (admitted \cup results \cup conflicting)) \subseteq skipped
 =============================================================================
