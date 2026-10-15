@@ -23,7 +23,7 @@ import { NotificationStore, NOTIFICATION_IDLE_MS } from "./notification-store.mj
 import { JsonLineDecoder, encodeFrame } from "./framing.mjs";
 import { supportsFastMode } from "./fast-mode.mjs";
 import { projectAvailableModels, resolveModelSelection, validateInferenceEffort } from "./inference-options.mjs";
-import { actorInputPrompt,
+import { actorInputDigest, actorInputPrompt,
   MAX_FRAME_BYTES,
   PROTOCOL_VERSION,
   ProtocolError,
@@ -1403,11 +1403,13 @@ export class HarnessSupervisor {
     const input = await this.#withSessionMutation(job.sessionId, async () => {
       const session = this.store.getSession(job.sessionId);
       if (!session || session.lifecycle === "deleted") return null;
+      const inputId = `background-completion-${job.id}`;
+      const previous = this.store.getActorInput(inputId, job.sessionId, { includeDigest: true });
       const input = this.store.createActorInput(job.sessionId, {
-        inputId: `background-completion-${job.id}`,
+        inputId,
         message: job.message,
         source: "background", origin: { jobId: job.id },
-        behavior: "follow_up",
+        behavior: previous?.behavior ?? (previous?.digest === actorInputDigest(job.message, "[]", "follow_up") ? "follow_up" : "auto"),
         pendingLimit: this.pendingMessageLimit,
       });
       if (input.state !== "completed") {

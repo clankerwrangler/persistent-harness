@@ -72,6 +72,8 @@ NoReadinessAdmissionGate == phase = "open" /\ request = "none" => \A i \in Input
 \* Publication is the existing live input-state event, not canonical admission.
 VisibleAtAcceptance == Pending \subseteq published
 OnlyDurablePublication == \A i \in published: receipts[i] = 1
+DeliveryNotTurnEndGated == phase = "open" /\ owner /\ actor = "ready" =>
+    \A i \in batch: ENABLED Deliver(i)
 OnlyDurableDelivery == \A i \in delivered: receipts[i] = 1
 Spec == Init /\ [][Next]_vars
 =============================================================================

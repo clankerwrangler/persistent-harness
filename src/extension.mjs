@@ -402,7 +402,8 @@ export function createActorInputDelivery({ pi, getClient, getContext }) {
     if (entries.some((entry) => entry.type === "custom_message")) throw new Error("canonical input conflicts with its durable reservation");
     if (!enqueued.has(inputId)) {
       // Pi sends internal inputs through its existing steering/follow-up queues.
-      pi.sendMessage(payload, { triggerTurn: true, deliverAs: input.behavior === "follow_up" ? "followUp" : "steer" });
+      const behavior = input.source === "background" ? "auto" : input.behavior;
+      pi.sendMessage(payload, incomingSendOptions(behavior, !ctx.isIdle()));
       enqueued.add(inputId);
     }
     await client.request("accept_actor_input", { inputId });

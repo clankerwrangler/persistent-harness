@@ -3,8 +3,8 @@ import path from "node:path";
 import { slimFixture, until } from "./slim-stream.mjs";
 
 /** Real stock worker, loopback transport, and a held persistent Python call. */
-export async function modelSwitchFixture(t, { maxRequests = 3 } = {}) {
-  let releasePath;
+export async function modelSwitchFixture(t, { maxRequests = 3, readNamespaceOnContinuation = true, holdContinuationResponse = false } = {}) {
+  let releasePath, continuationReleased = false;
   const call = (id, code, native) => ({ type: "function_call", id: `fc_${id}`, call_id: id,
     name: "ipython", arguments: JSON.stringify({ code }), ...(native ? { async: true } : {}) });
   const complete = (f, response, output) => {
@@ -21,13 +21,14 @@ print("HOLD_DONE", persistent_probe)`;
       const tool = call("held-python", code, true);
       send(response, { type: "response.output_item.added", output_index: 0, item: { ...tool, arguments: "" } });
       send(response, { type: "response.output_item.done", output_index: 0, item: tool });
-    } else if (index === 2) {
+    } else if (index === 2 && readNamespaceOnContinuation) {
       const tool = call("read-python", 'print("KEPT_NAMESPACE", persistent_probe + 1)', false);
       send(response, { type: "response.output_item.added", output_index: 0, item: { ...tool, arguments: "" } });
       send(response, { type: "response.output_item.done", output_index: 0, item: tool });
       send(response, { type: "response.completed", response: { id: "response-2", status: "completed", output: [tool],
         usage: { input_tokens: 10, output_tokens: 2, total_tokens: 12 } } }); response.end();
     } else {
+      if (holdContinuationResponse && !continuationReleased) return;
       const answer = item(0, "SWITCH_DONE");
       send(response, { type: "response.output_item.added", output_index: 0, item: { ...answer, content: [] } });
       send(response, { type: "response.output_item.done", output_index: 0, item: answer });
@@ -46,6 +47,16 @@ print("HOLD_DONE", persistent_probe)`;
     finishStream() {
       const response = f.responses[0];
       complete(f, response, []);
+    },
+    finishContinuation() {
+      continuationReleased = true;
+      for (const response of f.responses.slice(1)) {
+        if (response.writableEnded || response.destroyed) continue;
+        const answer = f.item(0, "SWITCH_DONE");
+        f.send(response, { type: "response.output_item.added", output_index: 0, item: { ...answer, content: [] } });
+        f.send(response, { type: "response.output_item.done", output_index: 0, item: answer });
+        complete(f, response, [answer]);
+      }
     },
     async releaseTool() { await writeFile(releasePath, "release"); },
     async toolFinished() { await until(() => f.rawEvents.some(e => e.type === "message_end" && e.message?.role === "toolResult" && e.message.toolCallId.startsWith("held-python")), "held tool finishes"); },

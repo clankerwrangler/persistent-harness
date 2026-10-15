@@ -170,8 +170,12 @@ created. The monitor owns at most 128 concurrent dispatch promises and continues
 its existing bounded discovery scans while an owner starts. Actor readiness waits
 outside session mutation, so later same-owner inputs can also persist. A completion
 marker is written only after dispatch succeeds; failed startup remains retryable.
-Stopping the monitor drains its owned dispatches. Background inputs retain
-`follow_up` behavior and enter canonical context only at the existing turn boundary.
+Stopping the monitor drains its owned dispatches. Background inputs use the existing steering queue while active and an ordinary
+turn while idle. They enter canonical context at the next safe checkpoint rather
+than waiting for the whole run. Delivery does not itself abort or replay tools.
+Legacy receipt behavior/digests remain immutable while pending background inputs
+resolve through the current automatic route; already-injected old queues are not
+manipulated.
 
 ### User location attachment
 

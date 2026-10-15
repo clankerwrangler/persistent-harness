@@ -9,6 +9,7 @@ import { promisify } from "node:util";
 import { HarnessClient } from "../src/client.mjs";
 import { HarnessSupervisor } from "../src/supervisor.mjs";
 import { ACTOR_INPUT_COMMAND } from "../src/protocol.mjs";
+import { backgroundCompletionMessage } from "../src/background-notifier.mjs";
 import { actorInputCustomPayload } from "../src/extension.mjs";
 
 class FakeActor extends EventEmitter {
@@ -46,7 +47,7 @@ async function eventually(fn, timeoutMs = 3000) {
   throw new Error("condition did not become true");
 }
 
-test("Python background launch reaches the owning actor as one durable follow-up", async (t) => {
+test("Python background launch reaches the owning actor as one durable automatic input", async (t) => {
   const root = await mkdtemp(path.join(os.tmpdir(), "harness-background-completion-"));
   const socketPath = path.join(root, "run", "supervisor.sock");
   const agentDirectory = path.join(root, "agent");
@@ -109,7 +110,7 @@ print(json.dumps(asyncio.run(harness_background.run(
   await eventually(() => actors.has("owner"));
   const actor = actors.get("owner");
   await eventually(() => actor.submits.length === 1);
-  assert.equal(actor.submits[0].behavior, "follow_up");
+  assert.equal(actor.submits[0].behavior, "auto");
   assert.equal(actor.submits[0].customType, "persistent-harness-input");
   assert.equal(actor.submits[0].details.source, "background");
   assert.match(actor.submits[0].message, /not a new user submission/);
@@ -188,6 +189,10 @@ test("cold background owners do not block completion enqueue, publication, or st
     await writeFile(path.join(directory, "meta.json"), JSON.stringify({ schema: "background.job.v1", id, name: id, kind: "launched", session_id: owner }));
     await writeFile(path.join(directory, "exit.json"), JSON.stringify({ exit_code: 0, signal: null, ended_at: new Date().toISOString() }));
   };
+  // Retain a pre-upgrade receipt, including its original immutable behavior/digest.
+  supervisor.store.createActorInput("owner-a", { inputId: inputId(jobs[0]), source: "background", origin: { jobId: jobs[0] }, behavior: "follow_up",
+    message: backgroundCompletionMessage({ id: jobs[0], name: jobs[0], exitCode: 0, signal: null }) });
+  const legacyDigest = supervisor.store.getActorInput(inputId(jobs[0]), "owner-a", { includeDigest: true }).digest;
   await complete(jobs[0], "owner-a"); await eventually(() => held);
   // These arrive on later scans while the first owner's startup remains held.
   await complete(jobs[1], "owner-a"); await complete(jobs[2], "owner-b");
@@ -204,8 +209,14 @@ test("cold background owners do not block completion enqueue, publication, or st
   await eventually(() => supervisor.store.listPendingActorInputs("owner-a").length === 0);
   const submitted = actors.flatMap(actor => actor.submits);
   for (const id of jobs) assert.equal(submitted.filter(input => input.details.inputId === inputId(id)).length, 1);
-  assert(submitted.every(input => input.behavior === "follow_up"));
+  assert.deepEqual(submitted.map(input => [input.details.inputId, input.behavior]).sort(),
+    jobs.map((id, index) => [inputId(id), index === 0 ? "follow_up" : "auto"]).sort());
   const canonical = (await readFile(path.join(root, "owner-a.jsonl"), "utf8")).trim().split("\n").map(JSON.parse).filter(entry => entry.type === "custom_message");
   assert.deepEqual(canonical.map(entry => entry.details.inputId), jobs.slice(0, 2).map(inputId));
   for (let i = 0; i < jobs.length; i++) assert.equal(supervisor.store.getActorInput(inputId(jobs[i]), i === 2 ? "owner-b" : "owner-a").state, "completed");
+  assert.equal(supervisor.store.getActorInput(inputId(jobs[0]), "owner-a", { includeDigest: true }).digest, legacyDigest);
+  await rm(path.join(jobsDirectory, jobs[0], "notification.json"));
+  await eventually(async () => { try { return JSON.parse(await readFile(path.join(jobsDirectory, jobs[0], "notification.json"), "utf8")).state === "sent"; } catch { return false; } });
+  assert.equal(actors.flatMap(actor => actor.submits).length, 3, "completed legacy receipt retries do not inject or rewrite canonical input");
+  assert.equal(supervisor.store.getActorInput(inputId(jobs[0]), "owner-a", { includeDigest: true }).digest, legacyDigest);
 });

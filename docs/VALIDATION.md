@@ -127,12 +127,15 @@ error and its clearing on retry, and verify stop/delete/restart.
 
 `BackgroundCompletions` checks bounded dispatch ownership, acceptance independent
 of cold owners, durable publication, sent-after-readiness, retry/idempotence,
-owner ordering, the follow-up boundary, and stop after dispatch drain. It abstracts
+owner ordering, safe-checkpoint admission independent of run end, and stop after
+dispatch drain. It abstracts
 filesystem polling and process startup latency. Background notifier/supervisor
 regressions hold startup across later scans, verify same-owner and unrelated-owner
 progress, reject startup then recover without duplicate canonical entries, and
 check bounded dispatch and stop drain. The paired WebUI real-worker browser case
-checks live queued rows before admission without reload, then exact promotion.
+checks live queued rows without reload, model-request receipt before an older
+held Python call finishes, exact promotion, and retained-state completion without
+replay. Legacy pending/completed receipts keep their original identity/digest.
 
 `SettledWakeOrdering` checks both mutation orderings: a wake registered before Stop
 is joined, and a later settled callback cannot reenter readiness after Stop.
