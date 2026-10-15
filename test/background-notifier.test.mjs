@@ -42,20 +42,27 @@ test("background completion monitor durably queues one follow-up and survives a 
   assert.match(deliveries[0].message, /completed successfully/);
   const notification = path.join(directory, id, "notification.json");
   await assert.rejects(readFile(notification), { code: "ENOENT" });
+  await createJob(directory, "bg-0123456789ac");
+  await eventually(() => deliveries.length === 2);
+  let drained = false;
+  const stopping = monitor.stop().then(() => { drained = true; });
+  await new Promise(resolve => setTimeout(resolve, 20));
+  assert.equal(drained, false, "stop drains the existing owned dispatches");
   releaseDispatch.resolve();
+  await stopping;
   await eventually(async () => {
     try { await readFile(notification); return true; }
     catch (error) { if (error.code === "ENOENT") return false; throw error; }
   });
   assert.deepEqual(JSON.parse(await readFile(notification, "utf8")).state, "sent");
   await new Promise((resolve) => setTimeout(resolve, 250));
-  assert.equal(deliveries.length, 1);
+  assert.equal(deliveries.length, 2);
 
   await monitor.stop();
   const restarted = new BackgroundCompletionMonitor({ directory, intervalMs: 100, dispatch: async () => { throw new Error("must not redeliver"); } });
   restarted.start(); t.after(() => restarted.stop());
   await new Promise((resolve) => setTimeout(resolve, 250));
-  assert.equal(deliveries.length, 1);
+  assert.equal(deliveries.length, 2);
 });
 
 test("background completion monitor delivers an adopted process with an unknown exit result", async (t) => {
@@ -426,4 +433,22 @@ test("fair discovery reaches jobs beyond retained history without stale activity
   identity.child.kill("SIGKILL");
   await exited;
   await eventually(() => restarted.getActiveBackgroundJobs("session-a").length === 0);
+});
+
+test("slow completion dispatch ownership stays bounded without losing later jobs", async t => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), "background-notifier-dispatch-limit-"));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const gate = Promise.withResolvers(); t.after(() => gate.resolve());
+  for (let i = 0; i < 130; i++) await createJob(directory, `bg-${i.toString(16).padStart(12, "0")}`);
+  const deliveries = [];
+  const monitor = new BackgroundCompletionMonitor({ directory, intervalMs: 100, dispatch: async job => {
+    deliveries.push(job.id); await gate.promise;
+  } });
+  monitor.start(); t.after(() => monitor.stop());
+  await eventually(() => deliveries.length === 128);
+  await new Promise(resolve => setTimeout(resolve, 220));
+  assert.equal(deliveries.length, 128, "in-flight dispatches share the existing 128-job bound");
+  gate.resolve(); await eventually(() => deliveries.length === 130);
+  await monitor.stop(); assert.equal(new Set(deliveries).size, 130);
+  for (const id of deliveries) assert.equal(JSON.parse(await readFile(path.join(directory, id, "notification.json"), "utf8")).state, "sent");
 });

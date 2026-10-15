@@ -165,6 +165,14 @@ identity resolution and the supervisor verifies the exact entry before delivery.
 This avoids duplicate startup work without changing compaction, delivery, or
 provider-request boundaries.
 
+Background completions publish accepted input state when their durable receipt is
+created. The monitor owns at most 128 concurrent dispatch promises and continues
+its existing bounded discovery scans while an owner starts. Actor readiness waits
+outside session mutation, so later same-owner inputs can also persist. A completion
+marker is written only after dispatch succeeds; failed startup remains retryable.
+Stopping the monitor drains its owned dispatches. Background inputs retain
+`follow_up` behavior and enter canonical context only at the existing turn boundary.
+
 ### User location attachment
 
 `submit_input` accepts optional `location` on a genuine user message. It contains
