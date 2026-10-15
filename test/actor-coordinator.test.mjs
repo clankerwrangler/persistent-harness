@@ -205,6 +205,35 @@ test("follow-up waits for the ordinary post-result answer", async t => {
   assert.equal(f.requests.length, 3);
   assert(!JSON.stringify(f.requests[1].messages).includes("FOLLOW")); assert(JSON.stringify(f.requests[2].messages).includes("FOLLOW"));
 });
+
+for (const kind of ["user", "family"]) test(`${kind} follow-up keeps the completed-answer boundary when auto input arrives`, async t => {
+  let injectAuto = false, f;
+  f = await fixture(t, { hooks: pi => {
+    pi.on("turn_end", event => {
+      if (injectAuto || event.message.stopReason !== "stop") return;
+      injectAuto = true;
+      assert.equal(f.coor.tasks.size, 0, "the completed answer has no unfinished tools");
+      pi.sendMessage({ customType: "fixture.auto", content: "NEWER_AUTO", display: true }, { triggerTurn: true, deliverAs: "steer" });
+    });
+  } });
+  await f.coor.submit("start"); await wait(f.toolStarted.promise, "tool did not start");
+  if (kind === "user") await f.coor.submit("OLDER_FOLLOW", "follow_up", [], "follow-identity");
+  else await f.coor.sendCustom({ customType: "fixture.family", content: "OLDER_FOLLOW", display: true,
+    details: { messageId: "follow-identity" } }, { triggerTurn: true, deliverAs: "followUp" });
+  assert.equal(f.requests.length, 1, "follow-up stays deferred during the actual tool");
+  f.held.resolve(); await wait(f.coor.waitForIdle(), "concurrent auto/follow-up did not settle");
+  assert(!JSON.stringify(f.requests[1].messages).includes("OLDER_FOLLOW"), "the original post-result answer comes first");
+  const next = JSON.stringify(f.requests[2].messages);
+  assert(next.includes("OLDER_FOLLOW"), "the completed answer admits the waiting follow-up before the next request");
+  assert(next.indexOf("OLDER_FOLLOW") < next.indexOf("NEWER_AUTO"), "eligible inputs retain their existing queue order");
+  assert.equal(f.requests.length, 3, "auto arrival cannot add a separate delayed follow-up request");
+  const admissions = f.manager.getBranch().filter(entry => entry.type === "custom_message"
+    || (entry.type === "message" && entry.message.role === "user"));
+  assert.equal(JSON.stringify(admissions).split("OLDER_FOLLOW").length - 1, 1);
+  assert.equal(JSON.stringify(admissions).split("NEWER_AUTO").length - 1, 1);
+  assert.equal(f.runs(), 1);
+});
+
 test("service lease queues input without concurrent provider execution", async t => {
   const f = await fixture(t, { script: () => [{ type: "text", text: "done" }] });
   const entered = deferred(), release = deferred();
