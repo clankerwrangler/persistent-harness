@@ -1411,6 +1411,7 @@ export class HarnessSupervisor {
         pendingLimit: this.pendingMessageLimit,
       });
       if (input.state !== "completed") {
+        this.#publishInputState(job.sessionId, pendingInputMessage(input));
         this.#notifications.noteContinuation(job.sessionId, `background:${job.id}`, job.startedAt);
         const actor = await this.#ensureActorReady(job.sessionId);
         this.#kickActorInputDelivery(job.sessionId, actor);
