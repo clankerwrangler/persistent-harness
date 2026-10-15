@@ -6,6 +6,7 @@ import { constants as fsConstants, readFileSync } from "node:fs";
 import { link, lstat, mkdir, open, readFile, readdir, rename, stat, unlink } from "node:fs/promises";
 import path from "node:path";
 import { findModels, supportedThinkingLevels } from "./child-policy.mjs";
+import { readRecentEvents } from "./event-log-reader.mjs";
 
 const MAX_READ_BYTES = 50 * 1024;
 const MAX_WRITE_BYTES = 1024 * 1024;
@@ -1043,20 +1044,7 @@ export function createHostHandlers({ cwd, getClient, getContext = () => undefine
       const value = requireRecord(payload, "operations.events payload");
       const limit = boundedInteger(value.limit, "limit", 1, 500, 100);
       const status = await client.request("get_status", {});
-      const lines = [];
-      for (const filePath of [`${status.daemon.logPath}.1`, status.daemon.logPath]) {
-        try {
-          const content = await readFile(filePath, "utf8");
-          for (const line of content.split("\n")) if (line) lines.push(line);
-        } catch (error) {
-          if (error?.code !== "ENOENT") throw error;
-        }
-      }
-      const events = [];
-      for (const line of lines.slice(-limit)) {
-        try { events.push(JSON.parse(line)); } catch {}
-      }
-      return { events, truncated: lines.length > limit, logPath: status.daemon.logPath };
+      return readRecentEvents(status.daemon.logPath, limit);
     },
 
     async "session_history.query"(payload) {

@@ -155,3 +155,11 @@ including genuine stock-worker slim events, restart, branch navigation,
 pagination, protected metadata, and injected append failure. The separate WebUI
 browser regression checks keyed progress nodes during live text arrival and
 completion, then independently checks reload reconstruction.
+
+`EventLogTail` compares a reverse nonempty-line scan with the complete forward
+log oracle, including malformed-line quota and exact truncation detection. It
+checks 6,441 distinct states for the bounded configuration. The model abstracts
+segment sampling and byte decoding; `event-log-reader.test.mjs` checks rotated
+order, pinned inodes, missing segments, UTF-8 boundaries, large records, short
+reads, concurrent truncation, descriptor cleanup, and suffix-only I/O. A log read
+remains a best-effort observation of two segments, not an atomic rotation snapshot.
