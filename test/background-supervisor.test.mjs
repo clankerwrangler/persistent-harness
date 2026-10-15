@@ -72,6 +72,15 @@ test("Python background launch reaches the owning actor as one durable follow-up
   await writeFile(sessionFile, `${JSON.stringify({ type: "session", version: 3, id: "owner", timestamp: new Date().toISOString(), cwd: root })}\n`);
   supervisor.store.createRoot({ sessionId: "owner", sessionFile, cwd: root, repositoryRoot: null,
     name: "Owner", actorToken: "owner-token", launch: {} }, 1);
+  const client = new HarnessClient({ socketPath, heartbeatMs: 0 });
+  await client.start({ registrationType: "register_client", clientInstanceId: "background-presentation" });
+  t.after(() => client.stop());
+  const waiting = [];
+  client.on("event", frame => {
+    const message = frame.event === "input_state" ? frame.data.message : frame.data?.event?.type === "input_state" ? frame.data.event.message : null;
+    if (message) waiting.push(message);
+  });
+  await client.request("subscribe_session", { selector: "owner", passive: true });
   const { stdout } = await promisify(execFile)(process.env.PI_HARNESS_PYTHON || "python3", ["-c", `
 import asyncio, json
 import harness_background
@@ -116,6 +125,11 @@ print(json.dumps(asyncio.run(harness_background.run(
   assert.equal(inputs.length, 1);
   assert.equal(inputs[0].inputId, `background-completion-${jobId}`);
   assert.equal(inputs[0].state, "accepted");
+  assert.equal(waiting.length, 1, "completion acceptance publishes to the already-subscribed owner");
+  assert.equal(waiting[0].id, inputs[0].inputId);
+  assert.equal(waiting[0].role, "background_notification");
+  assert.equal(waiting[0].delivery.state, "accepted");
+  assert.equal(waiting[0].delivery.deliveredAt, null, "publication is not canonical admission");
   assert.equal(JSON.parse(await readFile(path.join(jobDirectory, "exit.json"), "utf8")).exit_code, 0);
   assert.equal(await readFile(path.join(jobDirectory, "output.log"), "utf8"), "completion-proof");
   await new Promise((resolve) => setTimeout(resolve, 250));

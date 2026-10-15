@@ -3,7 +3,7 @@ import path from "node:path";
 import { slimFixture, until } from "./slim-stream.mjs";
 
 /** Real stock worker, loopback transport, and a held persistent Python call. */
-export async function modelSwitchFixture(t) {
+export async function modelSwitchFixture(t, { maxRequests = 3 } = {}) {
   let releasePath;
   const call = (id, code, native) => ({ type: "function_call", id: `fc_${id}`, call_id: id,
     name: "ipython", arguments: JSON.stringify({ code }), ...(native ? { async: true } : {}) });
@@ -34,7 +34,7 @@ print("HOLD_DONE", persistent_probe)`;
       send(response, { type: "response.completed", response: { id: "response-3", status: "completed", output: [answer],
         usage: { input_tokens: 10, output_tokens: 2, total_tokens: 12 } } }); response.end();
     }
-  }, { models: ["gpt-6-astra", "gpt-6.1-sol"], maxRequests: 3 });
+  }, { models: ["gpt-6-astra", "gpt-6.1-sol"], maxRequests });
   releasePath = path.join(f.cwd, "release-tool");
   t.after(() => writeFile(releasePath, "release").catch(() => {}));
   const inference = () => f.client.request("get_session_inference", { sessionId: f.sessionId });
