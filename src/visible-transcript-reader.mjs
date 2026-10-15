@@ -171,11 +171,11 @@ export class VisibleTranscriptReader {
     } finally { await handle.close(); }
   }
 
-  async #readSnapshot({ sessionFile, sessionId, maxMessages = 512, maxBytes = 48 * 1024, sanitizePresentation = false, includeTitleTurn = false, before = null, publicView = false, verifySource = false, historyIndex = false, signal }) {
+  async #readSnapshot({ sessionFile, sessionId, maxMessages = 512, maxBytes = 48 * 1024, sanitizePresentation = false, includeTitleTurn = false, before = null, publicView = false, verifySource = false, historyIndex = false, allowToolImages = false, signal }) {
     const cursor = before === null ? null : parseHistoryCursor(before);
     const filePath = path.resolve(sessionFile);
-    const options = { sessionFile: filePath, sessionId, maxMessages, maxBytes, sanitizePresentation, includeTitleTurn, before, publicView, verifySource, historyIndex, signal };
-    const projectionKey = JSON.stringify([sessionId, maxMessages, maxBytes, sanitizePresentation, includeTitleTurn, before, publicView, verifySource, historyIndex]);
+    const options = { sessionFile: filePath, sessionId, maxMessages, maxBytes, sanitizePresentation, includeTitleTurn, before, publicView, verifySource, historyIndex, allowToolImages, signal };
+    const projectionKey = JSON.stringify([sessionId, maxMessages, maxBytes, sanitizePresentation, includeTitleTurn, before, publicView, verifySource, historyIndex, allowToolImages]);
     const active = this.#inflight.get(filePath);
     if (active) {
       // Independently owned history requests must never share an abort signal.
@@ -190,7 +190,7 @@ export class VisibleTranscriptReader {
       return trailing;
     }
     const state = { promise: null, trailing: new Map() };
-    state.promise = this.#read(filePath, sessionId, { maxMessages, maxBytes, sanitizePresentation, includeTitleTurn, cursor, publicView, verifySource, historyIndex, signal })
+    state.promise = this.#read(filePath, sessionId, { maxMessages, maxBytes, sanitizePresentation, includeTitleTurn, cursor, publicView, verifySource, historyIndex, allowToolImages, signal })
       .catch((error) => { if (!verifySource && error.code !== "history_cursor_stale") this.#records.delete(filePath); throw error; })
       .finally(() => { if (this.#inflight.get(filePath) === state) this.#inflight.delete(filePath); });
     this.#inflight.set(filePath, state);
@@ -507,6 +507,8 @@ export class VisibleTranscriptReader {
       entry: { id: entry.id, type: entry.type, timestamp: entry.timestamp,
         ...(authoritativeUser ? { message: { role: "user", id: candidateId } } : {}) } } : null;
     const message = projectVisibleMessage(entry, { imageReferences: true });
+    const toolImageMessage = entry.type === "message" && entry.message?.role === "toolResult" && source.length <= MAX_INPUT_REQUEST_BYTES
+      ? projectVisibleMessage(entry, { imageReferences: true, allowToolImages: true }) : undefined;
     const progress = projectProgressEntry(entry);
     const agentMessage = projectAgentMessageEntry(entry);
     // Ordinary appends keep the pagination identity. A branch switch invalidates
@@ -518,7 +520,7 @@ export class VisibleTranscriptReader {
     // The image reader revalidates canonical bytes under the input-image bounds.
     const toolImageCount = entry.type === "message" && entry.message?.role === "toolResult" && Array.isArray(entry.message.content)
       ? entry.message.content.filter((part) => part?.type === "image").length : 0;
-    record.entries.set(entry.id, { parentId: entry.parentId, source, inputCandidate, toolImageCount, assistantParts: assistantMessageParts(entry),
+    record.entries.set(entry.id, { parentId: entry.parentId, source, inputCandidate, toolImageCount, toolImageMessage: toolImageMessage?.role === "tool_output" ? toolImageMessage : null, assistantParts: assistantMessageParts(entry),
       inputBoundary: entry.type === "custom_message" || (entry.type === "message" && entry.message?.role === "user"),
       item: message ? { kind: "message", message } : progress ?? agentMessage ?? null });
     record.leafId = entry.id;
@@ -535,7 +537,7 @@ export class VisibleTranscriptReader {
     return result;
   }
 
-  #visibleBranch(record, { sanitizePresentation = false, publicView = false } = {}, associations = new Map()) {
+  #visibleBranch(record, { sanitizePresentation = false, publicView = false, allowToolImages = false } = {}, associations = new Map()) {
     const reversed = [];
     const seen = new Set();
     let id = record.leafId;
@@ -544,7 +546,9 @@ export class VisibleTranscriptReader {
       seen.add(id);
       const entry = record.entries.get(id);
       if (!entry) throw new Error("canonical Pi transcript branch has a missing parent");
-      if (publicView && entry.assistantParts?.length) {
+      if (publicView && allowToolImages && entry.toolImageMessage) {
+        reversed.push({ kind: "message", message: entry.toolImageMessage });
+      } else if (publicView && entry.assistantParts?.length) {
         const parts = entry.assistantParts.map((part) => ({ ...part,
           text: sanitizePresentation ? sanitizePresentationText(part.text).text : part.text })).filter((part) => part.text);
         for (const message of parts.reverse()) reversed.push({ kind: "message", message });

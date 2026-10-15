@@ -168,7 +168,7 @@ export function pendingInputMessage(input) {
       ref: { entryId: input.inputId, index }, size: Buffer.from(image.data, "base64").length })) } : {}) };
 }
 export function projectVisibleMessage(entry, { streaming = false, imageReferences = false, sanitizePresentation = false,
-  inputAssociation, canonicalEntries, sessionId, inputReceipt } = {}) {
+  inputAssociation, canonicalEntries, sessionId, inputReceipt, allowToolImages = false } = {}) {
   const association = inputAssociation ?? (inputReceipt ? resolveActorInputAssociation(canonicalEntries ?? [entry],
     { sessionId, inputReceipt, complete: canonicalEntries !== undefined }) : null);
   if (entry?.type === "custom_message" && entry.customType === ACTOR_INPUT_MESSAGE_TYPE) {
@@ -181,7 +181,15 @@ export function projectVisibleMessage(entry, { streaming = false, imageReference
       createdAt: iso(details.acceptedAt), status: "complete" }, entry, association);
   }
   if (entry?.type !== "message") return undefined;
-  const message = entry.message; if (!message || !["user", "assistant"].includes(message.role)) return undefined;
+  const message = entry.message;
+  if (allowToolImages && message?.role === "toolResult") {
+    const images = visibleUserImages(message.content, { references: imageReferences, entryId: entry.id })
+      .map((image, index) => ({ ...image, name: `Output image ${index + 1}` }));
+    if (!images.length) return undefined;
+    return { id: entry.id, role: "tool_output", text: "", images,
+      createdAt: iso(message.timestamp ?? entry.timestamp), status: "complete" };
+  }
+  if (!message || !["user", "assistant"].includes(message.role)) return undefined;
   const content = message.content ?? message.text;
   const text = visibleContentText(content, { sanitizePresentation: sanitizePresentation && message.role === "assistant" });
   if (message.role === "assistant" && !text && !streaming) return undefined;

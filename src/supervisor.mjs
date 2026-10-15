@@ -911,7 +911,8 @@ export class HarnessSupervisor {
       if (!session || session.lifecycle === "deleted" || !session.sessionFile) throw new Error("session does not have a canonical Pi transcript");
       const { inputIds: _inputIds, inputEntries: _inputEntries, inputDeliveries: _inputDeliveries, inputAssociationStates: _inputAssociationStates, familyMessages = {}, ...visible } = await this.transcriptReader.read({ sessionFile: session.sessionFile,
         sessionId: session.sessionId, sanitizePresentation: session.kind === "root" && session.depth === 0,
-        maxMessages: params.limit ?? 100, before: params.before ?? null, publicView: true });
+        maxMessages: params.limit ?? 100, before: params.before ?? null, publicView: true,
+        allowToolImages: session.kind === "root" && session.depth === 0 });
       if (params.before) return visible;
       const actor = this.#actors.get(session.sessionId);
       const messages = new Map(visible.messages.map((message) => [message.id, message]));
@@ -2374,6 +2375,12 @@ export class HarnessSupervisor {
     }
     if (type === "message_end") {
       const message = frame.message;
+      // The canonical reader owns image rows and bytes. Only invalidate public
+      // history after a committed root result; never forward raw tool payloads.
+      if (message?.role === "toolResult" && record?.rootOutputSession?.kind === "root"
+        && record.rootOutputSession.depth === 0 && message.content?.some(part => part?.type === "image")) {
+        return { type, message: { role: "toolResult" } };
+      }
       if (message?.role !== "assistant") return { type };
       const content = Array.isArray(message.content)
         ? message.content.map((part, contentIndex) => {

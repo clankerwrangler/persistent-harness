@@ -13,6 +13,15 @@ test("image RPC admits root tool images without exposing child results or changi
     { type: "message", id: "output", parentId: "input", message: { role: "toolResult", content: [image] } },
   ].map(JSON.stringify).join("\n") + "\n");
   await add(root); await add(child);
+  for (const actor of [root, child]) {
+    const visible = await f.client.request("get_visible_messages", { sessionId: actor.session.sessionId });
+    const output = visible.messages.find(row => row.id === "output");
+    if (actor === root) {
+      assert.equal(output.role, "tool_output"); assert.equal(output.text, "");
+      assert.deepEqual(output.images[0].ref, { entryId: "output", index: 0 });
+      assert.equal("data" in output.images[0], false);
+    } else assert.equal(output, undefined);
+  }
   const get = (sessionId, entryId) => f.client.request("get_visible_image", { sessionId, entryId, index: 0 });
   assert.deepEqual((await get(root.session.sessionId, "output")).image, image);
   await assert.rejects(get(child.session.sessionId, "output"), /does not exist/);

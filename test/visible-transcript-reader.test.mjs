@@ -529,6 +529,13 @@ test("root tool image reads expose only active canonical image blocks, never too
   assert.doesNotMatch(JSON.stringify(await reader.read(options)), /private tool|private details|thinking|toolCall|iVBOR/);
   await assert.rejects(reader.readImage({ ...options, entryId: "output" }), /does not exist/);
   assert.deepEqual(await reader.readImage({ ...options, entryId: "output", allowToolImages: true }), image);
+  const publicOptions = { ...options, publicView: true, allowToolImages: true };
+  const publicHistory = await reader.read(publicOptions);
+  const output = publicHistory.messages.find(row => row.id === "output");
+  assert.equal(output.role, "tool_output"); assert.equal(output.text, "");
+  assert.deepEqual(output.images[0].ref, { entryId: "output", index: 0 });
+  assert.doesNotMatch(JSON.stringify(publicHistory), /private tool|private details|thinking|toolCall|iVBOR/);
+  assert.equal((await reader.read({ ...publicOptions, allowToolImages: false })).messages.some(row => row.role === "tool_output"), false);
   // A root-enabled call must not authorize later default/child calls through cache reuse.
   await assert.rejects(reader.readImage({ ...options, entryId: "output" }), /does not exist/);
   for (const entryId of ["abandoned", "assistant", "hidden", "details-only", "missing"]) {
@@ -537,6 +544,7 @@ test("root tool image reads expose only active canonical image blocks, never too
   for (const index of [-1, 1, 0.5]) await assert.rejects(reader.readImage({ ...options, entryId: "output", index, allowToolImages: true }), /does not exist/);
   await appendFile(file, JSON.stringify(message("new-branch", "user", "assistant", "replacement")) + "\n");
   await assert.rejects(reader.readImage({ ...options, entryId: "output", allowToolImages: true }), /active transcript branch/);
+  assert.equal((await reader.read(publicOptions)).messages.some(row => row.role === "tool_output"), false);
 });
 
 test("tool images retain input image and canonical source bounds", async (t) => {
@@ -556,6 +564,7 @@ test("tool images retain input image and canonical source bounds", async (t) => 
     const reader = new VisibleTranscriptReader(), options = { sessionFile: file, sessionId: id, entryId: "output", index: 0, allowToolImages: true };
     await assert.rejects(reader.readImage(options), error);
     assert.deepEqual((await reader.read(options)).messages, [], "invalid output must not block ordinary history");
+    assert.deepEqual((await reader.read({ ...options, publicView: true })).messages, [], "invalid output has no public image row");
   });
   const { file, id } = await fixture(t);
   const encoded = [header(id), { type: "message", id: "output", parentId: null,
