@@ -15,7 +15,7 @@ PromptInitial == [phase |-> "idle", run |-> 0, preparedRun |-> 0,
                   allowFollow |-> TRUE, needsInference |-> FALSE, requests |-> 0,
                   hooks |-> <<>>, injected |-> <<>>, sentRun |-> 0, sentPreparedRun |-> 0,
                   committed |-> <<>>, pendingId |-> 0, resume |-> "running", blocked |-> FALSE,
-                  failedRuns |-> {}, terminals |-> <<>>, requestsAtFailure |-> 0]
+                  failedRuns |-> {}, terminals |-> <<>>, requestsAtFailure |-> 0, followDue |-> {}]
 Init == /\ life = "running" /\ mode \in {"ordinary", "native"}
         /\ flight = FALSE /\ requests = 0 /\ states = [c \in Calls |-> "absent"]
         /\ results = [c \in Calls |-> "none"] /\ anchored = {} /\ effects = <<>>
@@ -88,8 +88,9 @@ Spec == Init /\ [][Next]_vars
 
 \* Bounded prompt/queue projection of the same coordinator. PromptSpec holds the
 \* tool-state variables fixed to check prompt ownership independently.
-PromptCanDeliver == Len(promptState.queue) > 0 /\
-                    (Head(promptState.queue).delivery = "auto" \/ promptState.allowFollow)
+PromptEligible == {i \in 1..Len(promptState.queue):
+                    promptState.queue[i].delivery = "auto" \/ promptState.allowFollow}
+PromptCanDeliver == PromptEligible # {}
 PromptAccept(kind, delivery) ==
     /\ promptState.accepted < 3 /\ Len(promptState.queue) < 2
     /\ promptState' = [promptState EXCEPT
@@ -104,8 +105,10 @@ PromptStart == /\ promptState.phase = "idle" /\ Len(promptState.queue) > 0 /\ pr
 \* Delivery also occurs inside request preparation, before the provider snapshot.
 PromptDeliver ==
     /\ promptState.phase \in {"running", "request"} /\ PromptCanDeliver
-    /\ LET item == Head(promptState.queue)
-       IN promptState' = [promptState EXCEPT !.queue = Tail(@),
+    /\ LET index == CHOOSE i \in PromptEligible: \A j \in PromptEligible: i <= j
+           item == promptState.queue[index]
+       IN promptState' = [promptState EXCEPT
+           !.queue = SubSeq(@, 1, index - 1) \o SubSeq(@, index + 1, Len(@)),
            !.committed = Append(@, item.id), !.pendingId = item.id,
            !.phase = IF item.kind = "user" THEN "preparing" ELSE @,
            !.resume = promptState.phase,
@@ -143,7 +146,10 @@ PromptTerminal == /\ promptState.phase = "failed"
 PromptResponse(outcome) ==
     /\ promptState.phase = "flight"
     /\ promptState' = [promptState EXCEPT !.phase = "running",
-        !.allowFollow = outcome = "stop", !.needsInference = outcome = "tool"]
+        !.allowFollow = outcome = "stop", !.needsInference = outcome = "tool",
+        !.followDue = IF outcome = "stop"
+            THEN @ \cup {promptState.queue[i].id: i \in {j \in 1..Len(promptState.queue): promptState.queue[j].delivery = "follow"}}
+            ELSE @]
 PromptSettle == /\ ((promptState.phase = "running" /\ ~PromptCanDeliver /\ ~promptState.needsInference)
                     \/ promptState.phase = "stopped")
                 /\ promptState' = [promptState EXCEPT !.phase = "idle"]
@@ -157,6 +163,9 @@ PromptTypeOK == /\ promptState.phase \in {"idle", "running", "preparing", "reque
                 /\ promptState.accepted \in 0..3 /\ Len(promptState.queue) <= 2
                 /\ promptState.requests \in 0..4
 PromptCurrentRun == promptState.phase = "flight" => promptState.sentPreparedRun = promptState.sentRun
+\* Auto input can bypass a deferred follow-up during tools, but cannot erase an
+\* eligible completed-answer boundary before the next provider snapshot.
+PromptFollowAtStop == promptState.phase = "flight" => promptState.followDue \subseteq {promptState.committed[i]: i \in 1..Len(promptState.committed)}
 PromptNoStaleOverride == promptState.preparedRun \in {0, promptState.run}
 PromptExactlyOnce == /\ promptState.injected = promptState.hooks
                      /\ Len(promptState.injected) = Cardinality({promptState.injected[i]: i \in 1..Len(promptState.injected)})

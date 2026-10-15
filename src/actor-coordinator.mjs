@@ -379,12 +379,13 @@ export class ActorCoordinator {
       await this.emit({ type: "agent_start" }); await this.recover();
       await this.maybeAutoCompact();
     }
-    if (this.hasOrdinaryBarrier()) return;
-    await this.deliverQueued(false);
     while (!this.closed && !this.stopping && !this.failure) {
       if (this.hasOrdinaryBarrier()) return;
+      // A completed answer admits eligible follow-ups with queued auto input.
+      // Do not let auto delivery erase that boundary, or bypass unseen results.
+      await this.deliverQueued(this.naturalStop && !this.tasks.size && this.revision === this.sentRevision);
       if (this.revision > this.sentRevision || this.continueNative) {
-        this.continueNative = false; await this.inference(); await this.maybeAutoCompact(); if (!this.hasOrdinaryBarrier()) await this.deliverQueued(false); continue;
+        this.continueNative = false; await this.inference(); await this.maybeAutoCompact(); continue;
       }
       if (this.tasks.size) return;
       if (this.naturalStop && await this.deliverQueued(true)) continue;
