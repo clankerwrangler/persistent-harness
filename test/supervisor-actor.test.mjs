@@ -818,8 +818,18 @@ test("selected-session inference accepts busy changes, persists latest intent an
   supervisor.store.completeActorInput(input.inputId, id);
   const same = await change("beta", "off", changed.selection);
   assert.equal(same.changed, false); assert.equal(targetFamily().length, 1);
+  // Existing idle model/reasoning APIs are live session state, not launch policy.
+  actor.session.launch.model.resolved = { provider: "fake", id: "alpha" };
+  actor.session.launch.thinking.resolved = "high";
+  const service = await client.request("get_session_inference", { sessionId: id });
+  assert.equal(service.selection.model, "alpha"); assert.equal(service.selection.thinkingLevel, "high");
+  assert.equal(supervisor.store.getSession(id).launch.model.resolved.id, "beta", "a settings read cannot persist an idle service choice");
+  assert.equal((await change("alpha", "high", service.selection)).changed, false);
   actor.busy = true;
-  const retained = await change("alpha", "high", changed.selection);
+  const fromService = await change("beta", "off", service.selection);
+  assert.equal(fromService.selection.model, "alpha"); assert.equal(fromService.selection.thinkingLevel, "high");
+  assert.equal(fromService.pending.model, "beta", "new pending intent captures the observed active service baseline");
+  const retained = await change("alpha", "high", fromService.selection);
   // Simulate a lost worker receipt: the durable pending intent survives the next generation.
   await client.request("stop_session", { sessionId: id });
   await client.request("revive_session", { sessionId: id });
