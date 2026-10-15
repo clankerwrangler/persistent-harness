@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import http from "node:http";
-import { cp, mkdtemp, mkdir, rm, stat } from "node:fs/promises";
+import { cp, mkdtemp, mkdir, rm, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
 import os from "node:os";
 import { HarnessSupervisor } from "../src/supervisor.mjs";
@@ -21,22 +21,37 @@ async function settled(client, id, text) {
   await client.request("submit_input", { sessionId: id, message: text, behavior: "auto" }); await done;
 }
 
-test("stock worker: real supervisor, external stock SDK, canonical input and persistent Python", { timeout: 60000 }, async t => {
-  const root = await mkdtemp(path.join(os.tmpdir(), "sw-")); const cwd = path.join(root, "project"), agentDir = path.join(root, "agent");
-  await mkdir(cwd); await mkdir(agentDir);
-  // Exercise real provisioning/consent, using only cached prerequisites when running offline.
-  if (process.env.PI_HARNESS_TEST_MANAGED_SEED) {
-    await cp(process.env.PI_HARNESS_TEST_MANAGED_SEED, path.join(agentDir, "harness/kernel-runtime"), { recursive: true });
-  }
-  const catalog = await discoverSkillsFromDirectory(path.resolve("skills")); assert.deepEqual(catalog.diagnostics, []);
+async function stockWorkerCase(t, { copyPrerequisites = cp, seed = process.env.PI_HARNESS_TEST_MANAGED_SEED } = {}) {
+  let root, cwd, agentDir, server, supervisor, client, cronStore, admission;
+  let pendingSetup = Promise.resolve();
+  const previous = { PI_CODING_AGENT_DIR: process.env.PI_CODING_AGENT_DIR, HARNESS_FAKE_BASE_URL: process.env.HARNESS_FAKE_BASE_URL, PI_HARNESS_PYTHON: process.env.PI_HARNESS_PYTHON };
+  t.after(async () => {
+    await pendingSetup.catch(() => {});
+    cronStore?.close(); await client?.stop(); await supervisor?.stop();
+    server?.closeAllConnections();
+    if (server?.listening) await new Promise(resolve => server.close(resolve));
+    for (const [key, value] of Object.entries(previous)) if (value === undefined) delete process.env[key]; else process.env[key] = value;
+    if (root) await rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+  });
+  pendingSetup = (async () => {
+    root = await mkdtemp(path.join(os.tmpdir(), "sw-")); cwd = path.join(root, "project"); agentDir = path.join(root, "agent");
+    await mkdir(cwd); await mkdir(agentDir);
+    // Exercise real provisioning/consent, using only cached prerequisites when running offline.
+    if (seed) await copyPrerequisites(seed, path.join(agentDir, "harness/kernel-runtime"), { recursive: true });
+    t.signal.throwIfAborted();
+    const catalog = await discoverSkillsFromDirectory(path.resolve("skills"));
+    t.signal.throwIfAborted();
+    return catalog;
+  })();
+  const catalog = await pendingSetup; assert.deepEqual(catalog.diagnostics, []);
+  t.signal.throwIfAborted();
   const dependencies = [...new Set(catalog.skills.flatMap(skill => skill.python?.dependencies ?? []))].sort();
   const expectedRuntimeMessage = `Persistent Harness needs CPython ${PYTHON_VERSION} and:\n${[`ipython==${IPYTHON_VERSION}`, `dill==${DILL_VERSION}`, ...dependencies].join("\n")}`;
-  const previous = { PI_CODING_AGENT_DIR: process.env.PI_CODING_AGENT_DIR, HARNESS_FAKE_BASE_URL: process.env.HARNESS_FAKE_BASE_URL, PI_HARNESS_PYTHON: process.env.PI_HARNESS_PYTHON };
   delete process.env.PI_HARNESS_PYTHON;
   process.env.PI_CODING_AGENT_DIR = agentDir;
-  const bodies = []; let supervisor, client, cronStore, admission;
+  const bodies = [];
   let provisioningAnswered = false, provisioningError = null;
-  const server = http.createServer(async (request, response) => {
+  server = http.createServer(async (request, response) => {
     let text = ""; for await (const chunk of request) text += chunk; const body = JSON.parse(text); bodies.push(body);
     const last = body.messages.at(-1); const n = bodies.length;
     response.writeHead(200, { "content-type": "text/event-stream" });
@@ -64,18 +79,15 @@ test("stock worker: real supervisor, external stock SDK, canonical input and per
     response.write(`data: ${JSON.stringify({ ...base, choices: [], usage: { prompt_tokens: 12, completion_tokens: 2, total_tokens: 14 } })}\n\n`);
     response.end("data: [DONE]\n\n");
   });
-  await new Promise(resolve => server.listen(0, "127.0.0.1", resolve));
+  pendingSetup = new Promise(resolve => server.listen(0, "127.0.0.1", resolve));
+  await pendingSetup; t.signal.throwIfAborted();
   process.env.HARNESS_FAKE_BASE_URL = `http://127.0.0.1:${server.address().port}/v1`;
-  t.after(async () => {
-    cronStore?.close(); await client?.stop(); await supervisor?.stop(); await new Promise(resolve => server.close(resolve));
-    for (const [key, value] of Object.entries(previous)) if (value === undefined) delete process.env[key]; else process.env[key] = value;
-    await rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
-  });
   supervisor = new HarnessSupervisor({ socketPath: path.join(root, "s.sock"), databasePath: path.join(root, "harness.sqlite"), pidPath: path.join(root, "s.pid"),
     skillsPath: path.resolve("skills"), actorInactivityMs: 0, actorExtensionPaths: [path.resolve("test/fixtures/fake-provider.ts")] });
-  await supervisor.start();
+  pendingSetup = supervisor.start(); await pendingSetup; t.signal.throwIfAborted();
   client = new HarnessClient({ socketPath: path.join(root, "s.sock"), heartbeatMs: 0, requestTimeoutMs: 40000 });
-  await client.start({ registrationType: "register_client", clientInstanceId: crypto.randomUUID() });
+  pendingSetup = client.start({ registrationType: "register_client", clientInstanceId: crypto.randomUUID() });
+  await pendingSetup; t.signal.throwIfAborted();
   // This fixture alone consents to its expected disposable runtime installation.
   // Unexpected human requests fail the test; production approval remains untouched.
   client.on("event", frame => {
@@ -102,9 +114,11 @@ test("stock worker: real supervisor, external stock SDK, canonical input and per
       await client.request("respond_extension_ui", { sessionId: admission.sessionId, uiRequestId: e.id, confirmed: true });
     })().catch(error => { provisioningError = error; });
   });
-  ({ admission } = await client.request("create_root", { cwd, repositoryRoot: null, name: "stock-worker-smoke", provider: "harness-fake", model: "fake-model", thinkingLevel: null }));
+  pendingSetup = client.request("create_root", { cwd, repositoryRoot: null, name: "stock-worker-smoke", provider: "harness-fake", model: "fake-model", thinkingLevel: null });
+  ({ admission } = await pendingSetup); t.signal.throwIfAborted();
   cronStore = new CronStore(path.join(root, "harness.sqlite"));
-  await client.request("subscribe_session", { selector: admission.sessionId });
+  pendingSetup = client.request("subscribe_session", { selector: admission.sessionId });
+  await pendingSetup; t.signal.throwIfAborted();
   try { await settled(client, admission.sessionId, "SET_STATE"); } catch(error) { throw provisioningError ?? error; }
   assert.equal(provisioningError, null); assert.equal(provisioningAnswered, true);
   assert((await stat(path.join(agentDir, "harness/kernel-runtime/environments"))).isDirectory());
@@ -136,4 +150,29 @@ test("stock worker: real supervisor, external stock SDK, canonical input and per
   assert.equal(run.status, "completed"); assert.equal(run.notificationDisposition, "deliver");
   assert.equal(cronStore.listRuns(run.jobId).length, 1);
   assert.equal(provisioningError, null);
+}
+
+test("stock worker: real supervisor, external stock SDK, canonical input and persistent Python", { timeout: 60000 }, t => stockWorkerCase(t));
+
+test("cancelled stock setup drains its copy and cannot start late workers", async t => {
+  const controller = new AbortController(), copying = Promise.withResolvers(), release = Promise.withResolvers();
+  let cleanup, destination, cleaned = false, serverStarts = 0, actorStarts = 0;
+  const createServer = http.createServer, start = HarnessSupervisor.prototype.start;
+  t.mock.method(http, "createServer", (...args) => { serverStarts++; return createServer(...args); });
+  t.mock.method(HarnessSupervisor.prototype, "start", function (...args) { actorStarts++; return start.apply(this, args); });
+  const running = stockWorkerCase({ signal: controller.signal, after: fn => { cleanup = fn; } }, {
+    seed: "public-prerequisite-fixture", copyPrerequisites: async (_source, target) => {
+      destination = target; await mkdir(target, { recursive: true }); copying.resolve(); await release.promise;
+      await writeFile(path.join(target, "late-copy-marker"), "copied");
+    },
+  });
+  t.after(async () => { controller.abort(); release.resolve(); await running.catch(() => {}); await cleanup?.(); });
+  await copying.promise; assert.equal(typeof cleanup, "function");
+  const reason = new Error("controlled setup cancellation"); controller.abort(reason);
+  const rejected = assert.rejects(running, error => error === reason);
+  const closing = cleanup().then(() => { cleaned = true; });
+  await new Promise(resolve => setImmediate(resolve)); assert.equal(cleaned, false, "cleanup owns the pending copy");
+  release.resolve(); await rejected; await closing;
+  assert.equal(serverStarts, 0); assert.equal(actorStarts, 0);
+  await assert.rejects(stat(path.resolve(destination, "../../..")), { code: "ENOENT" });
 });

@@ -125,6 +125,11 @@ regressions hold startup and close, reject registration/factory/start/submit,
 retry the same receipt after reconnect or failure, verify the correlated accepted
 error and its clearing on retry, and verify stop/delete/restart.
 
+`StockWorkerSetup` checks cleanup ownership before asynchronous setup, the
+cancellation fence before worker startup, and cleanup after the owned copy drains.
+The stock-worker fixture has a controlled delayed-copy cancellation regression;
+normal provisioning/consent and kernel reuse/rebuild assertions remain unchanged.
+
 `BackgroundCompletions` checks bounded dispatch ownership, acceptance independent
 of cold owners, durable publication, sent-after-readiness, retry/idempotence,
 owner ordering, safe-checkpoint admission independent of run end, and stop after
