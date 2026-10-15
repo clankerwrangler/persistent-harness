@@ -15,6 +15,15 @@ Use `files.attachment(path)` to emit a bounded image or binary attachment MIME b
 
 Mutations use `files.write(path, content)` and `files.edit(path, old_text, new_text, replace_all=False)`. `files.write` is atomic create-only/no-replace: a flushed private same-directory inode is published with `link(2)` only while the destination is absent, so an existing file or concurrent creator wins and is never overwritten. `files.edit` requires an existing ordinary regular UTF-8 file and an exact unique `old_text` match unless `replace_all=True` is explicit. It rejects invalid UTF-8, missing/ambiguous matches, symlink or non-regular leaves, sources over 1 MiB, and setuid/setgid/sticky mode bits without changing the source.
 
+The 1 MiB source-file limit is separate from the 1 MiB RPC frame limit. The
+complete serialized request includes both `old_text` and `new_text`, JSON
+escaping, and envelope fields. For a large edit, use one unique bounded
+contiguous replacement that reconstructs the complete intended result. Verify
+the whole preimage hash and reconstructed target hash before the call, keep the
+serialized request within the frame limit, and verify the whole final hash
+afterward. This preserves one atomic edit rather than splitting an atomic
+transition into several calls.
+
 A successful edit opens and snapshots the source without following the leaf, builds the bounded replacement, writes and fsyncs a private same-directory temp, preserves ordinary permission bits and UID/GID (or fails before publication when ownership cannot be preserved), then immediately revalidates the canonical parent plus source identity, metadata, and bytes before atomic `rename(2)` replacement. It fsyncs the publication directory where supported and verifies the published inode, content, and metadata. Cancellation and pre-publication failure clean private temps.
 
 The edit precondition is deliberately **not** described as kernel compare-and-swap. POSIX/Node cannot couple an expected source inode with replace-existing `rename(2)` in one commit, so an arbitrary external writer that does not coordinate can still change the pathname after the final validation and before rename and may be replaced. The supported guarantee is an atomic whole-file replacement with immediate best-effort race detection, not expected-inode CAS. Parent/leaf changes observed before publication fail without mutation; failures observed after publication are reported as committed.
