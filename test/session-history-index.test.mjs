@@ -495,7 +495,9 @@ test("bounded receipt rendering matches complete-inventory projection across res
   const bytes = await readFile(sessionFile);
   receipt = { ...receipt, entryId: "proven", acceptedAt: receipt.acceptedAt + 1000 };
   await assert.rejects(index.open({ session: selected, entryId: "proven", before: 0, after: 0 }), /receipt dependency changed/);
-  baseline = await compare(); assert.equal(baseline.messages[0].text, "body"); assert.equal(baseline.messages[0].createdAt, "2026-01-01T00:00:01.000Z");
+  baseline = await compare(); assert.equal(baseline.messages[0].text, "body");
+  assert.equal(baseline.messages[0].createdAt, stamp, "receipt metadata cannot retime canonical admission");
+  assert.equal(baseline.messages[0].delivery.acceptedAt, new Date(receipt.acceptedAt).toISOString());
   receipt = null;
   baseline = await compare(); assert.equal(baseline.messages[0].text, proven.message.content[0].text);
   assert.deepEqual(await readFile(sessionFile), bytes, "receipt-only refresh never mutates canonical bytes");
