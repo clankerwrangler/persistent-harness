@@ -136,7 +136,7 @@ export class BackgroundCompletionMonitor {
   #intervalMs;
   #timer;
   #scanPromise;
-  #inFlight = new Set();
+  #inFlight = new Map();
   #stopped = true;
   #activeJobs = new Map();
   #onActiveJobsChanged;
@@ -214,6 +214,7 @@ export class BackgroundCompletionMonitor {
     if (this.#timer) clearInterval(this.#timer);
     this.#timer = undefined;
     await this.#scanPromise;
+    await Promise.all(this.#inFlight.values());
     await this.#closeDirectoryReader();
   }
 
@@ -225,16 +226,18 @@ export class BackgroundCompletionMonitor {
       this.#publishActiveJobs(jobs);
       for (const { completed: job } of jobs) {
         if (!job) continue;
-        if (this.#stopped || job.notificationState || this.#inFlight.has(job.id)) continue;
-        this.#inFlight.add(job.id);
-        try {
-          const result = await this.#dispatch({ ...job, message: backgroundCompletionMessage(job) });
-          await markNotification(this.#directory, job, result === "skipped" ? "skipped" : "sent");
-          this.#retryJobs.delete(job.id);
-        } catch (error) {
-          if (this.#retryJobs.size < MAX_JOBS) this.#retryJobs.add(job.id);
-          this.#logger.error?.(`background completion delivery failed for ${job.id}: ${error instanceof Error ? error.message : String(error)}`);
-        } finally { this.#inFlight.delete(job.id); }
+        if (this.#stopped || job.notificationState || this.#inFlight.has(job.id) || this.#inFlight.size >= MAX_JOBS) continue;
+        const delivery = Promise.resolve().then(async () => {
+          try {
+            const result = await this.#dispatch({ ...job, message: backgroundCompletionMessage(job) });
+            await markNotification(this.#directory, job, result === "skipped" ? "skipped" : "sent");
+            this.#retryJobs.delete(job.id);
+          } catch (error) {
+            if (this.#retryJobs.size < MAX_JOBS) this.#retryJobs.add(job.id);
+            this.#logger.error?.(`background completion delivery failed for ${job.id}: ${error instanceof Error ? error.message : String(error)}`);
+          } finally { this.#inFlight.delete(job.id); }
+        });
+        this.#inFlight.set(job.id, delivery);
       }
     })();
     this.#scanPromise = operation;

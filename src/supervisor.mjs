@@ -1400,9 +1400,9 @@ export class HarnessSupervisor {
   }
 
   async #dispatchBackgroundCompletion(job) {
-    return this.#withSessionMutation(job.sessionId, async () => {
+    const input = await this.#withSessionMutation(job.sessionId, async () => {
       const session = this.store.getSession(job.sessionId);
-      if (!session || session.lifecycle === "deleted") return "skipped";
+      if (!session || session.lifecycle === "deleted") return null;
       const input = this.store.createActorInput(job.sessionId, {
         inputId: `background-completion-${job.id}`,
         message: job.message,
@@ -1413,12 +1413,16 @@ export class HarnessSupervisor {
       if (input.state !== "completed") {
         this.#publishInputState(job.sessionId, pendingInputMessage(input));
         this.#notifications.noteContinuation(job.sessionId, `background:${job.id}`, job.startedAt);
-        const actor = await this.#ensureActorReady(job.sessionId);
-        this.#kickActorInputDelivery(job.sessionId, actor);
       }
-      await this.#log("background_completion_queued", { jobId: job.id, sessionId: job.sessionId });
-      return "sent";
+      return input;
     });
+    if (!input) return "skipped";
+    if (input.state !== "completed") {
+      const actor = await this.#ensureActorReady(job.sessionId);
+      this.#kickActorInputDelivery(job.sessionId, actor);
+    }
+    await this.#log("background_completion_queued", { jobId: job.id, sessionId: job.sessionId });
+    return "sent";
   }
 
   async #maybeAutoTitleRoot(sessionId) {
