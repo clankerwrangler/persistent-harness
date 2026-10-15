@@ -56,7 +56,8 @@ test("real reader and supervisor recover historical inputs, skip only ambiguity,
   await client.request("subscribe_session", { selector: sessionId, passive: true });
   const deliveredEvents = inputId => inputEvents.filter(message => message.id === inputId && message.delivery?.state === "delivered");
   const canonicalImages = entryId => [{ type: "image", mimeType: image.mimeType, name: "Pasted image 1",
-    size: Buffer.from(image.data, "base64").length, ref: { entryId, index: 0 } }];
+    size: Buffer.from(image.data, "base64").length, ref: { entryId, index: 0 },
+    contentHash: "f11fb145fb56636723b20f30e40aaac672e9de2c9677de363551d82668cbd5cd" }];
   const selectedFile = supervisor.store.getSession(sessionId).sessionFile;
   const allowed = [directory, process.env.HOME, process.env.PI_CODING_AGENT_DIR].filter(Boolean).map(root => path.resolve(root) + path.sep);
   assert(allowed.some(root => path.resolve(selectedFile).startsWith(root)), "The fixture must not write outside its private roots");
