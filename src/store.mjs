@@ -53,6 +53,7 @@ function publicLaunch(value, preference) {
   return {
     model: launch.model,
     thinking: launch.thinking,
+    pendingInference: launch.pendingInference ?? null,
     ...preference,
     fastModeSupported: typeof launch.fastModeSupported === "boolean" ? launch.fastModeSupported : null,
     ...(launch.contextFork ? { contextFork: launch.contextFork } : {}),
@@ -690,7 +691,34 @@ export class HarnessStore {
     } catch (error) { this.#db.exec("ROLLBACK"); throw error; }
   }
 
-  updateSessionInference(sessionId, selection, expectedLaunch = undefined, now = Date.now()) {
+  queueSessionInference(sessionId, selection, now = Date.now()) {
+    const row = this.#sessionRow(sessionId);
+    if (!row || row.lifecycle === "deleted") throw new Error("session does not exist");
+    const launch = parseJson(row.launch_json, {});
+    launch.pendingInference = { requestId: randomUUID(), provider: selection.provider,
+      model: selection.model, thinkingLevel: selection.thinkingLevel };
+    this.#db.prepare("UPDATE sessions SET launch_json = ?, updated_at = ? WHERE id = ?")
+      .run(JSON.stringify(launch), now, sessionId);
+    return launch.pendingInference;
+  }
+
+  recordSessionInferenceResult(sessionId, generation, result) {
+    const row = this.#sessionRow(sessionId);
+    if (!row || row.lifecycle === "deleted" || Number(row.actor_generation) !== generation) return false;
+    let launch = parseJson(row.launch_json, {});
+    if (result.error) {
+      if (result.selection) launch = this.updateSessionInference(sessionId, result.selection, launch).launch;
+      if (launch.pendingInference?.requestId !== result.requestId) return false;
+      launch.pendingInference.error = "Selection could not be applied. Choose again or retry after reconnecting.";
+      this.#db.prepare("UPDATE sessions SET launch_json = ?, updated_at = ? WHERE id = ?")
+        .run(JSON.stringify(launch), Date.now(), sessionId);
+    } else {
+      this.updateSessionInference(sessionId, result.selection, launch, Date.now(), result.requestId);
+    }
+    return true;
+  }
+
+  updateSessionInference(sessionId, selection, expectedLaunch = undefined, now = Date.now(), requestId = null) {
     this.#db.exec("BEGIN IMMEDIATE");
     try {
       const row = this.#sessionRow(sessionId);
@@ -702,6 +730,7 @@ export class HarnessStore {
       launch.model = { requested: `${selection.provider}/${selection.model}`, resolved: { provider: selection.provider, id: selection.model }, source: "explicit" };
       launch.thinking = { requested: selection.thinkingLevel, resolved: selection.thinkingLevel, source: "explicit" };
       launch.fastModeSupported = selection.fastModeSupported === true;
+      if (requestId && launch.pendingInference?.requestId === requestId) delete launch.pendingInference;
       this.#db.prepare("UPDATE sessions SET launch_json = ?, updated_at = ? WHERE id = ?")
         .run(JSON.stringify(launch), now, sessionId);
       if (Number.isSafeInteger(selection.contextWindow) && selection.contextWindow > 0) {
@@ -715,25 +744,6 @@ export class HarnessStore {
     } catch (error) { this.#db.exec("ROLLBACK"); throw error; }
   }
 
-  restoreSessionLaunch(sessionId, launch, expectedLaunch, contextWindow, now = Date.now()) {
-    this.#db.exec("BEGIN IMMEDIATE");
-    try {
-      const row = this.#sessionRow(sessionId);
-      if (!row || row.lifecycle === "deleted") throw new Error("session does not exist");
-      const current = parseJson(row.launch_json, {});
-      if (JSON.stringify(current) !== JSON.stringify(expectedLaunch)) throw new Error("session launch policy changed during rollback");
-      this.#db.prepare("UPDATE sessions SET launch_json = ?, updated_at = ? WHERE id = ?")
-        .run(JSON.stringify(launch), now, sessionId);
-      if (Number.isSafeInteger(contextWindow) && contextWindow > 0) {
-        this.#db.prepare(`INSERT INTO session_context_usage(session_id, context_tokens, context_window, percent, updated_at)
-          VALUES (?, NULL, ?, NULL, ?) ON CONFLICT(session_id) DO UPDATE SET context_tokens = NULL,
-          context_window = excluded.context_window, percent = NULL, updated_at = excluded.updated_at`)
-          .run(sessionId, contextWindow, now);
-      } else this.#db.prepare("DELETE FROM session_context_usage WHERE session_id = ?").run(sessionId);
-      this.#db.exec("COMMIT");
-      return this.getActorLaunch(sessionId);
-    } catch (error) { this.#db.exec("ROLLBACK"); throw error; }
-  }
 
   hasPendingSessionWork(sessionId) {
     const input = this.#db.prepare("SELECT 1 FROM actor_inputs WHERE session_id = ? LIMIT 1").get(sessionId);

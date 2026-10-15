@@ -4,7 +4,7 @@ import { normalizeInputLocation, renderUserLocations } from "./input-location.mj
 import { ActorToolDispatch, addToolUsage } from "./actor-tool-dispatch.mjs";
 import { createActorStreamPlanner } from "./actor-stream.mjs";
 import { evaluateInferenceRetry } from "./inference-retry.mjs";
-import { fastModeOptions, streamSessionRequest } from "./fast-mode.mjs";
+import { fastModeOptions, streamSessionRequest, supportsFastMode } from "./fast-mode.mjs";
 import { randomUUID } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { isDeepStrictEqual } from "node:util";
@@ -56,6 +56,7 @@ export class ActorCoordinator {
     this.controller = null; this.flight = null; this.attemptEpoch = 0; this.revision = 0; this.sentRevision = 0;
     this.continueNative = false; this.naturalStop = true; this.failure = null; this.turnIndex = 0;
     this.waiters = new Set(); this.recoveryDone = false; this.currentPrompt = session.systemPrompt; this.runPrompt = session.systemPrompt; this.serviceMutation = false;
+    this.pendingInference = null;
     this.failedAttempt = null; this.retryAttemptNumber = 1; this.retrying = false; this.overflowRecoveryAttempted = false;
     this.steeringMode = "all"; this.followUpMode = "all"; this.contextUsage = undefined;
     this.compactionHistoryBarrier = null; this.runPromptOptions = undefined;
@@ -134,6 +135,42 @@ export class ActorCoordinator {
     this.serviceMutation = true;
     try { return await operation(); }
     finally { this.serviceMutation = false; this.notifyIdle(); this.wake(); }
+  }
+  selectInference(selection) {
+    if (this.closed) throw new Error("actor is closed");
+    this.pendingInference = selection;
+    this.wake();
+  }
+  async applyPendingInference() {
+    if (this.flight || this.tasks.size || this.compacting || this.serviceMutation) return;
+    this.serviceMutation = true;
+    try {
+      while (this.pendingInference && !this.pendingInference.error) {
+        const pending = this.pendingInference;
+        let error = false;
+        try {
+          const previousModel = this.session.model, previousLevel = this.session.thinkingLevel;
+          if (previousModel.provider !== pending.model.provider || previousModel.id !== pending.model.id) {
+            await this.session.setModel(pending.model, { persist: false });
+          }
+          this.session.setThinkingLevel(pending.thinkingLevel, { persist: false });
+          if (this.session.model !== previousModel) await this.runner.emit({ type: "model_select",
+            model: this.session.model, previousModel, source: "set" });
+          if (this.session.thinkingLevel !== previousLevel) await this.runner.emit({ type: "thinking_level_select",
+            level: this.session.thinkingLevel, previousLevel });
+          this.contextUsage = undefined;
+          await this.lifecycle.afterCommit?.();
+        } catch {
+          // A failed credential check keeps the run and accepted intent intact.
+          error = true; pending.error = true;
+        }
+        await this.publish({ type: error ? "inference_selection_failed" : "inference_selection_applied",
+          requestId: pending.requestId, selection: { provider: this.session.model.provider, model: this.session.model.id,
+            thinkingLevel: this.session.thinkingLevel, contextWindow: this.session.model.contextWindow,
+            fastModeSupported: supportsFastMode(this.session.model) } });
+        if (!error && this.pendingInference === pending) this.pendingInference = null;
+      }
+    } finally { this.serviceMutation = false; }
   }
   get pendingMessageCount() { return this.queue.length; }
   getCommands() {
@@ -253,6 +290,7 @@ export class ActorCoordinator {
   }
   shouldDrive() {
     if (this.closed || this.flight || this.compacting || this.serviceMutation) return false;
+    if (this.pendingInference && !this.pendingInference.error && !this.tasks.size) return true;
     if (this.stopping) return this.running && this.tasks.size === 0;
     if (this.failure) return this.running && (this.failedAttempt !== null || this.tasks.size === 0);
     if (this.queue.some(item => item.behavior === "auto")) return !this.hasOrdinaryBarrier();
@@ -329,6 +367,7 @@ export class ActorCoordinator {
   }
   async drive() {
     if (this.compacting || this.flight || this.closed || this.serviceMutation) return;
+    await this.applyPendingInference();
     if ((this.stopping || this.failure) && this.running) {
       if (this.failure && !this.stopping && await this.recoverInference()) {
         if (this.failure) { if (!this.tasks.size && !this.failedAttempt) await this.settle(); return; }
@@ -435,6 +474,9 @@ export class ActorCoordinator {
     return { id: randomUUID(), role: "assistant", content, usage, api: model.api, provider: model.provider, model: model.id, stopReason, timestamp: Date.now() };
   }
   async inference({ reservedEpoch } = {}) {
+    const runController = this.controller;
+    await this.applyPendingInference();
+    if (this.closed || this.stopping || runController !== this.controller || runController?.signal.aborted) return;
     const epoch = reservedEpoch ?? ++this.attemptEpoch; const requestController = new AbortController();
     const attempt = { epoch, requestId: randomUUID(), attemptId: randomUUID(), number: this.retryAttemptNumber,
       admittedCount: 0, dispatchedCount: 0, providerTools: null, retired: false, fenced: false, unstarted: new Map(), usageCommitted: false };
@@ -623,6 +665,7 @@ export class ActorCoordinator {
   async settle() {
     if (this.tasks.size || this.flight || !this.running) return;
     await this.commitTail;
+    await this.applyPendingInference();
     // Tasks can commit after abort or an earlier turn_end. Once all run work is
     // fenced, no later turn can consume these originals; canonical clones remain.
     // Release before asynchronous end hooks, including when a hook rejects.

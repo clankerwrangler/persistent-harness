@@ -20,7 +20,7 @@ export async function until(probe, description, timeout = 30_000) {
   throw new Error(`Timed out: ${description}`);
 }
 
-export async function slimFixture(t, name, script) {
+export async function slimFixture(t, name, script, { models = ["gpt-6-astra"], maxRequests = 2 } = {}) {
   const { cli: command, sdk: module } = await acceptedNativeRuntime();
   const skills = process.env.PI_HARNESS_SKILLS_PATH;
   assert(skills, "Use the explicit read-only skills test seam");
@@ -67,8 +67,8 @@ export async function slimFixture(t, name, script) {
       const raw = Buffer.concat(chunks); const encoding = request.headers["content-encoding"];
       assert(encoding === undefined || encoding === "zstd");
       const body = JSON.parse((encoding === "zstd" ? zstdDecompressSync(raw) : raw).toString("utf8"));
-      assert.equal(body.model, "gpt-6-astra"); modelRequests += 1; responses.push(response); requests.push(body);
-      assert(modelRequests <= 2, "The fixture permits at most two provider requests");
+      assert(models.includes(body.model), "The fixture refuses an unexpected model"); modelRequests += 1; responses.push(response); requests.push(body);
+      assert(modelRequests <= maxRequests, "The fixture provider request bound was exceeded");
       response.writeHead(200, { "content-type": "text/event-stream" });
       send(response, { type: "response.created", response: { id: `response-${modelRequests}`, status: "in_progress" } });
       await script({ response, body, index: modelRequests, send, item, done });
