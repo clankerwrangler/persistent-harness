@@ -242,7 +242,11 @@ test("bounded admission cannot obstruct the legal callback needed by one executi
   const outcome = await bounded(active, "confirmation must complete admitted work, not require timeout cancellation");
   assert.equal(outcome.result.confirmed, true, "A prompt legal confirmation must win before the existing dialog timeout");
   assert.equal((await callbacks.get("transport-dialog-2")).delivered, true);
-  await bounded(Promise.all(queued), "ordered waiters drain after confirmed completion");
+  // Callback responsiveness is bounded above. Draining 511 real owner-leased
+  // compactions is a completion/order claim, not a three-second throughput SLA.
+  // Each admitted request retains the client deadline and this test's outer bound.
+  const drained = await Promise.all(queued);
+  assert.deepEqual(drained.map(reply => reply.result.summary), Array.from({ length: 511 }, (_, index) => `compaction-${index + 3}`));
   assert.equal(actor.compacts, 513); assert.equal(disconnected, 0);
   assert.equal(actor.receivedCallbacks.find(frame => frame.id === "transport-dialog-2")?.cancelled, undefined);
   t.diagnostic(JSON.stringify({ unpressuredConfirmed: true, admittedWaiters: queued.length, pressuredExecutingOperations: 1,

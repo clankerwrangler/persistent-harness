@@ -1,4 +1,6 @@
 import assert from "node:assert/strict";
+import fsPromises from "node:fs/promises";
+import { syncBuiltinESMExports } from "node:module";
 import { spawn } from "node:child_process";
 import {
   mkdirSync,
@@ -112,130 +114,24 @@ async function startInotifyRacer(args) {
   };
 }
 
-const IN_CREATE_DETACH_RACER = String.raw`
-use strict;
-use warnings;
-require "syscall.ph";
-my ($parent, $target, $moved) = @ARGV;
-my $fd = syscall(&SYS_inotify_init1, 0);
-die "inotify_init1: $!\n" if $fd < 0;
-my $wd = syscall(&SYS_inotify_add_watch, $fd, $parent, 0x00000100); # IN_CREATE
-die "inotify_add_watch: $!\n" if $wd < 0;
-$| = 1;
-print "READY\n";
-open(my $inotify, "<&=$fd") or die "open inotify fd: $!\n";
-my $events = "";
-while (1) {
-  sysread($inotify, my $chunk, 4096) > 0 or die "inotify read: $!\n";
-  $events .= $chunk;
-  while (length($events) >= 16) {
-    my ($event_wd, $mask, $cookie, $length) = unpack("iIII", substr($events, 0, 16));
-    last if length($events) < 16 + $length;
-    my $name = substr($events, 16, $length);
-    substr($events, 0, 16 + $length, "");
-    $name =~ s/\0.*//s;
-    next unless ($mask & 0x00000100) && $name eq $target;
-    rename($parent, $moved) or die "detach parent: $!\n";
-    print "RACED\n";
-    exit 0;
-  }
-}
-`;
-
-async function startCreateDetachRacer(parent, target, moved) {
-  const child = spawn(
-    "/usr/bin/perl",
-    ["-e", IN_CREATE_DETACH_RACER, "--", parent, target, moved],
-    { stdio: ["ignore", "pipe", "pipe"] },
-  );
-  let output = "";
-  let errors = "";
-  child.stdout.on("data", (chunk) => { output += chunk; });
-  child.stderr.on("data", (chunk) => { errors += chunk; });
-  await new Promise((resolve, reject) => {
-    const timer = setTimeout(() => reject(new Error("IN_CREATE detach racer did not arm")), 2_000);
-    const ready = (chunk) => {
-      if (!String(chunk).includes("READY")) return;
-      clearTimeout(timer);
-      child.stdout.off("data", ready);
-      resolve();
-    };
-    child.stdout.on("data", ready);
-    child.once("error", reject);
-    child.once("exit", (code) => {
-      if (code !== null && !output.includes("READY")) reject(new Error(`IN_CREATE detach racer exited ${code}: ${errors}`));
-    });
+async function detachAfterPublication(t, method, target, parent, moved, operation) {
+  const original = fsPromises[method]; let publications = 0;
+  const intercepted = t.mock.method(fsPromises, method, async (source, destination, ...args) => {
+    const result = await original(source, destination, ...args);
+    if (destination === target) {
+      publications++;
+      // The real kernel publication has completed; verification cannot resume
+      // until the adversarial rename has completed. inotify alone cannot order this.
+      renameSync(parent, moved);
+    }
+    return result;
   });
-  return {
-    async done() {
-      const code = child.exitCode ?? await new Promise((resolve) => child.once("close", resolve));
-      assert.equal(code, 0, errors);
-      assert.match(output, /RACED/);
-    },
-  };
-}
-
-const IN_MOVED_TO_DETACH_RACER = String.raw`
-use strict;
-use warnings;
-require "syscall.ph";
-my ($parent, $target, $moved) = @ARGV;
-my $fd = syscall(&SYS_inotify_init1, 0);
-die "inotify_init1: $!\n" if $fd < 0;
-my $wd = syscall(&SYS_inotify_add_watch, $fd, $parent, 0x00000080); # IN_MOVED_TO
-die "inotify_add_watch: $!\n" if $wd < 0;
-$| = 1;
-print "READY\n";
-open(my $inotify, "<&=$fd") or die "open inotify fd: $!\n";
-my $events = "";
-while (1) {
-  sysread($inotify, my $chunk, 4096) > 0 or die "inotify read: $!\n";
-  $events .= $chunk;
-  while (length($events) >= 16) {
-    my ($event_wd, $mask, $cookie, $length) = unpack("iIII", substr($events, 0, 16));
-    last if length($events) < 16 + $length;
-    my $name = substr($events, 16, $length);
-    substr($events, 0, 16 + $length, "");
-    $name =~ s/\0.*//s;
-    next unless ($mask & 0x00000080) && $name eq $target;
-    rename($parent, $moved) or die "detach parent: $!\n";
-    print "RACED\n";
-    exit 0;
+  syncBuiltinESMExports();
+  try { return await operation(); }
+  finally {
+    intercepted.mock.restore(); syncBuiltinESMExports();
+    assert.equal(publications, 1, "the intended kernel publication boundary must run exactly once");
   }
-}
-`;
-
-async function startEditDetachRacer(parent, target, moved) {
-  const child = spawn(
-    "/usr/bin/perl",
-    ["-e", IN_MOVED_TO_DETACH_RACER, "--", parent, target, moved],
-    { stdio: ["ignore", "pipe", "pipe"] },
-  );
-  let output = "";
-  let errors = "";
-  child.stdout.on("data", (chunk) => { output += chunk; });
-  child.stderr.on("data", (chunk) => { errors += chunk; });
-  await new Promise((resolve, reject) => {
-    const timer = setTimeout(() => reject(new Error("IN_MOVED_TO detach racer did not arm")), 2_000);
-    const ready = (chunk) => {
-      if (!String(chunk).includes("READY")) return;
-      clearTimeout(timer);
-      child.stdout.off("data", ready);
-      resolve();
-    };
-    child.stdout.on("data", ready);
-    child.once("error", reject);
-    child.once("exit", (code) => {
-      if (code !== null && !output.includes("READY")) reject(new Error(`IN_MOVED_TO detach racer exited ${code}: ${errors}`));
-    });
-  });
-  return {
-    async done() {
-      const code = child.exitCode ?? await new Promise((resolve) => child.once("close", resolve));
-      assert.equal(code, 0, errors);
-      assert.match(output, /RACED/);
-    },
-  };
 }
 
 test("files.write creates atomically and remains create-only/no-replace", async (t) => {
@@ -302,19 +198,13 @@ test("post-link parent detach is always a structurally committed failure", { tim
     const moved = path.join(cwd, `detached-${index}`);
     const targetName = "target.txt";
     mkdirSync(parent);
-    const racer = await startCreateDetachRacer(parent, targetName, moved);
-
     let error;
     try {
-      await handlers["files.write"](
-        { path: `${parentName}/${targetName}`, content: "ours" },
-        context(),
-      );
+      await detachAfterPublication(t, "link", path.join(parent, targetName), parent, moved, () => handlers["files.write"](
+        { path: `${parentName}/${targetName}`, content: "ours" }, context()));
     } catch (caught) {
       error = caught;
     }
-    await racer.done();
-
     assert.ok(error instanceof Error, `${parentName}: write unexpectedly succeeded`);
     assert.equal(error.name, "CommittedAtomicFileError");
     assert.equal(error.code, "ERR_ATOMIC_FILE_COMMITTED");
@@ -340,19 +230,13 @@ test("files.edit reports a fixed committed error after adversarial post-rename p
     const targetName = "target.txt";
     mkdirSync(parent);
     await writeFile(path.join(parent, targetName), "old value");
-    const racer = await startEditDetachRacer(parent, targetName, moved);
-
     let error;
     try {
-      await handlers["files.edit"](
-        { path: `${parentName}/${targetName}`, oldText: "old", newText: "new", replaceAll: false },
-        context(),
-      );
+      await detachAfterPublication(t, "rename", path.join(parent, targetName), parent, moved, () => handlers["files.edit"](
+        { path: `${parentName}/${targetName}`, oldText: "old", newText: "new", replaceAll: false }, context()));
     } catch (caught) {
       error = caught;
     }
-    await racer.done();
-
     assert.ok(error instanceof Error, `${parentName}: edit unexpectedly returned ordinary success`);
     assert.equal(error.name, "CommittedAtomicFileError");
     assert.equal(error.code, "ERR_ATOMIC_FILE_COMMITTED");
