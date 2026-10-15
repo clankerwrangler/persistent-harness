@@ -289,7 +289,7 @@ test("new strong evidence resolves ambiguity without a cached verdict or previou
   assert(resolved.messages.filter(row => row.id !== inputId).every(row => row.text === body + marker(inputId) && row.delivery === undefined));
   const delivered = resolved.messages.find(row => row.id === inputId);
   assert.equal(delivered.text, strong.message.content[0].text);
-  assert.equal(delivered.createdAt, new Date(acceptedAt).toISOString(), "Public input order retains the original acceptance time");
+  assert.equal(delivered.createdAt, delivered.delivery.deliveredAt, "Admitted chronology uses canonical admission; acceptance remains on its receipt");
   assert.equal(delivered.delivery.deliveredAt, strong.timestamp);
   assert.deepEqual(f.store.getActorInput(inputId, "s"), before, "Reading neither accepts nor retires a reservation");
   assert.equal(Object.hasOwn(resolved, "record"), false); assert.equal(Object.hasOwn(resolved, "associations"), false);

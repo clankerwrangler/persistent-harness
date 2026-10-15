@@ -329,7 +329,7 @@ test("family messages reach a working actor while a skill refresh is pending", a
 });
 
 
-test("incoming family messages emit a live actor event during an in-flight turn before agent_settled", async (t) => {
+test("incoming family reservations promote only on canonical admission and retire rejected routes while busy", async (t) => {
   const root = await mkdtemp(path.join(os.tmpdir(), "harness-incoming-live-"));
   const socketPath = path.join(root, "run", "supervisor.sock");
   const skillsPath = path.join(root, "skills"); await mkdir(skillsPath);
@@ -365,24 +365,67 @@ test("incoming family messages emit a live actor event during an in-flight turn 
   await browser.request("subscribe_session", { selector: targetAdmission.sessionId, passive: true });
   targetActor.emit("event", { type: "agent_start" });
   await eventually(() => supervisor.store.getSession(targetAdmission.sessionId).activity === "working");
+  const file = supervisor.store.getSession(targetAdmission.sessionId).sessionFile;
+  await mkdir(path.dirname(file), { recursive: true });
+  await writeFile(file, JSON.stringify({ type: "session", id: targetAdmission.sessionId, version: 3, timestamp: "2026-01-01T00:00:00Z" }) + "\n");
+  const view = () => browser.request("get_visible_messages", { sessionId: targetAdmission.sessionId });
   const message = (await sender.request("send_message", { target: targetAdmission.sessionId, body: "result while busy", deliveryMode: "auto" })).message;
+  let current = await view();
+  assert.equal(current.messages.find(row => row.familyMessageId === message.messageId).delivery.state, "accepted");
+  assert.equal(current.messages.find(row => row.familyMessageId === message.messageId).transportState, "accepted");
+  assert.equal(current.familyMessages, undefined, "internal branch evidence never becomes public metadata");
   await sender.request("record_agent_message_entry", { messageId: message.messageId, entryId: "sender-entry",
     direction: "to", peerId: targetAdmission.sessionId, peerName: "target", relationship: "sibling", body: "result while busy",
     createdAt: "2026-01-01T00:00:00.000Z" });
   await eventually(() => supervisor.store.getMessage(message.messageId).state === "delivered");
+  const receipt = { type: "custom", id: "incoming-live-1", parentId: null, timestamp: "2026-01-01T00:00:00.100Z",
+    customType: "persistent-harness.agent-message-v1", data: { messageId: message.messageId, direction: "from", peerId: senderAdmission.sessionId,
+      peerName: "sender", relationship: "sibling", body: message.body } };
+  await appendFile(file, JSON.stringify(receipt) + "\n");
   await target.request("record_agent_message_entry", { messageId: message.messageId, entryId: "incoming-live-1",
     direction: "from", peerId: senderAdmission.sessionId, peerName: "sender", relationship: "sibling", body: "result while busy",
     createdAt: "2026-01-01T00:00:00.100Z" });
-  const live = await eventually(() => browserEvents.find((frame) => frame.event === "actor_event"
-    && frame.data?.event?.type === "agent_message_entry" && frame.data.event.direction === "from"));
-  assert.equal(live.data.sessionId, targetAdmission.sessionId);
-  assert.equal(live.data.event.entryId, "incoming-live-1");
-  assert.equal(live.data.event.body, "result while busy");
-  assert.equal(browserEvents.some((frame) => frame.event === "actor_event" && frame.data?.event?.type === "agent_settled"), false,
-    "Fleet Desk must see the incoming family message before the current turn settles");
-  assert.equal(supervisor.store.getMessage(message.messageId).state, "delivered");
+  current = await view();
+  const pending = current.messages.find(row => row.familyMessageId === message.messageId);
+  assert.equal(pending.delivery.state, "accepted"); assert.equal(pending.transportState, "delivered");
+  assert.equal(pending.role, "agent_message"); assert.equal(pending.relationship, "sister");
+  const canonical = { type: "custom_message", id: "admitted", parentId: receipt.id, timestamp: "2026-01-01T00:00:00.200Z",
+    customType: "persistent-harness-incoming-message", content: `Direct agent message from sender:\n${message.body}`, display: true,
+    details: { messageId: message.messageId, senderId: senderAdmission.sessionId, senderName: "sender", relationship: "sibling", body: message.body } };
+  await appendFile(file, JSON.stringify(canonical) + "\n");
+  await target.request("record_agent_message_entry", { messageId: message.messageId, entryId: canonical.id,
+    direction: "from", peerId: senderAdmission.sessionId, peerName: "sender", relationship: "sibling", body: message.body,
+    createdAt: canonical.timestamp });
+  const live = await eventually(() => browserEvents.find(frame => frame.event === "actor_event"
+    && frame.data?.event?.type === "input_state" && frame.data.event.message.familyMessageId === message.messageId
+    && frame.data.event.message.delivery.state === "delivered"));
+  assert.equal(live.data.sessionId, targetAdmission.sessionId); assert.equal(live.data.event.message.entryId, canonical.id);
+  assert.equal(live.data.event.message.text, message.body);
+  assert.equal(supervisor.store.getMessage(message.messageId).state, "delivered", "canonical proof does not depend on ack");
+  assert.equal(browserEvents.some(frame => frame.event === "actor_event" && frame.data?.event?.type === "agent_settled"), false);
+  supervisor.transcriptReader.clear(file);
+  current = await view(); assert.equal(current.history.filter(row => row.familyMessageId === message.messageId).length, 1);
+  assert.equal(current.history.find(row => row.familyMessageId === message.messageId).delivery.state, "delivered");
+  let parentId = canonical.id;
+  for (let i = 0; i < 110; i++) {
+    const id = `later-${i}`; await appendFile(file, JSON.stringify({ type: "message", id, parentId, timestamp: new Date(1767225601000 + i).toISOString(),
+      message: { role: "assistant", content: `Reply ${i}` } }) + "\n"); parentId = id;
+  }
+  current = await view();
+  assert.equal(current.messages.some(row => row.familyMessageId === message.messageId), false, "unacknowledged old admission does not reappear as pending outside the latest page");
+  const doomed = (await sender.request("send_message", { target: targetAdmission.sessionId, body: message.body, deliveryMode: "follow_up" })).message;
+  current = await view(); assert.equal(current.messages.find(row => row.familyMessageId === doomed.messageId).delivery.state, "accepted");
+  await browser.request("delete_session", { sessionId: senderAdmission.sessionId });
+  assert.equal(supervisor.store.getMessage(doomed.messageId).state, "rejected");
+  const retired = await eventually(() => browserEvents.find(frame => frame.data?.event?.message?.familyMessageId === doomed.messageId
+    && frame.data.event.message.delivery.state === "rejected"));
+  assert.equal(retired.data.sessionId, targetAdmission.sessionId);
+  current = await view();
+  assert.equal(current.messages.some(row => row.familyMessageId === doomed.messageId && row.delivery.state === "accepted"), false);
+  await browser.request("unsubscribe_session", { sessionId: targetAdmission.sessionId });
+  await browser.request("subscribe_session", { selector: targetAdmission.sessionId, passive: true });
+  current = await view(); assert.equal(current.messages.some(row => row.familyMessageId === doomed.messageId && row.delivery.state === "accepted"), false);
 });
-
 
 test("queued family messages repair an idle Pi worker whose actor transport is missing", async (t) => {
   const root = await mkdtemp(path.join(os.tmpdir(), "harness-message-transport-repair-"));

@@ -441,6 +441,7 @@ export default function persistentHarnessExtension(pi, owner = null) {
   const actorInputs = createActorInputDelivery({ pi, getClient: () => client, getContext: () => activeContext });
   let knownDeliveredIds = new Set();
   let persistedDeliveredIds = new Set();
+  const incomingAdmissionEntries = new Map();
   let knownUsageEntryIds = new Set();
   let pendingUsageEntries = new Map();
   let settlementEntryCursor = { index: 0, anchor: null };
@@ -790,7 +791,10 @@ ${catalog.diagnostics.map((item) => item.error).join("\n")}`);
     settlementEntryCursor = scanned.cursor;
     for (const entry of scanned.entries) {
       if (entry?.type === "custom_message" && entry.customType === INCOMING_MESSAGE_TYPE
-        && typeof entry.details?.messageId === "string") persistedDeliveredIds.add(entry.details.messageId);
+        && typeof entry.details?.messageId === "string") {
+        persistedDeliveredIds.add(entry.details.messageId);
+        if (pendingAcknowledgements.has(entry.details.messageId)) incomingAdmissionEntries.set(entry.details.messageId, entry);
+      }
       if (entry?.type === "custom" && entry.customType === USAGE_ENTRY_TYPE
         && typeof entry.data?.entryId === "string") knownUsageEntryIds.add(entry.data.entryId);
       const usage = usageFromMessageEntry(entry);
@@ -809,6 +813,19 @@ ${catalog.diagnostics.map((item) => item.error).join("\n")}`);
     collectNewSettlementEntries();
     for (const messageId of [...pendingAcknowledgements]) {
       if (!persistedDeliveredIds.has(messageId)) continue;
+      const entry = incomingAdmissionEntries.get(messageId);
+      if (entry) {
+        // Presentation follows the canonical commit independently of transport ack.
+        const details = entry.details;
+        try {
+          await client.request("record_agent_message_entry", agentMessageRequest(entry, {
+            messageId, direction: "from", peerId: details.senderId,
+            peerName: details.senderName ?? details.senderShortId,
+            relationship: details.relationship, body: details.body,
+          }));
+          incomingAdmissionEntries.delete(messageId);
+        } catch {}
+      }
       try {
         await acknowledge(messageId);
       } catch {}
@@ -1234,6 +1251,7 @@ ${catalog.diagnostics.map((item) => item.error).join("\n")}`);
     pendingAcknowledgements.clear();
     pendingUsageEntries.clear();
     persistedDeliveredIds.clear();
+    incomingAdmissionEntries.clear();
     settlementEntryCursor = { index: 0, anchor: null };
     progressTracker.reset();
     progressTurnId = null;
