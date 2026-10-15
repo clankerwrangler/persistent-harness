@@ -62,6 +62,9 @@ test("unresolved input remains pending without stopping startup or unrelated adm
   start.resolve();
   await client.request("get_actor_state", { sessionId });
   const actor = actors[0];
+  // Resident actor state can precede startup input reconciliation.
+  await eventually(() => supervisor.store.getActorInput("absent-input", sessionId).state === "accepted"
+    && supervisor.store.getActorInput(incorporated.inputId, sessionId).state === "completed");
   assert.deepEqual(actor.submits.map((input) => input.inputId), ["absent-input"],
     "An unresolved canonical input is not absence; positive historical incorporation is not replayed either");
   assert.equal(actor.isRunning, true); assert.equal(actor.closes, 0);
@@ -142,13 +145,18 @@ for (const observed of ["unresolved", "proven", "absent"]) {
     supervisor.store.createActorInput(sessionId, { inputId: "late-valid-user", message: "A separate valid input", behavior: "auto" });
     ready.resolve();
     if (observed === "absent") {
-      await assert.rejects(client.request("get_actor_state", { sessionId }), /internal input was not accepted/);
+      // Observe failure without a state request that could revive the failed actor.
+      await eventually(() => supervisor.store.getSession(sessionId).lifecycle === "error" && actors[0]?.closes === 1);
+      assert.match(supervisor.store.getSession(sessionId).lastError, /internal input was not accepted/);
       assert.equal(supervisor.store.getActorInput(reserved.inputId, sessionId).state, "queued");
+      assert.equal(supervisor.store.getActorInput("late-valid-user", sessionId).state, "queued");
+      assert.equal(actors[0].prompts, 1); assert.deepEqual(actors[0].submits, []); assert.equal(actors.length, 1);
       assert.equal((await client.request("get_status")).running, true);
       return;
     }
     await client.request("get_actor_state", { sessionId });
     const actor = actors[0];
+    await eventually(() => supervisor.store.getActorInput("late-valid-user", sessionId).state === "accepted");
     assert.equal(actor.prompts, 1); assert.equal(actor.closes, 0); assert.equal(actor.isRunning, true);
     assert.deepEqual(actor.submits.map((input) => input.inputId), ["late-valid-user"]);
     const input = supervisor.store.getActorInput(reserved.inputId, sessionId);
