@@ -150,7 +150,7 @@ test("idempotent recovery retains optional client correlation without changing a
 
 function deliveryFixture(store, entries = []) {
   const sent = [], requests = [];
-  const ctx = { sessionManager: { getSessionId: () => "root", getEntries: () => entries } };
+  const ctx = { isIdle: () => false, sessionManager: { getSessionId: () => "root", getEntries: () => entries } };
   const client = { isConnected: true, request: async (type, params) => {
     requests.push({ type, params });
     if (type === "get_actor_input") return { input: store.getActorInput(params.inputId, "root") ?? null };
@@ -186,10 +186,11 @@ test("both internal sources stay custom, retain authenticated details, and deliv
   }
 });
 
-test("concurrent command admission is ordered and explicit follow-up stays separate", async (t) => {
+test("concurrent command admission is ordered and explicit cron follow-up stays separate", async (t) => {
   const { store } = await storeFixture(t); const fixture = deliveryFixture(store);
   for (const [inputId, behavior] of [["z-first", "auto"], ["a-second", "follow_up"]]) {
-    store.createActorInput("root", { inputId, message: inputId, behavior, source: "background", origin: { jobId: inputId } }, 10);
+    store.createActorInput("root", { inputId, message: inputId, behavior, source: behavior === "follow_up" ? "cron" : "background",
+      origin: behavior === "follow_up" ? { jobId: inputId, runId: "run" } : { jobId: inputId } }, 10);
   }
   await Promise.all([fixture.helper.handle("z-first", fixture.ctx), fixture.helper.handle("a-second", fixture.ctx)]);
   assert.deepEqual(fixture.sent.map(({ payload }) => payload.details.inputId), ["z-first", "a-second"]);
@@ -332,5 +333,21 @@ test("reconnect re-acknowledges an enqueued internal ID without duplicate inject
     assert.equal(store.getActorInput(inputId, "root").delivery.state, "accepted");
     fixture.append(0, 30); await fixture.helper.flush();
     assert.equal(store.getActorInput(inputId, "root").delivery.state, "delivered");
+  }
+});
+
+test("background completion routing uses the existing busy/idle options without rewriting legacy receipts", async t => {
+  const { store } = await storeFixture(t);
+  for (const idle of [false, true]) for (const behavior of ["auto", "follow_up"]) {
+    const inputId = `background-${idle}-${behavior}`;
+    const original = store.createActorInput("root", { inputId, message: "done", behavior, source: "background", origin: { jobId: inputId } }, 10);
+    const digest = () => store.getActorInput(inputId, "root", { includeDigest: true }).digest;
+    const before = digest(), f = deliveryFixture(store); f.ctx.isIdle = () => idle;
+    await f.helper.handle(inputId, f.ctx); await f.helper.handle(inputId, f.ctx);
+    assert.deepEqual(f.sent.map(row => row.options), [idle ? { triggerTurn: true } : { triggerTurn: true, deliverAs: "steer" }]);
+    assert.equal(store.getActorInput(inputId, "root").behavior, behavior);
+    assert.equal(store.getActorInput(inputId, "root").sequence, original.sequence); assert.equal(digest(), before);
+    f.append(0); await f.helper.flush(); await f.helper.handle(inputId, f.ctx);
+    assert.equal(f.sent.length, 1); assert.equal(store.getActorInput(inputId, "root").state, "completed"); assert.equal(digest(), before);
   }
 });
