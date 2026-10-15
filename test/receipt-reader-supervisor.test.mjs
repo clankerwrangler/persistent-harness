@@ -128,7 +128,7 @@ test("real reader and supervisor recover historical inputs, skip only ambiguity,
   const resolvedEvent = deliveredEvents(ambiguous.inputId)[0];
   assert.equal(resolvedEvent.entryId, strong.id); assert.equal(resolvedEvent.text, "Actual transformed ambiguity resolution");
   assert.deepEqual(resolvedEvent.images, canonicalImages(strong.id));
-  assert.equal(resolvedEvent.createdAt, new Date(ambiguous.acceptedAt).toISOString());
+  assert.equal(resolvedEvent.createdAt, resolvedEvent.delivery.deliveredAt);
   assert.equal(deliveredEvents(activeInput.inputId).length, 1);
   for (const input of [native, legacy, custom]) assert.equal(deliveredEvents(input.inputId).length, 0);
   assert.equal(inputEventOverflow, false, "The fixture records a bounded set of input updates");

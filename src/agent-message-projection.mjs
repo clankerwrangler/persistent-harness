@@ -32,8 +32,12 @@ export function projectAgentMessageEntry(entry) {
       ?? bounded(entry.details?.senderShortId, 128, 512);
     const peerRelationship = relationship(entry.details?.relationship); const body = messageBody(entry);
     if (!peerName || !peerRelationship || !body) return undefined;
-    return { kind: "agent_message", id, direction: "from", relationship: peerRelationship,
-      peerName, body, createdAt };
+    const messageId = injectedIncomingMessageId(entry);
+    return { kind: "agent_message", id: messageId ? incomingFamilyRowId(messageId) : id,
+      entryId: id, ...(messageId ? { familyMessageId: messageId } : {}), direction: "from", relationship: peerRelationship,
+      peerName, ...(bounded(entry.details?.senderId, 128, 512) ? { peerId: entry.details.senderId } : {}), body, createdAt,
+      ...(entry.details?.deliveryMode === "follow_up" ? { deliveryMode: "follow_up" } : {}),
+      delivery: { state: "delivered", deliveredAt: createdAt } };
   }
   if (entry.type === "custom" && entry.customType === AGENT_MESSAGE_ENTRY_TYPE) {
     const data = entry.data; const peerName = bounded(data?.peerName, 256, 1024);
@@ -41,8 +45,10 @@ export function projectAgentMessageEntry(entry) {
     const direction = data?.direction === "from" || data?.direction === "to" ? data.direction : undefined;
     if (!direction || !peerName || !peerRelationship || !body
       || !bounded(data?.messageId, 128, 512) || !bounded(data?.peerId, 128, 512)) return undefined;
-    return { kind: "agent_message", id, direction, relationship: peerRelationship,
-      peerName, body, createdAt };
+    return { kind: "agent_message", id: direction === "from" ? incomingFamilyRowId(data.messageId) : id,
+      direction, relationship: peerRelationship, peerName, body, createdAt,
+      ...(direction === "from" ? { familyMessageId: data.messageId, peerId: data.peerId,
+        delivery: { state: "accepted", acceptedAt: createdAt, deliveredAt: null } } : {}) };
   }
   if (entry.type === "custom" && entry.customType === CHILD_CREATION_ENTRY_TYPE) {
     const data = entry.data; const childName = bounded(data?.childName, 256, 1024);
@@ -56,14 +62,16 @@ export function projectAgentMessageEntry(entry) {
 }
 
 export function projectAgentMessageHistoryMessage(item) {
-  const id = bounded(item?.id ?? item?.entryId, 128, 512); const createdAt = timestamp(item?.createdAt);
+  const id = bounded(item?.id ?? item?.entryId, 256, 1024); const createdAt = timestamp(item?.createdAt);
   const direction = ["from", "to"].includes(item?.direction) ? item.direction : undefined;
   const peerRelationship = relationship(item?.relationship);
   const peerName = bounded(item?.peerName, 256, 1024);
   const body = bounded(item?.body, MAX_BODY_BYTES, MAX_BODY_BYTES);
   if (!id || !createdAt || !direction || !peerRelationship || !peerName || !body) return undefined;
   return { id, role: "agent_message", text: body, direction, relationship: peerRelationship,
-    peerName, createdAt, status: "complete" };
+    peerName, createdAt, status: "complete",
+    ...Object.fromEntries(["familyMessageId", "peerId", "entryId", "deliveryMode", "transportState", "delivery"]
+      .filter(key => item[key] !== undefined).map(key => [key, item[key]])) };
 }
 
 export function durableIncomingMessageId(entry) {
@@ -74,17 +82,29 @@ export function injectedIncomingMessageId(entry) {
   if (entry?.type !== "custom_message" || entry.customType !== INCOMING_AGENT_MESSAGE_TYPE) return undefined;
   return bounded(entry.details?.messageId, 128, 512);
 }
-export function collectDurableIncomingMessageIds(entries) {
-  const ids = new Set();
-  for (const entry of Array.isArray(entries) ? entries : []) {
-    const messageId = durableIncomingMessageId(entry);
-    if (messageId) ids.add(messageId);
+export function incomingFamilyRowId(messageId) { return `family-${messageId}`; }
+
+// Use the canonical context entry, never its non-context transport receipt, when
+// both exist. Distinct message IDs with identical bodies remain distinct rows.
+export function selectIncomingFamilyMessages(items) {
+  const selected = new Map();
+  for (const item of items) {
+    if (item?.direction !== "from" || !item.familyMessageId) continue;
+    const previous = selected.get(item.familyMessageId);
+    if (!previous || previous.delivery?.state !== "delivered" && item.delivery?.state === "delivered") selected.set(item.familyMessageId, item);
   }
-  return ids;
+  return items.filter(item => item?.direction !== "from" || !item.familyMessageId || selected.get(item.familyMessageId) === item);
 }
-export function isSupersededIncomingCustomMessage(entry, durableIncomingIds) {
-  const messageId = injectedIncomingMessageId(entry);
-  return Boolean(messageId && durableIncomingIds?.has(messageId));
+
+export function pendingFamilyMessage(message, sender) {
+  const item = projectAgentMessageEntry({ type: "custom", customType: AGENT_MESSAGE_ENTRY_TYPE,
+    id: message.messageId, timestamp: message.acceptedAt,
+    data: { messageId: message.messageId, direction: "from", peerId: message.senderId,
+      peerName: sender?.name ?? sender?.shortId ?? message.senderId,
+      relationship: message.relationship === "parent" ? "child" : message.relationship === "child" ? "parent" : message.relationship,
+      body: message.body } });
+  if (!item) return undefined;
+  return projectAgentMessageHistoryMessage({ ...item, deliveryMode: message.deliveryMode, transportState: message.state });
 }
 
 export function projectChildCreationHistoryMessage(item) {

@@ -12,6 +12,7 @@ import {
   assistantTurnFailureFromEvents, captureAssistantTurn, resetAssistantTurn,
 } from "./child-task-failure.mjs";
 import { LiveConversation } from "./live-conversation.mjs";
+import { pendingFamilyMessage, projectAgentMessageHistoryMessage } from "./agent-message-projection.mjs";
 import { assistantTextPart, sortVisibleHistory, pendingInputMessage } from "./conversation-projection.mjs";
 import { BackgroundCompletionMonitor, defaultBackgroundJobsDirectory } from "./background-notifier.mjs";
 import { normalizeCronLaunch } from "./cron-launch.mjs";
@@ -675,9 +676,11 @@ export class HarnessSupervisor {
       const pending = this.store.getMessage(params.messageId);
       const continuationOwner = pending?.targetId === state.sessionId && pending.state === "delivered"
         ? `message\0${pending.messageId}` : undefined;
-      return { continuationOwner, run: () => {
+      return { continuationOwner, run: async () => {
         const message = this.store.acknowledgeMessage(params.messageId, state.sessionId);
-        state.deliveryInFlight.delete(message.messageId); return { message };
+        state.deliveryInFlight.delete(message.messageId);
+        await this.#publishFamilyAdmission(state.sessionId, message.messageId).catch(error => this.logger.error?.(error));
+        return { message };
       } };
     }
     return { run: () => this.#dispatch(state, request) };
@@ -763,7 +766,7 @@ export class HarnessSupervisor {
           || receiverRelationship(message.relationship) !== params.relationship) {
           throw new Error("incoming agent message transcript entry does not match its durable message");
         }
-        this.#onActorEvent(state.sessionId, record, { type: "agent_message_entry", ...params });
+        await this.#publishFamilyAdmission(state.sessionId, message.messageId).catch(error => this.logger.error?.(error));
         return { accepted: true, newlyQueued: false };
       }
       if (params.direction !== "to") throw new Error("only outgoing or incoming agent message entries can be recorded explicitly");
@@ -811,6 +814,8 @@ export class HarnessSupervisor {
       this.#consumeMessageToken(state.sessionId); const message = this.store.createMessage(state.sessionId, params, { pendingLimit: this.pendingMessageLimit });
       this.#notifications.bindOrigin(state.sessionId, `message:${message.messageId}`, message.createdAt);
       const target = this.store.getSession(message.targetId);
+      const waiting = this.#pendingFamilyPresentation(message);
+      if (waiting) this.#publishInputState(message.targetId, waiting);
       setImmediate(() => this.#deliverPendingOutgoingHistory(state));
       return { message: { ...message, targetName: target?.name, targetShortId: target?.shortId, targetDepth: target?.depth } };
     }
@@ -904,14 +909,29 @@ export class HarnessSupervisor {
     if (type === "get_visible_messages") {
       const session = this.store.getSession(params.sessionId);
       if (!session || session.lifecycle === "deleted" || !session.sessionFile) throw new Error("session does not have a canonical Pi transcript");
-      const { inputIds: _inputIds, inputEntries: _inputEntries, inputDeliveries: _inputDeliveries, inputAssociationStates: _inputAssociationStates, ...visible } = await this.transcriptReader.read({ sessionFile: session.sessionFile,
+      const { inputIds: _inputIds, inputEntries: _inputEntries, inputDeliveries: _inputDeliveries, inputAssociationStates: _inputAssociationStates, familyMessages = {}, ...visible } = await this.transcriptReader.read({ sessionFile: session.sessionFile,
         sessionId: session.sessionId, sanitizePresentation: session.kind === "root" && session.depth === 0,
         maxMessages: params.limit ?? 100, before: params.before ?? null, publicView: true });
       if (params.before) return visible;
       const actor = this.#actors.get(session.sessionId);
       const messages = new Map(visible.messages.map((message) => [message.id, message]));
       for (const input of this.store.listPendingActorInputs(session.sessionId)) if (!messages.has(input.inputId)) messages.set(input.inputId, pendingInputMessage(input));
-      for (const message of actor?.liveConversation.snapshot() ?? []) if (!messages.has(message.id)) messages.set(message.id, message);
+      for (const route of this.store.listWaitingIncomingMessages(session.sessionId, Math.min(this.pendingMessageLimit, 1000))) {
+        // Admission can precede acknowledgement, or lie outside this bounded page.
+        if (familyMessages[route.messageId]?.delivery?.state === "delivered") continue;
+        const waiting = this.#pendingFamilyPresentation(route);
+        if (waiting) messages.set(waiting.id, waiting);
+      }
+      for (const message of actor?.liveConversation.snapshot() ?? []) {
+        if (message.familyMessageId) {
+          if (familyMessages[message.familyMessageId]?.delivery?.state === "delivered") continue;
+          const route = this.store.getMessage(message.familyMessageId);
+          const current = route && this.#pendingFamilyPresentation(route);
+          if (current && !messages.has(message.id)) messages.set(message.id, current);
+          continue;
+        }
+        if (!messages.has(message.id)) messages.set(message.id, message);
+      }
       const history = visible.history.map((item) => item.kind === "message" ? { kind: "message", message: messages.get(item.id) } : item);
       const seen = new Set(visible.history.map((item) => item.id));
       for (const message of messages.values()) if (!seen.has(message.id)) history.push({ kind: "message", message });
@@ -954,6 +974,7 @@ export class HarnessSupervisor {
     // Fence before the first await, including legacy tombstoned intermediates.
     const sessions = this.store.beginSessionDeletion(sessionId);
     const ids = sessions.map((session) => session.sessionId);
+    const outgoing = ids.flatMap(id => this.store.listMessagesAwaitingSenderEntry(id, Math.min(this.pendingMessageLimit, 1000)));
     const pending = ids.flatMap((id) => [this.#sessionMutationTails.get(id), this.#launchPromises.get(id), this.#actorInputWakes.get(id)?.done]).filter(Boolean);
     const failures = [];
     try {
@@ -971,6 +992,11 @@ export class HarnessSupervisor {
       }
       if (failures.length) throw new AggregateError(failures, "session subtree could not be stopped; deletion was not committed");
       const session = this.store.deleteSession(sessionId);
+      for (const original of outgoing) {
+        const route = this.store.getMessage(original.messageId);
+        const retired = route?.state === "rejected" && this.#pendingFamilyPresentation(route);
+        if (retired) this.#publishInputState(route.targetId, retired);
+      }
       for (const item of sessions) {
         if (item.sessionFile) this.transcriptReader.clear(item.sessionFile);
         this.#clearSessionRouting(item.sessionId);
@@ -1805,6 +1831,26 @@ export class HarnessSupervisor {
     const message = transcript.messages?.find((row) => row.id === proof.entryId && row.inputId === input.inputId);
     if (changed && message) this.#publishInputState(sessionId, { ...message, id: input.inputId, entryId: proof.entryId });
     return changed;
+  }
+
+  #pendingFamilyPresentation(message) {
+    const target = this.store.getSession(message.targetId);
+    if (!target || target.lifecycle === "deleted" || this.store.isSessionDeleting(message.targetId)) return undefined;
+    const sender = message.childExitGeneration != null ? { name: "Harness lifecycle" } : this.store.getSession(message.senderId);
+    const row = pendingFamilyMessage(message, sender);
+    return row && !["accepted", "queued", "delivered"].includes(message.state)
+      ? { ...row, text: "", delivery: { ...row.delivery, state: message.state === "rejected" ? "rejected" : "retired" } } : row;
+  }
+
+  async #publishFamilyAdmission(sessionId, messageId) {
+    const session = this.store.getSession(sessionId);
+    if (!session?.sessionFile || session.lifecycle === "deleted" || this.store.isSessionDeleting(sessionId)) return;
+    const transcript = await this.transcriptReader.read({ sessionFile: session.sessionFile, sessionId });
+    const canonical = transcript.familyMessages?.[messageId];
+    const route = this.store.getMessage(messageId);
+    const message = canonical?.delivery?.state === "delivered" ? projectAgentMessageHistoryMessage(canonical)
+      : route && ["accepted", "queued", "delivered"].includes(route.state) ? this.#pendingFamilyPresentation(route) : undefined;
+    if (message) this.#publishInputState(sessionId, message);
   }
 
   #publishInputOutcome(sessionId, input) {

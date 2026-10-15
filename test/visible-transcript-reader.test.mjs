@@ -206,7 +206,7 @@ test("visible transcript interleaves durable family messages and splits progress
   const result = await new VisibleTranscriptReader().read({ sessionFile: file, sessionId: id });
   assert.deepEqual(result.history.map((item) => [item.kind, item.id]), [
     ["message", "u"], ["progress", "p1"], ["child_creation", "created"], ["agent_message", "sent"],
-    ["progress", "p2"], ["agent_message", "received"], ["message", "a"],
+    ["progress", "p2"], ["agent_message", "family-m2"], ["message", "a"],
   ]);
   assert.equal(result.history[2].childName, "builder");
   assert.equal(result.history[3].body, "Please review");
@@ -215,7 +215,7 @@ test("visible transcript interleaves durable family messages and splits progress
 });
 
 
-test("visible transcript keeps the durable incoming entry and drops the later Pi custom_message", async (t) => {
+test("visible transcript admits only the canonical incoming context entry", async (t) => {
   const { file, id } = await fixture(t);
   const entries = [header(id), message("u", null, "user", "start"),
     { type: "custom", customType: AGENT_MESSAGE_ENTRY_TYPE, id: "live-from", parentId: "u", timestamp: "2026-01-01T00:00:01Z",
@@ -227,26 +227,26 @@ test("visible transcript keeps the durable incoming entry and drops the later Pi
   await writeFile(file, `${entries.map(JSON.stringify).join("\n")}\n`);
   const result = await new VisibleTranscriptReader().read({ sessionFile: file, sessionId: id });
   assert.deepEqual(result.history.map((item) => [item.kind, item.id]), [
-    ["message", "u"], ["agent_message", "live-from"], ["message", "a"],
+    ["message", "u"], ["agent_message", "family-m2"], ["message", "a"],
   ]);
   assert.equal(result.history[1].direction, "from");
   assert.equal(result.history[1].body, "Looks good");
-  assert.doesNotMatch(JSON.stringify(result), /injected|senderId|messageId/);
+  assert.equal(result.history[1].entryId, "injected");
+  assert.equal(result.history[1].createdAt, "2026-01-01T00:00:02.000Z");
+  assert.equal(result.history[1].delivery.state, "delivered");
+  assert.equal(result.familyMessages.m2.entryId, "injected");
 });
 
 
-test("visible transcript still shows a durable incoming from-entry when Pi never wrote the custom_message", async (t) => {
+test("a non-context incoming receipt never enters admitted history", async (t) => {
   const { file, id } = await fixture(t);
   const entries = [header(id), message("u", null, "user", "start"),
     { type: "custom", customType: AGENT_MESSAGE_ENTRY_TYPE, id: "live-from", parentId: "u", timestamp: "2026-01-01T00:00:01Z",
       data: { messageId: "m2", direction: "from", peerId: "sister", peerName: "auditor", relationship: "sibling", body: "Looks good" } }];
   await writeFile(file, `${entries.map(JSON.stringify).join("\n")}\n`);
   const result = await new VisibleTranscriptReader().read({ sessionFile: file, sessionId: id });
-  assert.deepEqual(result.history.map((item) => [item.kind, item.id]), [
-    ["message", "u"], ["agent_message", "live-from"],
-  ]);
-  assert.equal(result.history[1].direction, "from");
-  assert.equal(result.history[1].body, "Looks good");
+  assert.deepEqual(result.history.map((item) => [item.kind, item.id]), [["message", "u"]]);
+  assert.deepEqual(result.familyMessages, {});
 });
 
 test("resolveRetryTurn finds the preceding user on the active branch", async (t) => {

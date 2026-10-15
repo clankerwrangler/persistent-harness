@@ -5,7 +5,7 @@ import path from "node:path";
 import { MAX_INPUT_REQUEST_BYTES, normalizeInputImages } from "./input-images.mjs";
 import { inputIdForEntry, canonicalUserInputId, cleanHarnessInput, createActorInputAssociation, associateVisibleInput, projectVisibleMessage, assistantMessageParts, sortVisibleHistory } from "./conversation-projection.mjs";
 import { sanitizePresentationText } from "./presentation-directive.mjs";
-import { durableIncomingMessageId, isSupersededIncomingCustomMessage, projectAgentMessageEntry } from "./agent-message-projection.mjs";
+import { selectIncomingFamilyMessages, projectAgentMessageEntry } from "./agent-message-projection.mjs";
 import { projectProgressEntry } from "./progress-projection.mjs";
 import { firstCompletedTitleTurn, rootTitleExcerpt } from "./root-title.mjs";
 import { canonicalRetryInput } from "./session-actions.mjs";
@@ -101,7 +101,7 @@ export function boundVisibleMessages(messages, options) {
 function newRecord(filePath, stat, sessionId, verifySource = false) {
   return {
     filePath, sessionId, dev: stat.dev, ino: stat.ino, offset: 0,
-    headerValidated: false, branchId: null, entries: new Map(), incomingMessageIds: new Set(), leafId: null,
+    headerValidated: false, branchId: null, entries: new Map(), leafId: null,
     hash: verifySource ? createHash("sha256") : null, fingerprint: null, verified: false,
     pendingParts: [], pendingBytes: 0, pendingLineOffset: null, touchedAt: Date.now(),
   };
@@ -417,6 +417,10 @@ export class VisibleTranscriptReader {
       const historyPage = { hasMore, nextCursor: hasMore ? historyCursor(record, page.history[0].id) : null, branchId: record.branchId };
       const proven = [...associations].filter(([, result]) => result.state === "proven");
       const projection = { ...page, historyPage, ...title, leafId: record.leafId,
+        // Internal read evidence is scoped to this active branch. The supervisor
+        // consumes it before bounding pending routes; it never becomes wire history.
+        familyMessages: Object.fromEntries(visible.filter(item => item.kind === "agent_message" && item.direction === "from" && item.familyMessageId)
+          .map(item => [item.familyMessageId, item])),
         inputIds: proven.map(([inputId]) => inputId),
         inputEntries: Object.fromEntries(proven.map(([inputId, result]) => [inputId, result.entryId])),
         inputDeliveries: Object.fromEntries(proven.map(([inputId, result]) => [inputId, { entryId: result.entryId, deliveredAt: result.deliveredAt }])),
@@ -504,10 +508,7 @@ export class VisibleTranscriptReader {
         ...(authoritativeUser ? { message: { role: "user", id: candidateId } } : {}) } } : null;
     const message = projectVisibleMessage(entry, { imageReferences: true });
     const progress = projectProgressEntry(entry);
-    const incomingId = durableIncomingMessageId(entry);
-    if (incomingId) record.incomingMessageIds.add(incomingId);
-    const agentMessage = isSupersededIncomingCustomMessage(entry, record.incomingMessageIds)
-      ? undefined : projectAgentMessageEntry(entry);
+    const agentMessage = projectAgentMessageEntry(entry);
     // Ordinary appends keep the pagination identity. A branch switch invalidates
     // every previously loaded suffix, including after this cache is rebuilt.
     if (entry.parentId !== record.leafId) {
@@ -547,7 +548,8 @@ export class VisibleTranscriptReader {
         const parts = entry.assistantParts.map((part) => ({ ...part,
           text: sanitizePresentation ? sanitizePresentationText(part.text).text : part.text })).filter((part) => part.text);
         for (const message of parts.reverse()) reversed.push({ kind: "message", message });
-      } else if (entry.item) {
+      } else if (entry.item && !(entry.item.kind === "agent_message" && entry.item.direction === "from"
+          && entry.item.delivery?.state === "accepted")) {
         let item = sanitizePresentation && entry.item.kind === "message" && entry.item.message.role === "assistant"
           ? { ...entry.item, message: { ...entry.item.message,
             text: sanitizePresentationText(entry.item.message.text).text } }
@@ -563,7 +565,7 @@ export class VisibleTranscriptReader {
       }
       id = entry.parentId;
     }
-    const visible = reversed.reverse();
+    const visible = selectIncomingFamilyMessages(reversed.reverse());
     return publicView ? sortVisibleHistory(visible) : visible;
   }
 

@@ -52,7 +52,8 @@ export class LiveConversation {
   remove(id) { const row = this.#rows.get(id); if (row) { this.#bytes -= row.bytes; this.#rows.delete(id); } }
 
   upsert(message) {
-    const row = this.#row(this.#order.keep(message, Boolean(message.text?.trim())));
+    const row = this.#row(["assistant", "progress"].includes(message.role)
+      ? this.#order.keep(message, Boolean(message.text?.trim())) : message);
     const { text, createdAt, timelineSequence, ...fields } = message;
     row.fields = fields; row.status = message.status;
     this.#replace(row, text); this.#trim();

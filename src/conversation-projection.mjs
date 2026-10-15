@@ -153,7 +153,7 @@ export function associateVisibleInput(message, entry, association) {
   const proof = association.proof;
   return { ...message, inputId: proof.inputId, role: publicInputRole(proof.source),
     text: proof.kind === "legacy-marker" ? cleanHarnessInput(message.text) : message.text,
-    source: proof.source, origin: proof.origin, createdAt: iso(proof.acceptedAt),
+    source: proof.source, origin: proof.origin, createdAt: iso(association.deliveredAt),
     delivery: { state: "delivered", inputId: proof.inputId, acceptedAt: iso(proof.acceptedAt), deliveredAt: iso(association.deliveredAt) },
     ...(proof.clientMessageId ? { clientMessageId: proof.clientMessageId } : {}) };
 }
@@ -163,7 +163,7 @@ export function publicInputRole(source) { return source === "cron" ? SCHEDULED_J
 export function pendingInputMessage(input) {
   return { id: input.inputId, role: publicInputRole(input.source), text: input.message ?? "",
     createdAt: iso(input.acceptedAt ?? input.createdAt), status: "complete", delivery: input.delivery,
-    source: input.source, origin: input.origin, ...(input.clientMessageId ? { clientMessageId: input.clientMessageId } : {}),
+    source: input.source, origin: input.origin, behavior: input.behavior, ...(input.clientMessageId ? { clientMessageId: input.clientMessageId } : {}),
     ...(input.images?.length ? { images: input.images.map((image, index) => ({ type: "image", mimeType: image.mimeType,
       ref: { entryId: input.inputId, index }, size: Buffer.from(image.data, "base64").length })) } : {}) };
 }

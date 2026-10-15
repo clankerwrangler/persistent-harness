@@ -397,6 +397,7 @@ export class HarnessStore {
     if (!messageColumns.has("sender_entry_id")) this.#db.exec("ALTER TABLE messages ADD COLUMN sender_entry_id TEXT");
     if (!messageColumns.has("child_exit_generation")) this.#db.exec("ALTER TABLE messages ADD COLUMN child_exit_generation INTEGER");
     this.#db.exec("CREATE INDEX IF NOT EXISTS pending_child_exit_messages ON messages(id) WHERE child_exit_generation IS NOT NULL AND state IN ('queued', 'delivered')");
+    this.#db.exec("CREATE INDEX IF NOT EXISTS waiting_messages_target ON messages(target_id, accepted_at, id) WHERE state IN ('accepted', 'queued', 'delivered')");
     this.#db.exec("CREATE UNIQUE INDEX IF NOT EXISTS message_sender_entries ON messages(sender_id, sender_entry_id) WHERE sender_entry_id IS NOT NULL");
     this.#db.exec(`CREATE TABLE IF NOT EXISTS session_context_usage (
       session_id TEXT PRIMARY KEY REFERENCES sessions(id) ON DELETE CASCADE,
@@ -1597,6 +1598,12 @@ export class HarnessStore {
   listMessagesAwaitingSenderEntry(senderId, limit = 100) {
     return this.#db.prepare("SELECT * FROM messages WHERE sender_id = ? AND state = 'accepted' ORDER BY accepted_at, id LIMIT ?")
       .all(senderId, limit).map(mapMessage);
+  }
+
+  listWaitingIncomingMessages(targetId, limit = 100) {
+    if (!Number.isSafeInteger(limit) || limit < 1 || limit > 1000) throw new Error("invalid waiting message limit");
+    return this.#db.prepare("SELECT * FROM messages WHERE target_id = ? AND state IN ('accepted', 'queued', 'delivered') ORDER BY accepted_at, id LIMIT ?")
+      .all(targetId, limit).map(mapMessage);
   }
 
   listPendingMessages(targetId) {

@@ -34,7 +34,7 @@ test("new user identity does not rewrite literal marker text and keeps canonical
   const visible = await reader.read({ sessionFile, sessionId: "session", publicView: true });
   assert.equal(visible.messages[0].id, inputId); assert.equal(visible.messages[0].entryId, "pi-entry");
   assert.equal(visible.messages[0].text, text); assert.equal(visible.messages[0].clientMessageId, "client-proof");
-  assert.equal(visible.messages[0].createdAt, "2026-01-01T00:00:00.000Z");
+  assert.equal(visible.messages[0].createdAt, "2026-01-01T00:00:01.000Z");
   assert.equal(visible.messages[0].delivery.deliveredAt, "2026-01-01T00:00:01.000Z");
   assert.equal((await reader.readImage({ sessionFile, sessionId: "session", entryId: "pi-entry", index: 0 })).data, PNG);
   const pending = pendingInputMessage({ ...receipt(inputId), message: text, images: [{ type: "image", mimeType: "image/png", data: PNG }] });
