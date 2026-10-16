@@ -2267,7 +2267,7 @@ export class HarnessSupervisor {
     const sender = delivered.childExitGeneration != null
       ? { name: "Harness lifecycle", shortId: "child-exit", depth: undefined }
       : this.store.getSession(delivered.senderId);
-    if (!this.#write(state, event("message_available", { message: { ...delivered, senderName: sender?.name, senderShortId: sender?.shortId, senderDepth: sender?.depth, relationship: receiverRelationship(delivered.relationship) }, deliverAs: delivered.deliveryMode === "follow_up" ? "follow_up" : "steer" }))) state.deliveryInFlight.delete(delivered.messageId);
+    if (!this.#write(state, event("message_available", { message: { ...delivered, senderName: sender?.name, senderShortId: sender?.shortId, senderDepth: sender?.depth, relationship: receiverRelationship(delivered.relationship) }, deliverAs: "steer" }))) state.deliveryInFlight.delete(delivered.messageId);
   }
 
   #trackExtensionUiRequest(sessionId, record, event) {

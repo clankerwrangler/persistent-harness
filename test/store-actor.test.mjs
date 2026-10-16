@@ -57,6 +57,22 @@ test("one actor table owns root and child lifecycle, recovery, activity, and rou
     messageId: "durable-id", target: "child-a", deliveryMode: "auto", body: "hello",
   }, { now: 7 });
   assert.deepEqual(duplicate, first);
+  assert.equal(first.deliveryMode, "auto");
+  const legacyDb = new DatabaseSync(databasePath);
+  legacyDb.prepare("UPDATE messages SET delivery_mode = 'follow_up' WHERE id = ?").run(first.messageId);
+  legacyDb.close();
+  const legacy = store.getMessage(first.messageId);
+  for (const deliveryMode of [undefined, "auto", "follow_up"]) {
+    assert.deepEqual(store.createMessage("root-a", { messageId: first.messageId,
+      target: "child-a", body: "hello", deliveryMode }), legacy, "a legacy receipt retries without rewriting its mode or identity");
+  }
+  assert.throws(() => store.createMessage("root-a", { messageId: first.messageId,
+    target: "child-a", body: "changed" }), /different content/);
+  assert.throws(() => store.createMessage("child-a", { messageId: first.messageId,
+    target: "root-a", body: "hello" }), /different content/);
+  assert.throws(() => store.createMessage("root-a", { messageId: first.messageId,
+    target: "child-a", body: "hello", deliveryMode: "later" }), /delivery mode/);
+
   assert.equal(first.state, "accepted"); assert.equal(first.senderEntryId, null);
   assert.deepEqual(store.listMessagesAwaitingSenderEntry("root-a").map((message) => message.messageId), ["durable-id"]);
   assert.deepEqual(store.listPendingMessages("child-a"), []);

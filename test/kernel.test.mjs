@@ -204,6 +204,9 @@ test("persistent kernel exposes unified skill help, host-backed calls, interrupt
   assert.equal(agentCall.ok, true);
   const awaitedAgentCall = await kernel.execute("await agent_message.send('root-a', 'awaited hello')");
   assert.equal(awaitedAgentCall.ok, true);
+  const removedFamilyOption = await kernel.execute("agent_message.send('root-a', 'not sent', delivery_mode='follow_up')");
+  assert.equal(removedFamilyOption.ok, false);
+  assert.match(text(removedFamilyOption), /unexpected keyword argument.*delivery_mode/);
   assert.deepEqual(recordedAgentMessages, [
     { messageId: "message-1", target: "root-a", body: "hello", deliveryMode: "auto" },
     { messageId: "message-1", target: "root-a", body: "awaited hello", deliveryMode: "auto" },

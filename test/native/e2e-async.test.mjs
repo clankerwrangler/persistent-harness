@@ -440,6 +440,63 @@ test("native prompt and steer continue while the actual kernel stays FIFO and pe
   assert.equal((await f.client.request("restart_kernel", { sessionId: f.sessionId })).restarted, true);
 });
 
+for (const nativeAsync of [false, true]) test(`${nativeAsync ? "native" : "ordinary"} family delivery accepts legacy wire at safe checkpoints while human follow-up keeps its answer fence`, { timeout: 120_000 }, async t => {
+  const familySeen = deferred(); let receiverId;
+  const f = await fixture(t, (body, index, baseUrl) => {
+    const last = body.input.at(-1);
+    if (last?.role === "user" && text(last).includes("SEND_FAMILY_BATCH")) return { calls: [{ id: "send-family-batch", async: nativeAsync,
+      code: `await agent_message.send(${JSON.stringify(receiverId)}, "FAMILY_FIRST")\nfrom _persistent_harness import host_request\nhost_request("agent_message.send", {"target": ${JSON.stringify(receiverId)}, "body": "FAMILY_SECOND", "deliveryMode": "follow_up"})\nawait agent_message.send(${JSON.stringify(receiverId)}, "FAMILY_THIRD")` }] };
+    if (index === 1) return { calls: [{ id: "family-held", async: nativeAsync,
+      code: heldCode(baseUrl, "family-held", 'Path("family-held-finished").write_text("once")\nprint("FAMILY_REAL_RESULT")') }] };
+    if (text(body).includes("START_FAMILY_CHECKPOINT") && text(body).includes("FAMILY_THIRD")) familySeen.resolve();
+    return { answer: "FAMILY_CHECKPOINT_ANSWER" };
+  }, { nativeAsync, modelId: nativeAsync ? "gpt-6-astra" : "gpt-6.1-sol" });
+  await f.submit("START_FAMILY_CHECKPOINT");
+  await bounded(f.gate("family-held").started.promise, "original actual tool started");
+  await f.submit("HUMAN_AFTER_WORK", "follow_up");
+
+  receiverId = f.sessionId;
+  const senderCwd = path.join(f.root, "sender"); await mkdir(senderCwd);
+  const { admission: sender } = await f.client.request("create_root", { cwd: senderCwd, repositoryRoot: null,
+    name: "family-sender", provider: "openai-codex", model: nativeAsync ? "gpt-6-astra" : "gpt-6.1-sol", thinkingLevel: "off" });
+  await f.client.request("subscribe_session", { selector: sender.sessionId });
+  const since = f.log.frames.length;
+  await f.client.request("submit_input", { sessionId: sender.sessionId, message: "SEND_FAMILY_BATCH", behavior: "auto" });
+  await f.log.waitFrame(frame => frame.event === "actor_event" && frame.data.sessionId === sender.sessionId
+    && frame.data.event.type === "agent_settled", "real Python sender completed family batch", since);
+  const messages = f.supervisor.store.listMessages().filter(message => message.senderId === sender.sessionId);
+  assert.deepEqual(messages.map(message => message.body), ["FAMILY_FIRST", "FAMILY_SECOND", "FAMILY_THIRD"]);
+  assert(messages.every(message => message.deliveryMode === "auto"), "new and old Python envelopes use the single family route");
+  if (nativeAsync) {
+    await bounded(familySeen.promise, "family reaches model while actual tool remains pending");
+    assert.equal(resultsIn(await f.entries()).length, 0, "checkpoint delivery does not interrupt or replace the running tool");
+    await assert.rejects(access(path.join(f.cwd, "family-held-finished")), /ENOENT/);
+    assert(!f.requests.some(body => text(body).includes("HUMAN_AFTER_WORK")), "family checkpoint does not promote human follow-up");
+  } else {
+    assert.equal(f.requests.filter(body => text(body).includes("START_FAMILY_CHECKPOINT")).length, 1, "ordinary family delivery retains the real tool barrier");
+  }
+  f.gate("family-held").release.resolve();
+  await bounded(familySeen.promise, "all original family messages reach model");
+  await f.log.waitFrame(frame => frame.event === "actor_event" && frame.data.sessionId === f.sessionId
+    && frame.data.event.type === "agent_settled", "family inputs and human follow-up settle", since);
+  const entries = await f.entries();
+  const admissions = entries.filter(entry => entry.type === "custom_message"
+    && entry.customType === "persistent-harness-incoming-message");
+  assert.deepEqual(admissions.map(entry => entry.details.messageId), messages.map(message => message.messageId));
+  assert.equal(resultsIn(entries).filter(result => result.toolCallId === "family-held|fc_family-held").length, 1);
+  assert.equal(await readFile(path.join(f.cwd, "family-held-finished"), "utf8"), "once");
+  for (const message of messages) {
+    const receipt = f.supervisor.store.getMessage(message.messageId);
+    assert.equal(receipt.state, "acknowledged"); assert.equal(receipt.attemptCount, 1);
+    assert.equal(receipt.acceptedAt, message.acceptedAt); assert.equal(receipt.deliveryMode, "auto");
+  }
+  const receiverRequests = f.requests.filter(body => text(body).includes("START_FAMILY_CHECKPOINT"));
+  const resultRequest = receiverRequests.findIndex(body => toolOutputs(body).some(output => output.call_id === "family-held"));
+  const humanRequest = receiverRequests.findIndex(body => text(body).includes("HUMAN_AFTER_WORK"));
+  assert(resultRequest > 0 && humanRequest > resultRequest, "the real result gets its answer before human follow-up");
+  assert(text(receiverRequests[resultRequest]).includes("FAMILY_FIRST"), "ordinary family admission needs no completed-answer boundary");
+});
+
 test("native abort cancels active and queued cells and preserves ordinary execution", { timeout: 120_000 }, async (t) => {
   const f = await fixture(t, (body, index, baseUrl) => {
     if (index === 1) return { calls: [

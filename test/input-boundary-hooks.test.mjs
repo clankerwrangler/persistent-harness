@@ -97,11 +97,13 @@ test("context-admitted family messages free durable pending capacity while nativ
   await f.owner.prepareRequest(request, f.ctx);
   assert.equal(store.getMessage("consumed").state, "acknowledged");
   assert.equal(f.ctx.isIdle(), false, "no settlement or tool completion is needed to acknowledge admitted context");
-  const followUp = queue("after-work", "follow_up");
+  // An old supervisor/receipt can still carry follow_up; the family receiver
+  // must use the same checkpoint while generic follow-ups keep their behavior.
+  const followUp = { ...queue("after-work", "follow_up"), deliveryMode: "follow_up" };
   await receive(followUp);
-  assert.equal(f.sent[1].options.deliverAs, "followUp");
+  assert.equal(f.sent[1].options.deliverAs, "steer");
   await f.owner.prepareRequest(request, f.ctx);
-  assert.equal(store.getMessage("after-work").state, "delivered", "queued follow-up must retain pending capacity until model admission");
+  assert.equal(store.getMessage("after-work").state, "delivered", "transport receipt alone must retain pending capacity until model admission");
 });
 
 test("a lost family acknowledgement is retried on redelivery without another context injection", async (t) => {

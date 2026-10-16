@@ -903,6 +903,8 @@ ${catalog.diagnostics.map((item) => item.error).join("\n")}`);
       return;
     }
 
+    // Legacy family frames may still request follow_up. Family delivery has one
+    // safe checkpoint path; generic user/cron/background options stay separate.
     await deliverIncomingFamilyMessage({
       persist: persistIncomingAgentMessage,
       inject: (_message, options) => {
@@ -913,7 +915,7 @@ ${catalog.diagnostics.map((item) => item.error).join("\n")}`);
       onPersistError: (error) => {
         activeContext?.ui?.notify?.(error instanceof Error ? error.message : String(error), "error");
       },
-    }, message, incomingSendOptions(data.deliverAs, Boolean(progressTurnId)));
+    }, message, incomingSendOptions("steer", Boolean(progressTurnId)));
   }
 
   pi.registerCommand(ACTOR_INPUT_COMMAND, {
