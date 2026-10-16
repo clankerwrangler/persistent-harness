@@ -375,8 +375,9 @@ function incompleteObservations(report) {
   }).map(row => `${row.callId}|${row.itemId}`));
 }
 
-// STOCK Codex emits this diagnostic after its ordinary websocket stream fails.
-// Both STOCK agent-loop and ActorStreamPlanner admit ordinary calls only on a
+// STOCK WebSocket and harness-observed SSE body-read diagnostics identify
+// failed ordinary streams. Both STOCK agent-loop and ActorStreamPlanner admit
+// ordinary calls only on a
 // successful terminal, so even complete calls on this failed terminal did not
 // execute. This producer discriminator is deliberately narrower than absence of
 // nativeTransport: a missing/malformed native report is not ordinary evidence.
@@ -388,8 +389,12 @@ function ordinaryFailedTerminal(message) {
         && !Object.hasOwn(call, "providerCallId") && !Object.hasOwn(call, "providerItemId")))
     && Array.isArray(message.diagnostics) && message.diagnostics.some(item =>
       isRecord(item) && item.type === "provider_transport_failure"
-      && isRecord(item.details) && ["auto", "websocket"].includes(item.details.configuredTransport)
-      && item.details.eventsEmitted === true && item.details.phase === "after_message_stream_start");
+      && isRecord(item.details) && item.details.eventsEmitted === true
+      && item.details.phase === "after_message_stream_start"
+      && (Object.hasOwn(item.details, "producer") || Object.hasOwn(item.details, "transport")
+        ? item.details.producer === "persistent-harness-sse-body-read-v1" && item.details.transport === "sse"
+          && ["auto", "sse", "websocket"].includes(item.details.configuredTransport) && message.stopReason === "error"
+        : ["auto", "websocket"].includes(item.details.configuredTransport)));
 }
 
 function omitUnadmittedCalls(messages, canonical, selected, diagnostics) {

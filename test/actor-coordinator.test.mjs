@@ -699,12 +699,13 @@ test("latest choice during awaited active model_select observer wins after Pi mu
   assert.deepEqual(f.events.filter(e => e.type === "inference_selection_applied").map(e => e.requestId), ["old", "latest"]);
 });
 
-for (const completion of ["partial", "complete"]) test(`STOCK-shaped failed ordinary ${completion} producer dispatches no call and allows the next request`, async t => {
+for (const witness of ["websocket", "sse"]) for (const completion of ["partial", "complete"]) test(`STOCK-shaped failed ordinary ${completion} producer dispatches no call and allows the next request: ${witness}`, async t => {
   const partial = { type: "toolCall", id: "call_partial|fc_partial", name: "hold", arguments: { code: completion === "partial" ? "print(f\"partial" : "print(1)" } };
+  const errorMessage = witness === "sse" ? "terminated" : "WebSocket error";
   const f = await fixture(t, { retry: { enabled: false },
     model: { id: "fixture", name: "Fixture", provider: "openai-codex", api: "openai-codex-responses", reasoning: false,
       input: ["text"], cost: usage().cost, contextWindow: 32000, maxTokens: 1000 },
-    script: (_context, n) => n === 1 ? { content: [partial], stopReason: "error", errorMessage: "WebSocket error",
+    script: (_context, n) => n === 1 ? { content: [partial], stopReason: "error", errorMessage,
       events: message => {
         const pending = { ...message, stopReason: "pending" };
         return [{ type: "toolcall_start", contentIndex: 0, partial: pending }, completion === "complete"
@@ -712,7 +713,8 @@ for (const completion of ["partial", "complete"]) test(`STOCK-shaped failed ordi
           : { type: "toolcall_delta", contentIndex: 0, delta: "partial arguments", partial: pending }];
       },
       diagnostics: [{ type: "provider_transport_failure", details: {
-        configuredTransport: "auto", eventsEmitted: true, phase: "after_message_stream_start" } }] }
+        configuredTransport: "auto", eventsEmitted: true, phase: "after_message_stream_start",
+        ...(witness === "sse" ? { producer: "persistent-harness-sse-body-read-v1", transport: "sse" } : {}) } }] }
       : [{ type: "text", text: "RECOVERED" }],
   });
   f.coor.projectContext = projectCanonicalContext;
@@ -722,7 +724,7 @@ for (const completion of ["partial", "complete"]) test(`STOCK-shaped failed ordi
   const before = structuredClone(f.manager.getEntries());
   const failed = before.find(e => e.message?.stopReason === "error");
   assert.deepEqual(failed.message.content, [partial]);
-  assert.equal(failed.message.errorMessage, "WebSocket error");
+  assert.equal(failed.message.errorMessage, errorMessage);
   assert.equal(before.filter(e => e.message?.role === "toolResult").length, 0);
   assert.equal(f.events.filter(e => e.type === "tool_execution_start").length, 0);
   await f.coor.submit("new explicit fixture input", "auto", [], "next-input");

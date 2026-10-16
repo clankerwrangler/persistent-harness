@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
-import { lstat, mkdir, mkdtemp, readFile, readdir, rename, rm, symlink, writeFile } from "node:fs/promises";
+import { chmod, lstat, mkdir, mkdtemp, readFile, readdir, rename, rm, symlink, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
@@ -61,7 +61,9 @@ test("cache storage failure leaves creation unavailable without creating canonic
 test("cache entry rejects unsafe paths and honors operator disable and explicit directory", { skip: !posix }, async t => {
   const root = await privateRoot(t), cache = path.join(root, "cache"); await mkdir(cache, { mode: 0o700 });
   const unsafe = path.join(root, "unsafe"), link = path.join(root, "link"), file = path.join(root, "file");
-  await mkdir(unsafe, { mode: 0o755 }); await symlink(cache, link); await writeFile(file, "not a directory");
+  await mkdir(unsafe, { mode: 0o755 }); await chmod(unsafe, 0o755);
+  assert.equal((await lstat(unsafe)).mode & 0o7777, 0o755);
+  await symlink(cache, link); await writeFile(file, "not a directory");
   for (const candidate of [unsafe, link, file, path.join(root, "missing")]) {
     assert.equal((await probe(root, { PI_HARNESS_ACTOR_COMPILE_CACHE: candidate })).cache, null);
   }
