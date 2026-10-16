@@ -43,16 +43,17 @@ after(async () => {
 const external = await loadExternalPi();
 // Optional source-test artifact selects only the corrected public history owner;
 // public providers/runtime/helpers remain the verified stock dependency graph.
-const sourceSdk = savedEnv.PI_HARNESS_TEST_SOURCE_SDK === "1";
-if (sourceSdk) process.env.PI_PACKAGE_DIR = savedEnv.PI_HARNESS_TEST_SDK_PACKAGE_DIR;
+const sourceOwnerOverride = savedEnv.PI_HARNESS_TEST_SOURCE_SDK === "1";
+const sourceSdk = sourceOwnerOverride || typeof external.sdk.ExtensionRunner.prototype.emitContextSource === "function";
+if (sourceOwnerOverride) process.env.PI_PACKAGE_DIR = savedEnv.PI_HARNESS_TEST_SDK_PACKAGE_DIR;
 const retentionSdk = savedEnv.PI_HARNESS_RETENTION_SDK_MODULE
   ? await import(pathToFileURL(savedEnv.PI_HARNESS_RETENTION_SDK_MODULE)) : null;
-if (sourceSdk) {
+if (sourceOwnerOverride) {
   assert.equal(typeof retentionSdk?.createAgentSession, "function");
   assert.equal(typeof retentionSdk?.ExtensionRunner.prototype.emitContextSource, "function");
 }
 const integratedExternal = retentionSdk ? { ...external, sdk: { ...external.sdk, SessionManager: retentionSdk.SessionManager,
-  ...(sourceSdk ? { createAgentSession: retentionSdk.createAgentSession, ExtensionRunner: retentionSdk.ExtensionRunner } : {}) } } : external;
+  ...(sourceOwnerOverride ? { createAgentSession: retentionSdk.createAgentSession, ExtensionRunner: retentionSdk.ExtensionRunner } : {}) } } : external;
 const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 async function until(predicate, timeout = 3000) {
   const started = Date.now();
@@ -229,9 +230,15 @@ test("resolver requires explicit install and uses manifest exports beside bundle
 });
 
 test("resolver honors the explicit official bundled SDK without changing public helper imports", async () => {
-  const main = await resolveExternalPi({ env: { PI_HARNESS_PI_MODULE: stock } });
-  const bundled = await resolveExternalPi({ env: { PI_HARNESS_PI_MODULE: path.join(stock, "dist/bundle/index.js") } });
-  assert.deepEqual(bundled, { ...main, sdk: path.join(stock, "dist/bundle/index.js") });
+  // A source-built SDK is a valid public package, not the pinned official bundle.
+  // Keep that independent byte guard under an explicit official test fixture.
+  const main = await resolveExternalPi({ env: { PI_HARNESS_PI_MODULE: savedEnv.PI_HARNESS_TEST_OFFICIAL_PI_MODULE ?? stock } });
+  const bundledPath = path.join(main.packageRoot, "dist/bundle/index.js");
+  const bundled = await resolveExternalPi({ env: { PI_HARNESS_PI_MODULE: bundledPath } });
+  assert.deepEqual(bundled, { ...main, sdk: bundledPath });
+  if (main.packageRoot !== stock) await assert.rejects(resolveExternalPi({
+    env: { PI_HARNESS_PI_MODULE: path.join(stock, "dist/bundle/index.js") },
+  }), /does not match official stock bytes/);
   const alias = path.join(temporary, "explicit-bundled-sdk.mjs");
   await symlink(bundled.sdk, alias);
   assert.deepEqual(await resolveExternalPi({ env: { PI_HARNESS_PI_MODULE: pathToFileURL(alias).href } }), bundled);
@@ -971,7 +978,7 @@ test("supported invalidate then reload removes old veto before successor registr
 
 
 test("source-aware supervised turns avoid raw hydration while direct worker end events stay full", async t => {
-  if (!sourceSdk) return t.skip("source SDK fixture requires PI_HARNESS_TEST_SOURCE_SDK=1");
+  if (!sourceSdk) return t.skip("source-aware SDK fixture required");
   for (const eventMode of ["full", "supervised-source"]) {
     const hooks = { legacyContext: 0, sourceContext: 0, legacyEnd: 0, sourceEnd: 0 };
     const { worker, events } = await fixture({ eventMode, extensionFactory(pi) {

@@ -1,5 +1,5 @@
 import { isDeepStrictEqual } from "node:util";
-import { projectCanonicalBranch, projectCanonicalContext } from "./canonical-context.mjs";
+import { refreshCanonicalSessionContext, projectCanonicalBranch } from "./canonical-context.mjs";
 
 export class ActorNavigationError extends Error {
   constructor(code, message = code, options) { super(message, options); this.name = "ActorNavigationError"; this.code = code; }
@@ -118,8 +118,7 @@ export function createNavigationDriver({ sdk, core, runner, session, models, lif
         const id = manager.appendLabelChange(summaryEntry?.id ?? targetId, effective.label);
         appended.push(manager.getEntry(id));
       }
-      session.agent.state.messages = projectCanonicalContext({ entries: manager.getEntries(), leafId: manager.getLeafId(),
-        buildSessionProjection: sdk.buildSessionProjection, mode: "native" }).messages;
+      refreshCanonicalSessionContext(session, sdk.buildSessionProjection);
       outcome = { editorText: prepared.editorText, cancelled: false, summaryEntry };
       for (const entry of appended) await publish({ type: "entry_appended", entry });
       await runner.emit({ type: "session_tree", newLeafId: manager.getLeafId(), oldLeafId,

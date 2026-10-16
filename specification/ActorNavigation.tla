@@ -1,56 +1,65 @@
 ------------------------- MODULE ActorNavigation -------------------------
 EXTENDS Naturals
+CONSTANT BadRawRefresh
 VARIABLES phase, lease, summaryFlight, cancelled, stale, writes, before, after,
-          targetKind, summarize, custom, leaf, contextLeaf, queued, providerCalls, toolEffects, signature, inferenceCalls, recoveryDone, recoveryLeaf, seenLeaf, usageLeaf, committedError
+          targetKind, summarize, custom, leaf, contextLeaf, queued, providerCalls, toolEffects, signature, inferenceCalls, recoveryDone, recoveryLeaf, seenLeaf, usageLeaf, committedError, replyCommitted
 vars == <<phase, lease, summaryFlight, cancelled, stale, writes, before, after,
-          targetKind, summarize, custom, leaf, contextLeaf, queued, providerCalls, toolEffects, signature, inferenceCalls, recoveryDone, recoveryLeaf, seenLeaf, usageLeaf, committedError>>
+          targetKind, summarize, custom, leaf, contextLeaf, queued, providerCalls, toolEffects, signature, inferenceCalls, recoveryDone, recoveryLeaf, seenLeaf, usageLeaf, committedError, replyCommitted>>
 Init == /\ phase = "idle" /\ lease = FALSE /\ summaryFlight = FALSE
         /\ cancelled = FALSE /\ stale = FALSE /\ writes = 0 /\ before = 0 /\ after = 0
         /\ targetKind \in {"user", "custom", "other"} /\ summarize \in BOOLEAN /\ custom \in BOOLEAN
         /\ leaf = "old" /\ contextLeaf = "old" /\ queued = FALSE /\ providerCalls = 0 /\ toolEffects = 0 /\ signature = "old" /\ inferenceCalls = 0
-        /\ recoveryDone = TRUE /\ recoveryLeaf = "old" /\ seenLeaf = "old" /\ usageLeaf = "old" /\ committedError = FALSE
+        /\ recoveryDone = TRUE /\ recoveryLeaf = "old" /\ seenLeaf = "old" /\ usageLeaf = "old" /\ committedError = FALSE /\ replyCommitted = FALSE
 Reserve == /\ phase = "idle" /\ phase' = "prepared" /\ lease' = TRUE
-           /\ UNCHANGED <<summaryFlight, cancelled, stale, writes, before, after, targetKind, summarize, custom, leaf, contextLeaf, queued, providerCalls, toolEffects, signature, inferenceCalls, recoveryDone, recoveryLeaf, seenLeaf, usageLeaf, committedError>>
+           /\ UNCHANGED <<summaryFlight, cancelled, stale, writes, before, after, targetKind, summarize, custom, leaf, contextLeaf, queued, providerCalls, toolEffects, signature, inferenceCalls, recoveryDone, recoveryLeaf, seenLeaf, usageLeaf, committedError, replyCommitted>>
 Before == /\ phase = "prepared" /\ phase' = "hooked" /\ before' = 1
-          /\ UNCHANGED <<lease, summaryFlight, cancelled, stale, writes, after, targetKind, summarize, custom, leaf, contextLeaf, queued, providerCalls, toolEffects, signature, inferenceCalls, recoveryDone, recoveryLeaf, seenLeaf, usageLeaf, committedError>>
+          /\ UNCHANGED <<lease, summaryFlight, cancelled, stale, writes, after, targetKind, summarize, custom, leaf, contextLeaf, queued, providerCalls, toolEffects, signature, inferenceCalls, recoveryDone, recoveryLeaf, seenLeaf, usageLeaf, committedError, replyCommitted>>
 StartSummary == /\ phase = "hooked" /\ summarize /\ ~custom /\ ~cancelled /\ ~stale
                 /\ phase' = "streaming" /\ summaryFlight' = TRUE /\ providerCalls' = providerCalls + 1
-                /\ UNCHANGED <<lease, cancelled, stale, writes, before, after, targetKind, summarize, custom, leaf, contextLeaf, queued, toolEffects, signature, inferenceCalls, recoveryDone, recoveryLeaf, seenLeaf, usageLeaf, committedError>>
+                /\ UNCHANGED <<lease, cancelled, stale, writes, before, after, targetKind, summarize, custom, leaf, contextLeaf, queued, toolEffects, signature, inferenceCalls, recoveryDone, recoveryLeaf, seenLeaf, usageLeaf, committedError, replyCommitted>>
 FinishSummary == /\ phase = "streaming" /\ phase' = "ready" /\ summaryFlight' = FALSE
-                 /\ UNCHANGED <<lease, cancelled, stale, writes, before, after, targetKind, summarize, custom, leaf, contextLeaf, queued, providerCalls, toolEffects, signature, inferenceCalls, recoveryDone, recoveryLeaf, seenLeaf, usageLeaf, committedError>>
+                 /\ UNCHANGED <<lease, cancelled, stale, writes, before, after, targetKind, summarize, custom, leaf, contextLeaf, queued, providerCalls, toolEffects, signature, inferenceCalls, recoveryDone, recoveryLeaf, seenLeaf, usageLeaf, committedError, replyCommitted>>
 NoSummary == /\ phase = "hooked" /\ (~summarize \/ custom) /\ phase' = "ready"
-             /\ UNCHANGED <<lease, summaryFlight, cancelled, stale, writes, before, after, targetKind, summarize, custom, leaf, contextLeaf, queued, providerCalls, toolEffects, signature, inferenceCalls, recoveryDone, recoveryLeaf, seenLeaf, usageLeaf, committedError>>
+             /\ UNCHANGED <<lease, summaryFlight, cancelled, stale, writes, before, after, targetKind, summarize, custom, leaf, contextLeaf, queued, providerCalls, toolEffects, signature, inferenceCalls, recoveryDone, recoveryLeaf, seenLeaf, usageLeaf, committedError, replyCommitted>>
 Cancel == /\ phase \in {"prepared", "hooked", "streaming", "ready"} /\ cancelled' = TRUE
-          /\ UNCHANGED <<phase, lease, summaryFlight, stale, writes, before, after, targetKind, summarize, custom, leaf, contextLeaf, queued, providerCalls, toolEffects, signature, inferenceCalls, recoveryDone, recoveryLeaf, seenLeaf, usageLeaf, committedError>>
+          /\ UNCHANGED <<phase, lease, summaryFlight, stale, writes, before, after, targetKind, summarize, custom, leaf, contextLeaf, queued, providerCalls, toolEffects, signature, inferenceCalls, recoveryDone, recoveryLeaf, seenLeaf, usageLeaf, committedError, replyCommitted>>
 Invalidate == /\ phase \in {"prepared", "hooked", "streaming", "ready"} /\ stale' = TRUE
-              /\ UNCHANGED <<phase, lease, summaryFlight, cancelled, writes, before, after, targetKind, summarize, custom, leaf, contextLeaf, queued, providerCalls, toolEffects, signature, inferenceCalls, recoveryDone, recoveryLeaf, seenLeaf, usageLeaf, committedError>>
+              /\ UNCHANGED <<phase, lease, summaryFlight, cancelled, writes, before, after, targetKind, summarize, custom, leaf, contextLeaf, queued, providerCalls, toolEffects, signature, inferenceCalls, recoveryDone, recoveryLeaf, seenLeaf, usageLeaf, committedError, replyCommitted>>
 Commit == /\ phase = "ready" /\ lease /\ ~cancelled /\ ~stale /\ ~summaryFlight
           /\ phase' = "committed" /\ writes' = 1
           /\ leaf' = IF summarize THEN "summary" ELSE IF targetKind = "other" THEN "target" ELSE "parent"
           /\ contextLeaf' = leaf' /\ signature' = "selected"
-          /\ UNCHANGED <<lease, summaryFlight, cancelled, stale, before, after, targetKind, summarize, custom, queued, providerCalls, toolEffects, inferenceCalls, recoveryDone, recoveryLeaf, seenLeaf, usageLeaf, committedError>>
+          /\ UNCHANGED <<lease, summaryFlight, cancelled, stale, before, after, targetKind, summarize, custom, queued, providerCalls, toolEffects, inferenceCalls, recoveryDone, recoveryLeaf, seenLeaf, usageLeaf, committedError, replyCommitted>>
 \* Successful return and committed-error propagation both invalidate cached owner state.
 After == /\ phase = "committed" /\ after' = 1 /\ phase' = "done" /\ lease' = FALSE
          /\ recoveryDone' = FALSE /\ seenLeaf' = "empty" /\ usageLeaf' = "none"
-         /\ UNCHANGED <<summaryFlight, cancelled, stale, writes, before, targetKind, summarize, custom, leaf, contextLeaf, queued, providerCalls, toolEffects, signature, inferenceCalls, recoveryLeaf, committedError>>
+         /\ UNCHANGED <<summaryFlight, cancelled, stale, writes, before, targetKind, summarize, custom, leaf, contextLeaf, queued, providerCalls, toolEffects, signature, inferenceCalls, recoveryLeaf, committedError, replyCommitted>>
 Fail == /\ phase \in {"prepared", "hooked", "ready", "committed"} /\ ~summaryFlight
         /\ phase' = "failed" /\ lease' = FALSE
         /\ committedError' = (phase = "committed")
         /\ recoveryDone' = IF committedError' THEN FALSE ELSE recoveryDone
         /\ seenLeaf' = IF committedError' THEN "empty" ELSE seenLeaf
         /\ usageLeaf' = IF committedError' THEN "none" ELSE usageLeaf
-        /\ UNCHANGED <<summaryFlight, cancelled, stale, writes, before, after, targetKind, summarize, custom, leaf, contextLeaf, queued, providerCalls, toolEffects, signature, inferenceCalls, recoveryLeaf>>
+        /\ UNCHANGED <<summaryFlight, cancelled, stale, writes, before, after, targetKind, summarize, custom, leaf, contextLeaf, queued, providerCalls, toolEffects, signature, inferenceCalls, recoveryLeaf, replyCommitted>>
 Queue == /\ lease /\ queued' = TRUE
-         /\ UNCHANGED <<phase, lease, summaryFlight, cancelled, stale, writes, before, after, targetKind, summarize, custom, leaf, contextLeaf, providerCalls, toolEffects, signature, inferenceCalls, recoveryDone, recoveryLeaf, seenLeaf, usageLeaf, committedError>>
+         /\ UNCHANGED <<phase, lease, summaryFlight, cancelled, stale, writes, before, after, targetKind, summarize, custom, leaf, contextLeaf, providerCalls, toolEffects, signature, inferenceCalls, recoveryDone, recoveryLeaf, seenLeaf, usageLeaf, committedError, replyCommitted>>
 DispatchQueued == /\ phase \in {"done", "failed"} /\ ~lease /\ queued /\ inferenceCalls = 0
                   /\ recoveryDone /\ inferenceCalls' = 1
                   /\ UNCHANGED <<phase, lease, summaryFlight, cancelled, stale, writes, before, after,
-                       targetKind, summarize, custom, leaf, contextLeaf, queued, providerCalls, toolEffects, signature, recoveryDone, recoveryLeaf, seenLeaf, usageLeaf, committedError>>
+                       targetKind, summarize, custom, leaf, contextLeaf, queued, providerCalls, toolEffects, signature, recoveryDone, recoveryLeaf, seenLeaf, usageLeaf, committedError, replyCommitted>>
 RecoverQueued == /\ phase \in {"done", "failed"} /\ ~lease /\ queued /\ ~recoveryDone
                  /\ recoveryDone' = TRUE /\ recoveryLeaf' = leaf /\ seenLeaf' = leaf
                  /\ UNCHANGED <<phase, lease, summaryFlight, cancelled, stale, writes, before, after,
-                      targetKind, summarize, custom, leaf, contextLeaf, queued, providerCalls, toolEffects, signature, inferenceCalls, usageLeaf, committedError>>
-Next == RecoverQueued \/ DispatchQueued \/ Reserve \/ Before \/ StartSummary \/ FinishSummary \/ NoSummary \/ Cancel \/ Invalidate \/ Commit \/ After \/ Fail \/ Queue
+                      targetKind, summarize, custom, leaf, contextLeaf, queued, providerCalls, toolEffects, signature, inferenceCalls, usageLeaf, committedError, replyCommitted>>
+\* A subsequent ordinary reply must preserve the selected signature in the
+\* dormant public transcript, even when its owner is rebound as a source.
+AppendReply == /\ inferenceCalls = 1 /\ writes = 1 /\ ~replyCommitted
+               /\ replyCommitted' = TRUE
+               /\ signature' = IF BadRawRefresh THEN "raw" ELSE "selected"
+               /\ UNCHANGED <<phase, lease, summaryFlight, cancelled, stale, writes, before, after,
+                    targetKind, summarize, custom, leaf, contextLeaf, queued, providerCalls, toolEffects,
+                    inferenceCalls, recoveryDone, recoveryLeaf, seenLeaf, usageLeaf, committedError>>
+Next == AppendReply \/ RecoverQueued \/ DispatchQueued \/ Reserve \/ Before \/ StartSummary \/ FinishSummary \/ NoSummary \/ Cancel \/ Invalidate \/ Commit \/ After \/ Fail \/ Queue
 SingleCommit == writes <= 1 /\ before <= 1 /\ after <= writes
 CancellationBeforeMutation == cancelled \/ stale => writes = 0 /\ leaf = "old"
 QuiescentOwnership == summaryFlight => lease

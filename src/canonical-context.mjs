@@ -1078,6 +1078,19 @@ function createProjectedSource(manager, sdkSource, descriptors, stringCodeUnits,
   return source;
 }
 
+/** Refresh the dormant public transcript with the same canonical amendments
+ * used by navigation/compaction. Source-capable owners stay read-on-demand. */
+export function refreshCanonicalSessionContext(session, buildSessionProjection) {
+  const manager = session.sessionManager;
+  if (snapshotManagers.has(manager) && typeof session.agent.setMessageSource === "function") {
+    const { source } = projectCanonicalSource({ sessionManager: manager, mode: "native" });
+    session.agent.setMessageSource(source);
+  } else {
+    session.agent.state.messages = projectCanonicalContext({ entries: manager.getEntries(), leafId: manager.getLeafId(),
+      buildSessionProjection, mode: "native" }).messages;
+  }
+}
+
 /** Internal streaming reads share the same compact committed-source index.
  * Explicit history/tree APIs continue to return complete ordinary arrays. */
 export function sessionEntryHeaders(manager) {

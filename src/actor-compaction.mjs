@@ -1,7 +1,7 @@
 import { renderCompactionLocations } from "./input-location.mjs";
 import { randomUUID } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
-import { projectCanonicalBranch, projectCanonicalContext, snapshotCanonicalArchive } from "./canonical-context.mjs";
+import { refreshCanonicalSessionContext, projectCanonicalBranch, projectCanonicalContext, snapshotCanonicalArchive } from "./canonical-context.mjs";
 
 export class ActorCompactionError extends Error {
   constructor(code, message = code, options) {
@@ -230,8 +230,7 @@ export function createCompactionDriver({ sdk, core, runner, session, models, cap
         finalResult.details, fromExtension, finalResult.usage);
       committed = true;
       const compactionEntry = manager.getEntry(id);
-      session.agent.state.messages = projectCanonicalContext({ entries: manager.getEntries(), leafId: manager.getLeafId(),
-        buildSessionProjection: sdk.buildSessionProjection, mode: "native" }).messages;
+      refreshCanonicalSessionContext(session, sdk.buildSessionProjection);
       await publish({ type: "entry_appended", entry: compactionEntry });
       await runner.emit({ type: "session_compact", compactionEntry, fromExtension, reason, willRetry });
       await lifecycle.afterCommit?.();

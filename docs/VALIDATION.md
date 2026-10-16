@@ -28,12 +28,22 @@ For the complete source-mode path, also set `PI_HARNESS_TEST_SOURCE_SDK=1` and
 the artifact must export its matching `createAgentSession` and `ExtensionRunner`.
 Worker/native fixtures use those three corrected public owners while keeping the
 verified stock public providers/helpers. Installed files remain unchanged. With
-no override the fixtures exercise stock compatibility.
+no override the fixtures exercise the selected public package directly. A complete
+source-built package is recognized through its source-hook capabilities; it does
+not need the source-owner override. Select its adjacent public `dist/index.js`
+and `dist/cli.js`, and set the native root to the actual consumer prefix (including
+any containing `node_modules` wrapper). Set `PI_HARNESS_TEST_OFFICIAL_PI_MODULE`
+to a separate official 0.99.1 public entry when testing that package: the dedicated
+bundle test still accepts only official bundled bytes and rejects a custom bundle.
+Direct fixture writes must refresh a borrowed public session source before taking
+a no-effects snapshot, just as the coordinator refreshes after a canonical commit.
 
 `canonical-retention.test.mjs` checks source-generation invalidation, producing
 selection, append cursors, compact namespace/native facts, complete ordered range
 validation and explicit history. Canonical differential fixtures retain native,
-signature, alias, edit, getter/rejection and failure assertions. Actual source-mode
+signature, alias, edit, getter/rejection and failure assertions. Navigation,
+compaction and later commits share the canonical public-state refresh, preserving
+selected signature amendments without eager message hydration. Actual source-mode
 worker checks cover mutable public Agent arrays, source/legacy hooks, direct/full
 versus supervised/type-only end events, and SDK status plus automatic threshold
 checks without a veto after append/edit/reload. Tool fixtures cover unread source
