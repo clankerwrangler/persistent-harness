@@ -1543,6 +1543,7 @@ export class HarnessStore {
   }
 
   createMessage(senderId, params, { pendingLimit = 100, now = Date.now() } = {}) {
+    if (!["auto", "follow_up"].includes(params.deliveryMode ?? "auto")) throw new Error("invalid family delivery mode");
     if (params.messageId?.startsWith("child-exit:")) throw new Error("message ID is reserved for supervisor lifecycle receipts");
     this.#db.exec("BEGIN IMMEDIATE");
     try {
@@ -1552,8 +1553,9 @@ export class HarnessStore {
       const id = params.messageId ?? randomUUID();
       const existing = this.#db.prepare("SELECT * FROM messages WHERE id = ?").get(id);
       if (existing) {
+        // Legacy family mode is receipt metadata, not a different operation.
         if (existing.sender_id !== senderId || existing.target_id !== target.id
-          || existing.delivery_mode !== params.deliveryMode || existing.body !== params.body) {
+          || existing.body !== params.body) {
           throw new Error(`message ID already exists with different content: ${id}`);
         }
         this.#db.exec("COMMIT");
@@ -1564,7 +1566,7 @@ export class HarnessStore {
       if (pending >= pendingLimit) throw new Error(`target pending-message limit reached: ${pendingLimit}`);
       this.#db.prepare(`INSERT INTO messages (id, sender_id, target_id, relationship, delivery_mode, body,
         state, attempt_count, accepted_at) VALUES (?, ?, ?, ?, ?, ?, 'accepted', 0, ?)`)
-        .run(id, senderId, target.id, relationship, params.deliveryMode, params.body, now);
+        .run(id, senderId, target.id, relationship, "auto", params.body, now);
       const row = this.#db.prepare("SELECT * FROM messages WHERE id = ?").get(id);
       this.#db.exec("COMMIT");
       return mapMessage(row);

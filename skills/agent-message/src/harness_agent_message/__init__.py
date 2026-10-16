@@ -8,11 +8,10 @@ def list_agents() -> SkillResult:
     return SkillResult(host_request("agent_message.list_agents", {}))
 
 
-def send(target: str, body: str, delivery_mode: str = "auto") -> SkillResult:
+def send(target: str, body: str) -> SkillResult:
     result = host_request("agent_message.send", {
         "target": target,
         "body": body,
-        "deliveryMode": delivery_mode,
     })
     return SkillResult(result, {"application/vnd.persistent-harness.message+json": result})
 

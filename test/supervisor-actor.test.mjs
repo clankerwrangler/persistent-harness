@@ -1,3 +1,4 @@
+import { DatabaseSync } from "node:sqlite";
 
 import assert from "node:assert/strict";
 import { EventEmitter, once } from "node:events";
@@ -316,12 +317,17 @@ test("family messages reach a working actor while a skill refresh is pending", a
   targetActor.emit("event", { type: "agent_start" });
   await eventually(() => supervisor.store.getSession(targetAdmission.sessionId).activity === "working");
   await writeFile(skillPath, "---\nname: example\ndescription: Updated skill\n---\n\nUpdated guidance.\n");
-  const message = (await sender.request("send_message", { target: targetAdmission.sessionId, body: "pause now", deliveryMode: "auto" })).message;
+  const message = (await sender.request("send_message", { target: targetAdmission.sessionId, body: "pause now", deliveryMode: "follow_up" })).message;
+  assert.equal(message.deliveryMode, "auto", "legacy wire input uses the single family path");
+  const legacyDb = new DatabaseSync(path.join(root, "state", "harness.sqlite"));
+  legacyDb.prepare("UPDATE messages SET delivery_mode = 'follow_up' WHERE id = ?").run(message.messageId);
+  legacyDb.close();
   await sender.request("record_agent_message_entry", { messageId: message.messageId, entryId: "sender-entry",
     direction: "to", peerId: targetAdmission.sessionId, peerName: "target", relationship: "sibling", body: "pause now",
     createdAt: "2026-01-01T00:00:00.000Z" });
   const available = await eventually(() => targetEvents.find((frame) => frame.event === "message_available"), 1000);
   assert.equal(available.data.message.messageId, message.messageId);
+  assert.equal(available.data.message.deliveryMode, "follow_up", "persisted metadata is not rewritten");
   assert.equal(available.data.deliverAs, "steer");
   assert.equal(supervisor.store.getMessage(message.messageId).state, "delivered");
   assert.equal(actors.get(targetAdmission.sessionId), targetActor);

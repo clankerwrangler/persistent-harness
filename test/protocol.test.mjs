@@ -31,7 +31,12 @@ test("protocol separates one authenticated actor from detachable clients", () =>
 });
 
 test("protocol validates bounded agent and user inputs and exact fields", () => {
-  assert.equal(validateRequest(frame("send_message", { target: "b", body: "ok", deliveryMode: "auto" })).params.body, "ok");
+  for (const deliveryMode of [undefined, "auto", "follow_up"]) {
+    assert.deepEqual(validateRequest(frame("send_message", { target: "b", body: "ok", deliveryMode })).params,
+      { target: "b", body: "ok", deliveryMode: "auto" }, "legacy family modes normalize to the single path");
+  }
+  for (const deliveryMode of ["later", true, []]) assert.throws(() =>
+    validateRequest(frame("send_message", { target: "b", body: "ok", deliveryMode })), /deliveryMode/);
   assert.throws(() => validateRequest(frame("submit_input", { sessionId: "a", message: "x".repeat(32 * 1024 + 1), behavior: "auto" })), /at most/);
   assert.throws(() => validateRequest(frame("submit_input", { sessionId: "a", message: "" })), /empty only with images/);
   assert.throws(() => validateRequest(frame("submit_input", { sessionId: "a", message: "image", images: [{ type: "image", mimeType: "image/png", data: "AA==" }] })), /container/);

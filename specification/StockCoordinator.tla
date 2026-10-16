@@ -15,7 +15,8 @@ PromptInitial == [phase |-> "idle", run |-> 0, preparedRun |-> 0,
                   allowFollow |-> TRUE, needsInference |-> FALSE, requests |-> 0,
                   hooks |-> <<>>, injected |-> <<>>, sentRun |-> 0, sentPreparedRun |-> 0,
                   committed |-> <<>>, pendingId |-> 0, resume |-> "running", blocked |-> FALSE,
-                  failedRuns |-> {}, terminals |-> <<>>, requestsAtFailure |-> 0, followDue |-> {}]
+                  failedRuns |-> {}, terminals |-> <<>>, requestsAtFailure |-> 0, followDue |-> {},
+                  familyIds |-> {}, sentAccepted |-> 0]
 Init == /\ life = "running" /\ mode \in {"ordinary", "native"}
         /\ flight = FALSE /\ requests = 0 /\ states = [c \in Calls |-> "absent"]
         /\ results = [c \in Calls |-> "none"] /\ anchored = {} /\ effects = <<>>
@@ -96,7 +97,10 @@ PromptAccept(kind, delivery) ==
     /\ promptState' = [promptState EXCEPT
         !.accepted = @ + 1, !.blocked = FALSE,
         !.userIds = IF kind = "user" THEN @ \cup {promptState.accepted + 1} ELSE @,
-        !.queue = Append(@, [kind |-> kind, delivery |-> delivery, id |-> promptState.accepted + 1])]
+        !.familyIds = IF kind = "family" THEN @ \cup {promptState.accepted + 1} ELSE @,
+        !.queue = Append(@, [kind |-> kind,
+            delivery |-> IF kind = "family" THEN "auto" ELSE delivery,
+            id |-> promptState.accepted + 1])]
 PromptStart == /\ promptState.phase = "idle" /\ Len(promptState.queue) > 0 /\ promptState.run < 3
                /\ ~promptState.blocked
                /\ promptState' = [promptState EXCEPT !.phase = "running", !.run = @ + 1,
@@ -112,7 +116,7 @@ PromptDeliver ==
            !.committed = Append(@, item.id), !.pendingId = item.id,
            !.phase = IF item.kind = "user" THEN "preparing" ELSE @,
            !.resume = promptState.phase,
-           !.needsInference = IF item.kind = "custom" THEN TRUE ELSE @,
+           !.needsInference = IF item.kind # "user" THEN TRUE ELSE @,
            !.deliveredUsers = IF item.kind = "user" THEN @ \cup {item.id} ELSE @]
 PromptPrepared ==
     /\ promptState.phase = "preparing"
@@ -133,6 +137,7 @@ PromptPrepareRequest == /\ promptState.phase = "running" /\ ~PromptCanDeliver
 PromptInfer == /\ promptState.phase = "request" /\ ~PromptCanDeliver
                /\ promptState' = [promptState EXCEPT !.phase = "flight", !.requests = @ + 1,
                    !.sentRun = promptState.run, !.sentPreparedRun = promptState.preparedRun,
+                   !.sentAccepted = promptState.accepted,
                    !.needsInference = FALSE, !.allowFollow = FALSE]
 \* One injected local failure, before any transport for this preparation.
 PromptFail == /\ promptState.phase \in {"preparing", "request"}
@@ -155,7 +160,7 @@ PromptSettle == /\ ((promptState.phase = "running" /\ ~PromptCanDeliver /\ ~prom
                 /\ promptState' = [promptState EXCEPT !.phase = "idle"]
 PromptNext == /\ (PromptStart \/ PromptDeliver \/ PromptPrepared \/ PromptPrepareNeutral \/ PromptPrepareRequest
                  \/ PromptInfer \/ PromptFail \/ PromptTerminal \/ PromptSettle
-                 \/ (\E kind \in {"user", "custom"}, delivery \in {"auto", "follow"}: PromptAccept(kind, delivery))
+                 \/ (\E kind \in {"user", "custom", "family"}, delivery \in {"auto", "follow"}: PromptAccept(kind, delivery))
                  \/ (\E outcome \in {"tool", "stop"}: PromptResponse(outcome)))
               /\ UNCHANGED baseVars
 PromptTypeOK == /\ promptState.phase \in {"idle", "running", "preparing", "request", "flight", "failed", "stopped"}
@@ -166,6 +171,15 @@ PromptCurrentRun == promptState.phase = "flight" => promptState.sentPreparedRun 
 \* Auto input can bypass a deferred follow-up during tools, but cannot erase an
 \* eligible completed-answer boundary before the next provider snapshot.
 PromptFollowAtStop == promptState.phase = "flight" => promptState.followDue \subseteq {promptState.committed[i]: i \in 1..Len(promptState.committed)}
+\* Family input, including a legacy follow-up reservation, uses the existing
+\* auto checkpoint. Human/custom follow-ups retain their completed-answer fence.
+PromptFamilyAtCheckpoint == promptState.phase = "flight" =>
+    (promptState.familyIds \cap (1..promptState.sentAccepted))
+        \subseteq {promptState.committed[i]: i \in 1..Len(promptState.committed)}
+PromptFamilyOrder == \A i, j \in 1..Len(promptState.committed):
+    (i < j /\ promptState.committed[i] \in promptState.familyIds
+           /\ promptState.committed[j] \in promptState.familyIds)
+        => promptState.committed[i] < promptState.committed[j]
 PromptNoStaleOverride == promptState.preparedRun \in {0, promptState.run}
 PromptExactlyOnce == /\ promptState.injected = promptState.hooks
                      /\ Len(promptState.injected) = Cardinality({promptState.injected[i]: i \in 1..Len(promptState.injected)})
