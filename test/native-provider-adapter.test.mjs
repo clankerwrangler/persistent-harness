@@ -987,3 +987,71 @@ test("location renderer reaches native input on the same user item without mutat
   assert.match(users[0].content[1].text, /latitude 12\.345678.*longitude -76\.54321/);
   assert.deepEqual(original, before);
 });
+
+
+for (const fast of [false, true]) test(`ordinary STOCK SSE body-read failure is replay-safe, Fast=${fast}`, { timeout: 10000 }, async t => {
+  const selected = { ...model, provider: "openai-codex", id: "gpt-6.1-sol" };
+  const stock = await import(codexApiUrl.href), models = await runtime(t, selected, stock);
+  let outgoing, requests = 0, providerEvents = 0, payloads = 0;
+  const local = await server(t, (req, res) => {
+    requests++; outgoing = res; req.resume();
+    res.writeHead(200, { "content-type": "text/event-stream", "x-synthetic": "retained" });
+    res.write(encoded([created(), { type: "response.output_item.added", output_index: 0,
+      item: callItem({ arguments: "", async: undefined }) },
+      { type: "response.function_call_arguments.delta", output_index: 0, item_id: "fc_original", delta: '{"code":"print(' }]));
+  });
+  const events = [], source = streamSessionRequest(models, { ...selected, baseUrl: local.url }, context,
+    { transport: "sse", fetch: loopbackFetch, ...(fast ? { serviceTier: "priority" } : {}),
+      onPayload() { payloads++; }, onResponse(response) { assert.equal(response.status, 200); assert.equal(response.headers["x-synthetic"], "retained"); },
+      onProviderStreamEvent(event) { providerEvents++; if (event.type === "response.function_call_arguments.delta") setImmediate(() => outgoing.destroy()); } },
+    { api, simpleOptions });
+  const firstResult = fast ? await source.result() : null;
+  for await (const event of source) events.push(event);
+  const message = await source.result();
+  if (fast) assert.equal(firstResult, message);
+  assert.equal(message.stopReason, "error"); assert.equal(message.errorMessage, "terminated");
+  assert.equal(events.at(-1).error, message); assert.equal(requests, 1); assert.equal(payloads, 1); assert.equal(providerEvents, 3);
+  assert.deepEqual(message.diagnostics?.at(-1).details, { producer: "persistent-harness-sse-body-read-v1",
+    configuredTransport: "sse", transport: "sse", eventsEmitted: true, phase: "after_message_stream_start" });
+  const entries = [{ type: "message", id: "failure", parentId: null, timestamp: new Date(1).toISOString(), message }];
+  const before = structuredClone(entries);
+  for (const mode of ["ordinary", "native"]) {
+    const view = projectCanonicalContext({ entries, leafId: "failure", mode, buildSessionProjection });
+    assert.deepEqual(view.diagnostics.map(d => d.code), ["UNADMITTED_CALL_OMITTED"]);
+    assert.equal(view.messages[0].content.some(p => p.type === "toolCall"), false); assert.deepEqual(view.outstanding, []);
+  }
+  assert.deepEqual(entries, before);
+});
+
+
+for (const failure of ["eof", "json", "api", "hook", "abort", "internal-abort", "fetch", "http"]) test(`ordinary STOCK SSE does not invent body-read evidence for ${failure}`, async t => {
+  const selected = { ...model, provider: "openai-codex", id: "gpt-6.1-sol" };
+  const stock = await import(codexApiUrl.href), models = await runtime(t, selected, stock);
+  const controller = new AbortController();
+  const partial = [created(), { type: "response.output_item.added", output_index: 0, item: callItem({ arguments: "", async: undefined }) },
+    { type: "response.function_call_arguments.delta", output_index: 0, item_id: "fc_original", delta: '{"code":"print(' }];
+  let pulls = 0;
+  const result = await streamSessionRequest(models, selected, context, { transport: "sse", signal: controller.signal,
+    fetch: async () => {
+      if (failure === "fetch") throw new Error("terminated");
+      if (failure === "http") return new Response('{"error":{"message":"synthetic refusal"}}', { status: 400 });
+      return new Response(new ReadableStream({ pull(target) {
+        if (pulls++ === 0) target.enqueue(new TextEncoder().encode(encoded(partial)));
+        else if (failure === "internal-abort") target.error(new DOMException("synthetic cancellation", "AbortError"));
+        else if (failure === "json") { target.enqueue(new TextEncoder().encode('data: {broken\n\n')); target.close(); }
+        else if (failure === "api") { target.enqueue(new TextEncoder().encode(encoded([{ type: "response.failed", response: { id: "resp_original", error: { message: "terminated" } } }]))); target.close(); }
+        else target.close();
+      } }, { highWaterMark: 0 }), { headers: { "content-type": "text/event-stream" } });
+    }, onProviderStreamEvent(event) {
+      if (event.type !== "response.function_call_arguments.delta") return;
+      if (failure === "hook") throw new Error("terminated");
+      if (failure === "abort") controller.abort();
+    } }, { api, simpleOptions }).result();
+  assert.equal(result.stopReason, failure === "abort" ? "aborted" : "error");
+  assert.equal(result.diagnostics?.some(d => d.details?.producer === "persistent-harness-sse-body-read-v1") ?? false, false);
+  if (!["fetch", "http"].includes(failure)) {
+    const entries = [{ type: "message", id: "unproven", parentId: null, timestamp: new Date(1).toISOString(), message: result }];
+    const view = projectCanonicalContext({ entries, leafId: "unproven", mode: "ordinary", buildSessionProjection });
+    assert(view.diagnostics.some(d => d.code === "ORDINARY_ASSISTANT_NOT_REPLAYABLE"));
+  }
+});

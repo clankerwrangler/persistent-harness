@@ -6,17 +6,23 @@ EXTENDS Naturals, Sequences, FiniteSets, TLC
 \* history is not in ordinary. Contrary admission/result/alias evidence vetoes
 \* both paths. The selected canonical archive is never modified or executed.
 \* stock means the typed STOCK Codex after-start websocket failure witness:
-\* exact API/provider, eventsEmitted=true, transport auto/websocket. Missing or
-\* malformed evidence is ambiguous. Own native envelope/error/provider IDs or
+\* exact API/provider, eventsEmitted=true, transport auto/websocket. sseRead
+\* means the harness observed a successful SSE response body read reject after
+\* start, followed by an error terminal. Abort, cancel, EOF, parser/API/hook
+\* errors and missing/unknown producer discriminators are not witnesses.
+\* staleSseRead belongs to an earlier response, not the terminal response.
+\* Missing or malformed evidence is ambiguous. Own native envelope/error/provider IDs or
 \* native call provenance are native; neither category grants STOCK omission.
-CONSTANT Calls
+CONSTANT Calls, RequireWitness
 VARIABLES admitted, results, failed, incomplete, ordinary, witnessKind, conflicting, fenced,
           selected, kept, mode, phase, canonical, projected, skipped, blocking,
           outstanding, effects
 vars == <<admitted, results, failed, incomplete, ordinary, witnessKind, conflicting, fenced,
           selected, kept, mode, phase, canonical, projected, skipped, blocking,
           outstanding, effects>>
-StockEvidence == IF witnessKind = "stock" THEN ordinary ELSE {}
+ValidOrdinaryEvidence == IF witnessKind \in {"stock", "sseRead"} THEN ordinary ELSE {}
+StockEvidence == IF RequireWitness THEN ValidOrdinaryEvidence ELSE ordinary
+ValidEvidence == ValidOrdinaryEvidence \cup (IF fenced THEN incomplete ELSE {})
 Evidence == StockEvidence \cup (IF fenced THEN incomplete ELSE {})
 Unadmitted == (selected \cap failed \cap Evidence) \ (admitted \cup results \cup conflicting)
 Init == /\ admitted \in SUBSET Calls
@@ -24,7 +30,7 @@ Init == /\ admitted \in SUBSET Calls
         /\ failed \in SUBSET Calls
         /\ incomplete \in SUBSET Calls
         /\ ordinary \in SUBSET Calls
-        /\ witnessKind \in {"stock", "ambiguous", "native"}
+        /\ witnessKind \in {"stock", "sseRead", "staleSseRead", "ambiguous", "invalidProducer", "native"}
         /\ conflicting \in SUBSET Calls
         /\ fenced \in BOOLEAN
         /\ selected \in {Calls, {"prefix"}, {"suffix"}}
@@ -46,7 +52,7 @@ Next == Project \/ (phase = "projected" /\ UNCHANGED vars)
 Spec == Init /\ [][Next]_vars
 CanonicalPreserved == canonical = <<selected, admitted, results, failed, incomplete, ordinary, witnessKind, conflicting>>
 NoExecution == effects = {}
-PositiveEvidenceOnly == skipped \subseteq failed \cap Evidence
+PositiveEvidenceOnly == skipped \subseteq failed \cap ValidEvidence
 AdmissionPreserved == phase = "projected" =>
   selected \cap kept \cap (admitted \cup results \cup conflicting) \subseteq projected
 NoInvention == projected \subseteq selected \cap kept

@@ -1162,12 +1162,14 @@ test("ordinary failure discriminator does not reinterpret ambiguous, native, or 
   }
 });
 
-test("ordinary omission is branch scoped and vetoed by results, call aliases, and any native transport observation", () => {
+for (const witness of ["websocket", "sse"]) test(`ordinary omission is branch scoped and vetoed by results, call aliases, and any native transport observation: ${witness}`, () => {
   for (const conflict of [result("call_ordinary|fc_ordinary"), result("call_ordinary"), result("fc_ordinary"),
     assistant("collision", [{ type: "toolCall", id: "call_ordinary|other", name: "python", arguments: {} }]),
     { ...assistant("peer", []), stopReason: "error", nativeTransport: {
       observedCalls: [{ callId: "call_ordinary", itemId: "fc_ordinary", complete: false, native: false }] } }]) {
     const entries = ordinaryFailedSuffix(), peer = messageEntry("peer", "e2", conflict);
+    if (witness === "sse") Object.assign(entries[1].message.diagnostics[0].details,
+      { producer: "persistent-harness-sse-body-read-v1", transport: "sse" });
     const view = project([...entries, peer], "ordinary");
     assert(view.messages[1].content.some(p => p.type === "toolCall"));
     assert(view.diagnostics.some(d => d.code === "ORDINARY_ASSISTANT_NOT_REPLAYABLE"));
@@ -1178,5 +1180,39 @@ test("ordinary omission is branch scoped and vetoed by results, call aliases, an
       summary: "fixture", tokensBefore: 10, firstKeptEntryId: "e1" };
     if (conflict.toolCallId === "call_ordinary|fc_ordinary") rejects([...reordered, compact], "ERR_CONTEXT_RESULT_BEFORE_CALL", "ordinary");
     else assert(project([...reordered, compact], "ordinary").diagnostics.some(d => d.code === "ORDINARY_ASSISTANT_NOT_REPLAYABLE"));
+  }
+});
+
+
+test("SSE read witness rejects missing, invalid or unknown producer fields without legacy fallback", () => {
+  const base = () => {
+    const entries = ordinaryFailedSuffix();
+    Object.assign(entries[1].message.diagnostics[0].details, { producer: "persistent-harness-sse-body-read-v1", transport: "sse" });
+    return entries;
+  };
+  for (const configuredTransport of ["auto", "sse", "websocket"]) {
+    const entries = base(); entries[1].message.diagnostics[0].details.configuredTransport = configuredTransport;
+    assert.deepEqual(project(entries, "ordinary").diagnostics.map(d => d.code), ["UNADMITTED_CALL_OMITTED"]);
+  }
+  for (const mutate of [
+    m => { delete m.diagnostics[0].details.producer; },
+    m => { m.diagnostics[0].details.producer = undefined; },
+    m => { m.diagnostics[0].details.producer = null; },
+    m => { m.diagnostics[0].details.producer = "unknown"; },
+    m => { delete m.diagnostics[0].details.transport; },
+    m => { m.diagnostics[0].details.transport = "websocket"; },
+    m => { m.diagnostics[0].details.configuredTransport = "unknown"; },
+    m => { m.diagnostics[0].details.eventsEmitted = false; },
+    m => { m.diagnostics[0].details.phase = "before_message_stream_start"; },
+    m => { m.stopReason = "aborted"; },
+    m => { delete m.diagnostics; },
+    m => { m.nativeTransport = null; }, m => { m.nativeProviderError = null; },
+    m => { m.content[2].async = true; }, m => { m.content[2].nativeProvenance = {}; },
+    m => { m.content[2].providerCallId = "call_ordinary"; }, m => { m.content[2].providerItemId = "fc_ordinary"; },
+  ]) {
+    const entries = base(); mutate(entries[1].message); const before = structuredClone(entries);
+    const view = project(entries, "ordinary");
+    assert(view.diagnostics.some(d => d.code === "ORDINARY_ASSISTANT_NOT_REPLAYABLE"));
+    assert.equal(view.diagnostics.some(d => d.code === "UNADMITTED_CALL_OMITTED"), false); assert.deepEqual(entries, before);
   }
 });

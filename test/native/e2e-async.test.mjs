@@ -65,7 +65,7 @@ function respond(response, id, { calls = [], answer = id, usage = { input_tokens
   response.end(events.map((event) => `data: ${JSON.stringify(event)}\n\n`).join(""));
 }
 
-async function fixture(t, script, { customCompaction = false, nativeAsync = true, modelId = "gpt-6-astra", clmExtension = undefined } = {}) {
+async function fixture(t, script, { customCompaction = false, nativeAsync = true, modelId = "gpt-6-astra", clmExtension = undefined, retry = undefined } = {}) {
   const buildRoot = process.env.PI_HARNESS_NATIVE_ASYNC_BUILD_ROOT;
   const artifacts = process.env.PI_HARNESS_NATIVE_TEST_ARTIFACTS;
   assert(buildRoot, "Set PI_HARNESS_NATIVE_ASYNC_BUILD_ROOT to the explicit immutable stock install root");
@@ -82,7 +82,7 @@ async function fixture(t, script, { customCompaction = false, nativeAsync = true
   const root = await mkdtemp(path.join(os.tmpdir(), "harness-native-async-"));
   const cwd = path.join(root, "project"); const agentDir = path.join(root, "agent");
   await Promise.all([mkdir(cwd), mkdir(agentDir), mkdir(path.join(root, "home"))]);
-  await writeFile(path.join(agentDir, "settings.json"), JSON.stringify({ transport: "sse" }));
+  await writeFile(path.join(agentDir, "settings.json"), JSON.stringify({ transport: "sse", ...(retry ? { retry } : {}) }));
   const customCompactionFile = path.join(root, "custom-compaction.jsonl");
   const customExtensionPath = path.join(root, "custom-compaction.ts");
   await writeFile(customCompactionFile, "");
@@ -1033,4 +1033,59 @@ print("DIRECT_EDIT_COMPLETE")` }] };
   await submitAndSettle(f, "Reopen with the accepted direct context");
   assert.match(text(f.requests[beforeReopen]), /FINAL_DIRECT_SUMMARY/);
   assert.doesNotMatch(text(f.requests[beforeReopen]), /OLD_DIRECT_CONTEXT/);
+});
+
+
+for (const fast of [false, true]) test(`ordinary STOCK SSE failure survives durable cold resume without tool replay, Fast=${fast}`, { timeout: 120_000 }, async t => {
+  let f;
+  const code = "from pathlib import Path; Path('must-not-run').write_text('effect')";
+  f = await fixture(t, (_body, index) => index === 1 ? { writeResponse: async response => {
+    const events = [
+      { type: "response.created", response: { id: "ordinary_failed", status: "in_progress" } },
+      { type: "response.output_item.added", output_index: 0,
+        item: { type: "function_call", id: "fc_ordinary_failed", call_id: "ordinary_failed_call", name: "ipython", arguments: "" } },
+      { type: "response.function_call_arguments.delta", output_index: 0, item_id: "fc_ordinary_failed", delta: JSON.stringify({ code }).slice(0, -2) },
+      { type: "response.output_item.added", output_index: 1,
+        item: { type: "message", id: "msg_partial_seen", role: "assistant", content: [] } },
+      { type: "response.content_part.added", output_index: 1, content_index: 0,
+        part: { type: "output_text", text: "", annotations: [] } },
+      { type: "response.output_text.delta", output_index: 1, content_index: 0, delta: "PARTIAL_CALL_OBSERVED" },
+    ];
+    response.writeHead(200, { "content-type": "text/event-stream" });
+    response.write(events.map(event => `data: ${JSON.stringify(event)}
+
+`).join(""));
+    await f.log.wait(event => event.type === "message_update" && event.assistantMessageEvent?.delta === "PARTIAL_CALL_OBSERVED", "actual worker consumed partial call before disconnect");
+    response.destroy();
+  } } : { answer: "COLD_RESUMED_WITHOUT_TOOL_REPLAY" }, { nativeAsync: false, modelId: "gpt-6.1-sol", retry: { enabled: false } });
+  if (fast) {
+    const inference = await f.client.request("get_session_inference", { sessionId: f.sessionId });
+    await f.client.request("set_session_fast_mode", { sessionId: f.sessionId, fastMode: true, expected: inference.selection });
+  }
+  await submitAndSettle(f, "FIRST_ORDINARY_SSE_FAILURE");
+  assert.equal(f.requests.length, 1); assert.equal(f.requests[0].service_tier, fast ? "priority" : undefined);
+  const sessionFile = f.supervisor.store.getSession(f.sessionId).sessionFile;
+  const before = await readFile(sessionFile, "utf8"), entries = before.trim().split("\n").map(line => JSON.parse(line));
+  const failed = entries.find(entry => entry.message?.errorMessage === "terminated"); assert(failed);
+  const calls = failed.message.content.filter(part => part.type === "toolCall"); assert.equal(calls.length, 1);
+  assert.equal(calls[0].id, "ordinary_failed_call|fc_ordinary_failed"); assert.equal(calls[0].arguments.code, code);
+  assert.equal(failed.message.diagnostics.at(-1).details.producer, "persistent-harness-sse-body-read-v1");
+  assert.equal(resultsIn(entries).length, 0); assert.equal(f.log.events.filter(event => event.type === "tool_execution_start").length, 0);
+  await assert.rejects(access(path.join(f.cwd, "must-not-run")), /ENOENT/);
+  const generation = f.supervisor.store.getSession(f.sessionId).actorGeneration;
+  await f.client.request("stop_session", { sessionId: f.sessionId });
+  assert.equal(f.supervisor.store.getSession(f.sessionId).actorPid, null);
+  await f.client.request("subscribe_session", { selector: f.sessionId });
+  assert(f.supervisor.store.getSession(f.sessionId).actorGeneration > generation);
+  await submitAndSettle(f, "NEXT_INPUT_AFTER_COLD_RESUME");
+  assert.equal(f.requests.length, 2); assert.equal(f.requests[1].service_tier, fast ? "priority" : undefined);
+  assert.match(text(f.requests[1].input), /FIRST_ORDINARY_SSE_FAILURE/); assert.match(text(f.requests[1].input), /NEXT_INPUT_AFTER_COLD_RESUME/);
+  assert.equal(f.requests[1].input.some(item => item.type === "function_call"), false); assert.deepEqual(toolOutputs(f.requests[1]), []);
+  const after = await readFile(sessionFile, "utf8"); assert(after.startsWith(before));
+  const reopened = after.trim().split("\n").map(line => JSON.parse(line));
+  assert.deepEqual(reopened.find(entry => entry.id === failed.id), failed);
+  assert.equal(reopened.filter(entry => entry.id === failed.id).length, 1); assert.equal(resultsIn(reopened).length, 0);
+  assert(reopened.some(entry => text(entry.message?.content).includes("COLD_RESUMED_WITHOUT_TOOL_REPLAY")));
+  assert.equal(f.log.events.filter(event => event.type === "tool_execution_start").length, 0);
+  await assert.rejects(access(path.join(f.cwd, "must-not-run")), /ENOENT/);
 });

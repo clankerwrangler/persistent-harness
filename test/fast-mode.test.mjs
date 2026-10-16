@@ -6,7 +6,7 @@ import { DatabaseSync } from "node:sqlite";
 import { execFileSync } from "node:child_process";
 import os from "node:os";
 import { HarnessStore } from "../src/store.mjs";
-import { supportsFastMode, fastModeOptions } from "../src/fast-mode.mjs";
+import { supportsFastMode, fastModeOptions, streamSessionRequest } from "../src/fast-mode.mjs";
 import { projectAvailableModels } from "../src/inference-options.mjs";
 
 test("Fast gate uses exact canonical provider/API/model identities, not names or sampling aliases", () => {
@@ -229,4 +229,63 @@ test("cycle-member session projection terminates and preserves acyclic/deleted d
     env: { ...process.env, HOME: dir, PI_CODING_AGENT_DIR: path.join(dir, "agent") },
   });
   assert.equal(output.trim(), "bounded descendant projections passed");
+});
+
+
+test("ordinary SSE observation preserves custom fetch, Response metadata, lazy pulls and cancellation", async () => {
+  let forwarded, fetchCalls = 0, pulls = 0, canceled, hookArguments;
+  const terminal = { role: "assistant", content: [], stopReason: "stop" };
+  const source = { result: async () => terminal, async *[Symbol.asyncIterator]() { yield { type: "done", message: terminal }; } };
+  const customFetch = async (...args) => {
+    fetchCalls++; assert.deepEqual(args, ["synthetic-url", { method: "POST" }]);
+    let sent = false;
+    const response = new Response(new ReadableStream({
+      pull(controller) { pulls++; if (sent) controller.close(); else { sent = true; controller.enqueue(new TextEncoder().encode("synthetic")); } },
+      cancel(reason) { canceled = reason; },
+    }, { highWaterMark: 0 }), { status: 201, statusText: "Synthetic", headers: { "content-type": "text/event-stream; charset=utf-8", "x-test": "retained" } });
+    for (const [key, value] of Object.entries({ url: "https://example.invalid/final", type: "cors", redirected: true })) Object.defineProperty(response, key, { value });
+    return response;
+  };
+  const wrapped = streamSessionRequest({ streamSimple(_model, _context, options) { forwarded = options; return source; } },
+    { provider: "openai-codex", api: "openai-codex-responses" }, {},
+    { fetch: customFetch, onProviderStreamEvent(...args) { hookArguments = args; } }, {});
+  assert.equal(pulls, 0); const response = await forwarded.fetch("synthetic-url", { method: "POST" });
+  assert.equal(pulls, 0); assert.equal(response.bodyUsed, false);
+  assert.equal(response.status, 201); assert.equal(response.statusText, "Synthetic"); assert.equal(response.headers.get("x-test"), "retained");
+  assert.equal(response.url, "https://example.invalid/final"); assert.equal(response.type, "cors"); assert.equal(response.redirected, true);
+  const reader = response.body.getReader(); assert.equal(new TextDecoder().decode((await reader.read()).value), "synthetic");
+  await new Promise(resolve => setImmediate(resolve)); assert.equal(pulls, 1, "observer must not read ahead"); assert.equal(response.bodyUsed, true);
+  const reason = { synthetic: "cancel" }; await reader.cancel(reason); reader.releaseLock(); assert.equal(canceled, reason);
+  const untouched = await forwarded.fetch("synthetic-url", { method: "POST" });
+  const clone = untouched.clone(); assert.equal(clone.url, untouched.url); assert.equal(clone.type, untouched.type); assert.equal(clone.redirected, untouched.redirected);
+  assert.equal(await clone.text(), "synthetic"); assert.equal(await untouched.text(), "synthetic");
+  await forwarded.onProviderStreamEvent("event", "model"); assert.deepEqual(hookArguments, ["event", "model"]);
+  assert.equal(fetchCalls, 2); assert.equal(await wrapped.result(), terminal);
+  assert.deepEqual(await Array.fromAsync(wrapped), [{ type: "done", message: terminal }]);
+  assert.equal(terminal.diagnostics, undefined);
+});
+
+
+for (const structuredAbort of [false, true]) test(`ordinary SSE excludes response-local cancellation without the request signal: structured=${structuredAbort}`, async () => {
+  const optionsAbort = new AbortController(), fetchAbort = new AbortController();
+  const reason = structuredAbort ? Object.assign(new Error("synthetic cancellation"), { name: "AbortError" }) : { synthetic: "custom abort reason" };
+  let forwarded, resolveTerminal;
+  const terminalPromise = new Promise(resolve => { resolveTerminal = resolve; });
+  const source = { result: () => terminalPromise, async *[Symbol.asyncIterator]() {} };
+  const wrapped = streamSessionRequest({ streamSimple(_model, _context, options) { forwarded = options; return source; } },
+    { provider: "openai-codex", api: "openai-codex-responses" }, {}, {
+      signal: optionsAbort.signal, fetch: async () => new Response(new ReadableStream({ pull(controller) {
+        if (!structuredAbort) fetchAbort.abort(reason);
+        controller.error(reason);
+      } }, { highWaterMark: 0 }), { headers: { "content-type": "text/event-stream" } }),
+    }, {});
+  const response = await forwarded.fetch("synthetic", { signal: fetchAbort.signal });
+  await forwarded.onProviderStreamEvent({ type: "response.created" });
+  await assert.rejects(response.text(), error => error === reason);
+  assert.equal(optionsAbort.signal.aborted, false);
+  assert.equal(fetchAbort.signal.aborted, !structuredAbort);
+  const terminal = { role: "assistant", content: [], stopReason: "error", errorMessage: "unchanged original failure" };
+  resolveTerminal(terminal);
+  assert.equal(await wrapped.result(), terminal); assert.equal(terminal.errorMessage, "unchanged original failure");
+  assert.equal(terminal.diagnostics, undefined);
 });
