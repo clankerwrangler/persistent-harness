@@ -9,6 +9,6 @@ process.env.PI_CODING_AGENT = "true";
 enableActorCompileCache();
 try {
   const { runSDKWorkerRpc } = await import("../src/sdk-worker.mjs");
-  await runSDKWorkerRpc();
+  await runSDKWorkerRpc({ eventMode: process.env.PI_HARNESS_WORKER_EVENTS ?? "full" });
 }
 catch (error) { console.error(`Actor worker failed: ${error.message}`); process.exitCode = 1; }

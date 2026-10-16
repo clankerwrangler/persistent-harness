@@ -821,7 +821,7 @@ export class HarnessSupervisor {
     }
     if (type === "spawn_child") return this.#spawnChild(state.sessionId, params);
     if (type === "list_children") return { children: this.store.listChildren(state.sessionId) };
-    if (type === "stop_child") { const child = this.store.resolveDirectChild(state.sessionId, params.selector); return this.#withSessionMutation(child.sessionId, async () => { await this.#stopActor(child.sessionId, "stopped"); return { child: this.store.getSession(child.sessionId) }; }); }
+    if (type === "stop_child") { const child = this.store.resolveDirectChild(state.sessionId, params.selector); return this.#withSessionMutation(child.sessionId, async () => { await this.#stopActorAndDrainInputs(child.sessionId); return { child: this.store.getSession(child.sessionId) }; }); }
     if (type === "revive_child") { const child = this.store.resolveDirectChild(state.sessionId, params.selector); return this.#withSessionMutation(child.sessionId, async () => { this.#requestActorStart(child.sessionId, true); return { child: this.store.getSession(child.sessionId) }; }); }
     if (type === "delete_child") { const child = this.store.resolveDirectChild(state.sessionId, params.selector); const result = await this.#deleteSessionTree(child.sessionId); return { child: result.session, deletedSessionIds: result.deletedSessionIds }; }
     if (type === "get_status") return this.status();
@@ -962,8 +962,7 @@ export class HarnessSupervisor {
     });
     if (type === "abort_session") return this.#withSessionMutation(params.sessionId, async () => { const actor = await this.#ensureActorReady(params.sessionId); await actor.worker.request("abort"); return { aborted: true }; });
     if (type === "stop_session") return this.#withSessionMutation(params.sessionId, async () => {
-      const wake = this.#actorInputWakes.get(params.sessionId); if (wake) wake.cancelled = true;
-      await this.#stopActor(params.sessionId, "stopped"); await wake?.done;
+      await this.#stopActorAndDrainInputs(params.sessionId);
       return { session: this.store.getSession(params.sessionId) };
     });
     if (type === "revive_session") return this.#withSessionMutation(params.sessionId, async () => { this.#requestActorStart(params.sessionId, true); return { session: this.store.getSession(params.sessionId) }; });
@@ -1772,7 +1771,7 @@ export class HarnessSupervisor {
     args.push("--session", session.sessionFile); return args;
   }
   #actorEnv(session, compileCache) {
-    const env = { ...process.env, PI_HARNESS_SOCKET: this.socketPath, PI_HARNESS_AUTO_START: "0", PI_HARNESS_ACTOR_ID: session.sessionId, PI_HARNESS_ACTOR_TOKEN: session.actorToken, PI_HARNESS_ACTOR_GENERATION: String(session.actorGeneration) };
+    const env = { ...process.env, PI_HARNESS_WORKER_EVENTS: "supervised-source", PI_HARNESS_SOCKET: this.socketPath, PI_HARNESS_AUTO_START: "0", PI_HARNESS_ACTOR_ID: session.sessionId, PI_HARNESS_ACTOR_TOKEN: session.actorToken, PI_HARNESS_ACTOR_GENERATION: String(session.actorGeneration) };
     delete env.PI_SESSION_ID; delete env.PI_SESSION_FILE;
     delete env.PI_HARNESS_ACTOR_COMPILE_CACHE;
     if (compileCache) env.PI_HARNESS_ACTOR_COMPILE_CACHE = compileCache.directory;
@@ -1884,17 +1883,32 @@ export class HarnessSupervisor {
     }
   }
 
-  #queueActorInputWake(sessionId) {
+  #queueActorInputWake(sessionId, automaticRecord = null) {
     // Persist startup intent before acknowledging; startup and skill reconciliation
     // remain owned by the existing actor scheduler, not the HTTP/RPC connection.
     this.#requestActorStart(sessionId, true);
     for (const input of this.store.setActorInputWakeError(sessionId)) this.#publishInputState(sessionId, pendingInputMessage(input));
     const current = this.#actorInputWakes.get(sessionId);
-    if (current) { current.requested = true; return; }
-    const wake = { requested: true, cancelled: false, done: null };
+    if (current) {
+      current.requested = true;
+      if (!automaticRecord) current.automaticRecord = null;
+      return;
+    }
+    const wake = { requested: true, cancelled: false, automaticRecord, done: null };
     this.#actorInputWakes.set(sessionId, wake);
     wake.done = Promise.resolve().then(async () => {
-      const check = () => { if (wake.cancelled) throw requestFailure("unavailable", "input wake was stopped"); };
+      const check = () => {
+        if (wake.automaticRecord && this.#actors.get(sessionId) !== wake.automaticRecord
+          && !wake.automaticRecord.expectedLifecycle) {
+          // Settled readiness belongs to its resident actor, not a later revival.
+          // Recheck before startup after skill reconciliation; a fresh durable
+          // input/task (or a coalesced explicit wake) supplies its own authority.
+          if (this.store.listPendingActorInputs(sessionId).length || this.store.nextQueuedChildTask(sessionId)
+            || this.store.submittedChildTask(sessionId)) wake.automaticRecord = null;
+          else wake.cancelled = true;
+        }
+        if (wake.cancelled) throw requestFailure("unavailable", "input wake was stopped");
+      };
       try { do {
         wake.requested = false;
         try {
@@ -2096,7 +2110,7 @@ export class HarnessSupervisor {
           void this.#withSessionMutation(sessionId, () => {
             if (this.#actors.get(sessionId) !== record || record.expectedLifecycle || this.#stoppingPromise
               || this.store.isSessionDeleting(sessionId) || this.store.getSession(sessionId)?.actorGeneration !== record.generation) return;
-            this.#queueActorInputWake(sessionId);
+            this.#queueActorInputWake(sessionId, record);
           }).catch(error => this.logger.error?.(`actor ${sessionId} settled wake failed: ${error.message}`));
           setImmediate(() => this.#retryQueuedMessages(sessionId));
         }
@@ -2120,6 +2134,12 @@ export class HarnessSupervisor {
     if (error || lifecycle === "stopped") this.#failCronRunsForSession(sessionId, error ?? "session was explicitly stopped during scheduled execution");
     if (lifecycle === "error") this.#retryChildExitMessages();
     void this.#log("actor_stopped", { sessionId, generation: record.generation, lifecycle, ...(error ? { error } : {}) }); this.#broadcastNavigator(lifecycle === "error" ? "actor_error" : "actor_passivated"); setImmediate(() => this.#drainActorStarts());
+  }
+  async #stopActorAndDrainInputs(sessionId) {
+    const wake = this.#actorInputWakes.get(sessionId);
+    if (wake) wake.cancelled = true;
+    await this.#stopActor(sessionId, "stopped");
+    await wake?.done;
   }
   async #stopActor(sessionId, lifecycle = "passivated", error = null) {
     this.#clearPassivation(sessionId); this.#startQueue = this.#startQueue.filter((id) => id !== sessionId); const record = this.#actors.get(sessionId);

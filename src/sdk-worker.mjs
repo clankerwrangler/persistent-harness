@@ -11,6 +11,7 @@ import { createAutomaticCompactionPermission } from "./automatic-compaction-perm
 import { createAgentStartPromptCapture } from "./actor-prompt.mjs";
 import { loadExternalPi } from "./external-pi.mjs";
 import { PiRpcLineDecoder } from "./session-actor.mjs";
+import { CanonicalContextError, registerCanonicalSessionManager, sessionContextInput, sessionEntryHeaders } from "./canonical-context.mjs";
 
 const PACKAGE_ROOT = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 export const MAX_WORKER_FRAME_BYTES = 256 * 1024 * 1024;
@@ -181,8 +182,7 @@ export class SDKWorker {
   }
   getMessages() {
     const manager = this.session.sessionManager;
-    return this.projectContext({ entries: manager.getEntries(), leafId: manager.getLeafId(),
-      buildSessionProjection: this.sdk.buildSessionProjection, mode: "ordinary" }).messages;
+    return this.projectContext(sessionContextInput(manager, this.sdk.buildSessionProjection, "ordinary")).messages;
   }
   async mutate(operation) {
     if (this.coordinator.isBusy || !this.session.isIdle) throw new Error("Actor must be idle for this operation");
@@ -241,11 +241,25 @@ export class SDKWorker {
         return coordinator.clearQueue();
       case "get_messages": return { messages: this.getMessages() };
       case "get_entries": {
-        const entries = manager.getEntries();
-        if (command.since == null) return { entries, leafId: manager.getLeafId() };
-        const index = entries.findIndex((entry) => entry.id === string(command.since, "since"));
+        if (command.since == null) return { entries: manager.getEntries(), leafId: manager.getLeafId() };
+        let index, count;
+        try {
+          const headers = sessionEntryHeaders(manager); count = headers.length;
+          index = headers.findIndex(entry => entry.id === string(command.since, "since"));
+        }
+        catch (error) {
+          if (!(error instanceof CanonicalContextError) || typeof manager.getEntriesRange !== "function") throw error;
+          // Raw history remains readable when inference rejects a malformed archive.
+          // Preserve the original first cursor match without loading the whole prefix.
+          index = -1; count = manager.getEntryCount();
+          for (let i = 0; i < count; i++) if (manager.getEntriesRange(i, 1)[0]?.id === string(command.since, "since")) {
+            index = i; break;
+          }
+        }
         if (index < 0) throw new Error("Unknown session entry cursor");
-        return { entries: entries.slice(index + 1), leafId: manager.getLeafId() };
+        const entries = typeof manager.getEntriesRange === "function"
+          ? manager.getEntriesRange(index + 1, count - index - 1) : manager.getEntries().slice(index + 1);
+        return { entries, leafId: manager.getLeafId() };
       }
       case "get_tree": return { tree: manager.getTree(), leafId: manager.getLeafId() };
       case "get_session_stats": return { ...session.getSessionStats(), contextUsage: runner.createContext().getContextUsage() };
@@ -339,7 +353,8 @@ function resourceCommand(item, source) {
 /** One literal SessionManager; active runner and dormant services have distinct runtimes. */
 export async function bootstrapSDKWorker({ argv = [], cwd = process.cwd(), env = process.env,
   publish, broker = new RpcDialogBroker(publish), external, Coordinator, extensionFactory, createNativeAdapter, projectContext, planRecovery,
-  lifecycle = {}, onTiming, createCompactionDriver, createNavigationDriver } = {}) {
+  eventMode = "full", lifecycle = {}, onTiming, createCompactionDriver, createNavigationDriver } = {}) {
+  choice(eventMode, ["full", "supervised-source"], "worker event mode");
   external ??= await loadExternalPi({ env, cwd });
   const { sdk, api, core, responsesApi, simpleOptions } = external;
   Coordinator ??= (await import("./actor-coordinator.mjs")).ActorCoordinator;
@@ -394,9 +409,13 @@ export async function bootstrapSDKWorker({ argv = [], cwd = process.cwd(), env =
   const models = await sdk.ModelRuntime.create({ authPath: path.join(agentDir, "auth.json"), modelsPath: path.join(agentDir, "models.json"),
     modelsStorePath: path.join(agentDir, "models-store.json"), allowModelNetwork: false, signal: AbortSignal.timeout(15000) });
   const sessionDir = options.sessionDir ?? env.PI_CODING_AGENT_SESSION_DIR ?? settings.getSessionDir();
+  const bounded = typeof sdk.SessionManager.prototype?.enableBoundedEntryRetention === "function" && !options.noSession;
+  const retention = bounded ? { entryRetention: { maxCachedBytes: 1024 * 1024 } } : undefined;
+  const contextMode = bounded && typeof sdk.ExtensionRunner.prototype.emitContextSource === "function" ? "source" : "array";
   const manager = options.noSession ? sdk.SessionManager.inMemory(cwd)
-    : options.session ? sdk.SessionManager.open(path.resolve(cwd, options.session), sessionDir, cwd)
-    : options.continue ? sdk.SessionManager.continueRecent(cwd, sessionDir) : sdk.SessionManager.create(cwd, sessionDir);
+    : options.session ? sdk.SessionManager.open(path.resolve(cwd, options.session), sessionDir, cwd, retention)
+    : options.continue ? sdk.SessionManager.continueRecent(cwd, sessionDir, retention) : sdk.SessionManager.create(cwd, sessionDir, retention);
+  if (bounded) registerCanonicalSessionManager(manager, { estimateContextTokens: core.estimateContextTokens });
   const runner = new sdk.ExtensionRunner(active.extensions, active.runtime, cwd, manager, new sdk.ModelRegistry(models));
   const startupErrors = [];
   let ready = false, worker, session;
@@ -417,7 +436,7 @@ export async function bootstrapSDKWorker({ argv = [], cwd = process.cwd(), env =
     const capture = (await import("./actor-compaction.mjs")).createCompactionPreparationCapture();
     const dormant = await dormantResources(sdk, resources, { cwd, agentDir, settings, capture });
     const result = await sdk.createAgentSession({ cwd, agentDir, modelRuntime: models, settingsManager: settings,
-      sessionManager: manager, resourceLoader: dormant,
+      sessionManager: manager, resourceLoader: dormant, contextMode,
       model: resolved.model, thinkingLevel: options.thinking ?? resolved.thinkingLevel,
       scopedModels: scope.scopedModels, tools: options.tools, excludeTools: options.excludeTools,
       customTools: runner.getAllRegisteredTools().map(({ definition }) => definition),
@@ -438,7 +457,7 @@ export async function bootstrapSDKWorker({ argv = [], cwd = process.cwd(), env =
     const nativeAdapter = createNativeAdapter({ api, responsesApi, modelRuntime: models, transportOptions: { WebSocket } });
     const compactionDriver = createCompactionDriver({ sdk, core, runner, session, models, capture, lifecycle, publish: emit });
     const navigationDriver = createNavigationDriver({ sdk, core, runner, session, models, lifecycle, publish: emit });
-    const coordinator = new Coordinator({ session, sdk, api, core, models, simpleOptions, nativeAdapter, projectContext, planRecovery, lifecycle, compactionDriver, navigationDriver,
+    const coordinator = new Coordinator({ session, sdk, api, core, models, simpleOptions, nativeAdapter, projectContext, planRecovery, contextMode, eventMode, lifecycle, compactionDriver, navigationDriver,
       runner, resources, promptCapture, publish: emit, basePromptOptions, onTiming,
       automaticCompactionAllowed: createAutomaticCompactionPermission(eventBus),
       isProjectTrusted: () => settings.isProjectTrusted() });
@@ -463,7 +482,7 @@ export async function bootstrapSDKWorker({ argv = [], cwd = process.cwd(), env =
 
 /** A bounded JSONL transport. UI replies bypass pending commands, including startup dialogs. */
 export async function runSDKWorkerRpc({ input = process.stdin, output = process.stdout, argv = process.argv.slice(2),
-  cwd = process.cwd(), env = process.env, bootstrap = bootstrapSDKWorker, installSignalHandlers = true } = {}) {
+  cwd = process.cwd(), env = process.env, eventMode = "full", bootstrap = bootstrapSDKWorker, installSignalHandlers = true } = {}) {
   const decoder = new PiRpcLineDecoder();
   const pending = new Set();
   const activeIds = new Set();
@@ -539,7 +558,7 @@ export async function runSDKWorkerRpc({ input = process.stdin, output = process.
   }
   input.on("data", receive); input.on("end", onEnd); input.on("error", onError); output.on("error", onError);
   for (const signal of signals) process.on(signal, onSignal);
-  boot = bootstrap({ argv, cwd, env, publish, broker, lifecycle });
+  boot = bootstrap({ argv, cwd, env, eventMode, publish, broker, lifecycle });
   try { worker = await boot; void drainShutdown(); }
   catch (error) { await close(error); }
   await done;

@@ -56,6 +56,59 @@ The bus belongs to the active loader, not the dormant preparation runtime. SDK r
 
 Harness bookkeeping appends await the coordinator's active compaction barrier. Incoming family history, usage receipts, progress, and child-creation records therefore cannot invalidate an in-flight summary. The barrier releases on success, failure, or cancellation; existing message delivery and acknowledgement ordering remains intact. The strict snapshot validation remains in place. Actual automatic compaction failures use the normal canonical assistant-error commit path so a failed turn remains visible after detachment or restart. An extension's `{ cancel: true }` is a distinct outcome: threshold cancellation skips that compaction opportunity and continues; manual callers receive `ERR_COMPACTION_CANCELLED`; overflow cancellation stops recovery, retaining the original provider failure without another request. Cancellation does not append a summary or a synthetic summary-failure message. The driver's terminal event still reports `aborted: true`; a planned `willRetry` is not evidence that a retry occurred.
 
+When the selected SDK supports `SessionManagerOptions.entryRetention`, persistent
+actors opt into a 1 MiB private serialized-byte cache before opening the file.
+The same SDK manager retains compact byte-location/header indexes and hydrates
+complete entries on demand. Default SDK aliases remain unchanged; the opt-in
+mode returns independent committed-value snapshots, including pending values.
+Unflushed or failed-write values keep their sole owned copy until persistence.
+Explicit history, tree, branch, edit and compaction APIs remain complete.
+
+The canonical projector registers only these opted-in managers. It validates
+archive data and selected native/signature/alias facts once per committed source
+generation, then validates appended records incrementally. A fresh independent
+`{revision, generation}` stamp invalidates facts after reload/rewrite/file changes;
+leaf-only changes rebuild selected-branch facts. Cold indexes retain identities,
+positions and validation facts, not message bodies, arguments, result payloads or
+encrypted signatures. `buildSessionSource()` selects producing contributions before hydration, including
+context-edit omissions and replacements; genuine pending calls remain recovery
+facts even outside the model view. Input receipts,
+settlement cursors, issuer lookup and family bookkeeping use that same index.
+Default/custom managers keep the stateless projector and its descriptor guards.
+Index/native metadata still grows with entry count; this bounds cold **payload**
+retention and normal-turn hydration, not total resident RAM independently of
+history. Explicit full-history results belong to their callers, not a permanent
+cache. Extensions that request full archives can still materialize them.
+
+With the supported source-mode SDK, the dormant service session initializes with
+`createAgentSession({contextMode: "source"})` and rebinds its Agent source after
+canonical changes. Ordinary model, thinking, tool, prompt and status reads do not
+seed a raw messages array. SDK status/automatic-threshold checks and the harness's
+turn-end estimator reuse numeric contribution profiles under their original usage,
+compaction and edit rules. Explicit public messages access pins a genuine mutable
+array until replacement or canonical refresh; existing mutations remain visible.
+
+The active runner dispatches `context_source` and `context_with_system_source`
+before materializing provider input. A source-aware extension can shorten a
+borrowed generation-fenced plan or return an owned effective source. The configured
+flush hook is source-aware. Each extension's source handler replaces only its
+paired array handler on this dispatch. Any real legacy array consumer receives
+its complete input at that boundary and can require eager payload materialization.
+Capturing extension views across reload requires extension-owned immutable values,
+not retained SDK byte locations. A source-aware context editor can keep exact raw,
+draft and historical checkpoint payloads in its own disposable private snapshot
+files while retaining compact prefix/eligibility facts; canonical history remains
+exclusively Pi-owned.
+
+Tool contexts retain the SDK-raw projection, not an extension's model view. They
+borrow a plan through the complete task and nested-call drain. Explicit messages
+access creates an owned array that stays valid after task completion and reload;
+finishing releases only the unread borrowed plan. Supervisor-created workers
+explicitly select `supervised-source` end events: source handlers receive the plan,
+legacy in-process listeners still receive full values, and the worker sends the
+same type-only `agent_end` already exposed by supervisor live/history/replay
+surfaces. Direct worker RPC retains full `agent_end.messages` by default.
+
 Archive snapshots retain complete detached records, including opaque extension data and superseded compaction fields. Compaction uses this same copier for full-history guards and extension branch snapshots: object and array containers are detached, while immutable strings are shared instead of reallocated. Preparation snapshots retain structured-clone semantics for file-operation Sets. Their limits are 100,000 entries, 2,000,000 aggregate visited values, and depth 64 from the archive-array root. The 64 Mi UTF-16 code-unit string/key budget applies separately to each record, including its array-slot key, and remains enforced through signature overlays. Both the initial archive copy and the isolated SDK-helper copy use this scope. Type, accessor, cycle, ancestry, signature, and selected historical call/result checks still run before context pruning.
 
 The complete returned `{messages, outstanding, diagnostics}` view defaults to an aggregate 64 Mi UTF-16 string/key code-unit budget, with 2,000,000 visited values and depth 64 measured from that view's root, after summary metadata and ordinary-mode result ordering. The [process configuration](DEPENDENCIES.md#persistent-configuration) can select a materialized string budget from 64 Mi through 256 Mi code units. One value is captured before each projection and governs both the initial helper-output copy and the final complete view; archive-record and signature limits do not change. An archive's lifetime strings are not one model context, and these limits are not total-archive or heap-memory bounds. Oversized data is rejected, not truncated, skipped, or repaired.

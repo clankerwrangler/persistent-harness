@@ -8,7 +8,7 @@ import test, { after } from "node:test";
 import { execFileSync } from "node:child_process";
 import {
   CANONICAL_CONTEXT_LIMITS, CanonicalContextError, THINKING_SIGNATURE_CUSTOM_TYPE,
-  THINKING_SIGNATURE_VERSION, projectCanonicalContext, projectCanonicalBranch, planUnknownRecovery,
+  THINKING_SIGNATURE_VERSION, projectCanonicalContext, projectCanonicalSource, projectCanonicalBranch, planUnknownRecovery, registerCanonicalSessionManager,
 } from "../src/canonical-context.mjs";
 
 const originalBudget = process.env.PI_HARNESS_CONTEXT_STRING_CODE_UNITS;
@@ -44,7 +44,47 @@ function chain(messages) {
   return messages.map((message, i) => messageEntry(`e${i}`, i ? `e${i - 1}` : null, message));
 }
 const input = (entries, mode = "native", leafId = entries.at(-1)?.id ?? null) => ({ entries, leafId, mode, buildSessionProjection });
-const project = (entries, mode, leafId) => projectCanonicalContext(input(entries, mode, leafId));
+// The existing native/signature/alias/edit matrix is also the differential
+// oracle for the explicitly registered committed-snapshot path.
+function managedProject(entries, mode = "native", leafId = entries.at(-1)?.id ?? null, sourceTransform = source => source) {
+  const manager = {
+    getRevision: () => ({ revision: 0, generation: 0 }), getEntryCount: () => entries.length,
+    getLeafId: () => leafId, getEntriesRange: (start, limit) => entries.slice(start, start + limit),
+    getEntry: id => structuredClone(entries.findLast(entry => entry.id === id)),
+    buildSessionProjection: () => {
+      const context = buildSessionProjection(entries, leafId);
+      return { ...context, contextEntryIds: context.entries.map(group => group.sourceEntry.id),
+        entries: context.entries.filter(group => group.messages.length > 0) };
+    },
+  };
+  manager.buildSessionSource = () => {
+    const projection = manager.buildSessionProjection();
+    const edits = new Map(entries.filter(entry => projection.contextEntryIds.includes(entry.id)
+      && entry.type === "context_edit").map(entry => [entry.targetId, entry.id]));
+    const values = projection.entries.flatMap(group => group.messages);
+    const contributions = projection.entries.flatMap(group => group.messages.map((message, messageIndex) => ({
+      sourceEntryId: group.sourceEntry.id, role: message.role, messageIndex,
+      ...(edits.has(group.sourceEntry.id) ? { editEntryId: edits.get(group.sourceEntry.id) } : {}),
+      key: `${group.sourceEntry.id}:${messageIndex}`,
+    })));
+    return sourceTransform({ contextEntryIds: projection.contextEntryIds, contributions, length: contributions.length,
+      read: index => structuredClone(values[index]), readAll: () => structuredClone(values),
+      readSource: id => structuredClone(projection.entries.find(group => group.sourceEntry.id === id).sourceEntry),
+      validate: () => {}, currentSystemMessage: () => undefined });
+  };
+  registerCanonicalSessionManager(manager);
+  return projectCanonicalContext({ sessionManager: manager, mode });
+}
+function project(entries, mode, leafId) {
+  let expected;
+  try { expected = projectCanonicalContext(input(entries, mode, leafId)); }
+  catch (error) {
+    assert.throws(() => managedProject(entries, mode, leafId), actual => actual.code === error.code);
+    throw error;
+  }
+  assert.deepEqual(managedProject(entries, mode, leafId), expected);
+  return expected;
+}
 function rejects(entries, code, mode = "native", leafId) {
   assert.throws(() => project(entries, mode, leafId), error => error instanceof CanonicalContextError && error.code === code);
 }
@@ -694,7 +734,7 @@ test("final materialized view jointly bounds pruned outstanding and diagnostic i
 
 function budgetProcess(body) {
   const code = `import assert from "node:assert/strict";
-    const { projectCanonicalContext, projectCanonicalBranch, getCanonicalContextStringCodeUnits, CANONICAL_CONTEXT_LIMITS } = await import(${JSON.stringify(new URL("../src/canonical-context.mjs", import.meta.url).href)});
+    const { projectCanonicalContext, projectCanonicalSource, projectCanonicalBranch, getCanonicalContextStringCodeUnits, CANONICAL_CONTEXT_LIMITS } = await import(${JSON.stringify(new URL("../src/canonical-context.mjs", import.meta.url).href)});
     const { buildSessionProjection } = await import(${JSON.stringify(pathToFileURL(sdkEntry).href)});
     const key = "PI_HARNESS_CONTEXT_STRING_CODE_UNITS";
     const stamp = "2026-01-01T00:00:00Z";
@@ -751,6 +791,16 @@ test("configured materialized copies preserve large content and details in both 
       result.messages[0].details.kept = false;
       assert.equal(entries[0].message.details.kept, true);
       assert.equal(getCanonicalContextStringCodeUnits(), 67108864);
+      process.env[key] = "201326592";
+      const source = projectCanonicalSource({ entries, leafId: entries.at(-1).id, mode,
+        buildSessionProjection(copied, leaf) {
+          process.env[key] = "invalid-after-source-capture";
+          return buildSessionProjection(copied, leaf);
+        } }).source;
+      assert.deepEqual(source.readAll(), entries.map(entry => entry.message));
+      source.read(0).details.kept = false;
+      assert.equal(source.read(0).details.kept, true);
+      assert.equal(entries[0].message.details.kept, true);
     }
     process.env[key] = "201326592";
     assert.equal(project(entries, (copied, leaf) => {
@@ -1215,4 +1265,22 @@ test("SSE read witness rejects missing, invalid or unknown producer fields witho
     assert(view.diagnostics.some(d => d.code === "ORDINARY_ASSISTANT_NOT_REPLAYABLE"));
     assert.equal(view.diagnostics.some(d => d.code === "UNADMITTED_CALL_OMITTED"), false); assert.deepEqual(entries, before);
   }
+});
+
+
+test("source plans reject altered ordered metadata and full-value native/envelope content", () => {
+  const entries = chain([assistant("owner", [call("native-source")]), result("native-source")]);
+  for (const change of [
+    source => ({ ...source, contributions: source.contributions.toReversed() }),
+    source => ({ ...source, contributions: [source.contributions[0], source.contributions[0]] }),
+    source => ({ ...source, contributions: source.contributions.map((item, index) => index ? item : { ...item, sourceEntryId: "foreign" }) }),
+    source => ({ ...source, contributions: source.contributions.map((item, index) => index ? item : { ...item, editEntryId: "unproven-edit" }) }),
+  ]) assert.throws(() => managedProject(entries, "native", "e1", change), { code: "ERR_CONTEXT_SOURCE_PROJECTION" });
+  for (const mutate of [
+    message => { message.id = "altered-envelope"; },
+    message => { message.content[0].arguments.code = "forged effect"; },
+    message => { message.content.push({ type: "text", text: "unproven extra content" }); },
+  ]) assert.throws(() => managedProject(entries, "native", "e1", source => ({ ...source, read(index) {
+    const message = source.read(index); if (index === 0) mutate(message); return message;
+  } })), error => ["ERR_CONTEXT_SOURCE_PROJECTION", "ERR_CONTEXT_CALL_PROJECTION"].includes(error.code));
 });

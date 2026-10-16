@@ -41,6 +41,18 @@ after(async () => {
   await rm(temporary, { recursive: true, force: true });
 });
 const external = await loadExternalPi();
+// Optional source-test artifact selects only the corrected public history owner;
+// public providers/runtime/helpers remain the verified stock dependency graph.
+const sourceSdk = savedEnv.PI_HARNESS_TEST_SOURCE_SDK === "1";
+if (sourceSdk) process.env.PI_PACKAGE_DIR = savedEnv.PI_HARNESS_TEST_SDK_PACKAGE_DIR;
+const retentionSdk = savedEnv.PI_HARNESS_RETENTION_SDK_MODULE
+  ? await import(pathToFileURL(savedEnv.PI_HARNESS_RETENTION_SDK_MODULE)) : null;
+if (sourceSdk) {
+  assert.equal(typeof retentionSdk?.createAgentSession, "function");
+  assert.equal(typeof retentionSdk?.ExtensionRunner.prototype.emitContextSource, "function");
+}
+const integratedExternal = retentionSdk ? { ...external, sdk: { ...external.sdk, SessionManager: retentionSdk.SessionManager,
+  ...(sourceSdk ? { createAgentSession: retentionSdk.createAgentSession, ExtensionRunner: retentionSdk.ExtensionRunner } : {}) } } : external;
 const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 async function until(predicate, timeout = 3000) {
   const started = Date.now();
@@ -77,7 +89,7 @@ async function fixture(options = {}) {
   const dir = await mkdtemp(path.join(temporary, "case-"));
   const agentDir = path.join(dir, "agent"); await mkdir(agentDir);
   const events = [];
-  const worker = await bootstrapSDKWorker({ external, cwd: dir,
+  const worker = await bootstrapSDKWorker({ external: integratedExternal, cwd: dir,
     env: { ...process.env, PI_CODING_AGENT_DIR: agentDir }, publish: (event) => events.push(structuredClone(event)),
     argv: ["--mode", "rpc", "--session", path.join(dir, "session.jsonl"), "--provider", "worker-fixture", "--model", "fixture",
       "--no-extensions", "--extension", path.join(candidate, "index.ts"), "--no-skills", "--no-context-files"],
@@ -131,7 +143,7 @@ test("bootstrap supplies compaction factory with active owner dependencies and p
   const { worker, events } = await fixture({ Coordinator: MockCoordinator,
     createCompactionDriver(options) { received = options; return driver; } });
   try {
-    assert.equal(received.sdk, external.sdk); assert.equal(received.core, external.core);
+    assert.equal(received.sdk, integratedExternal.sdk); assert.equal(received.core, external.core);
     assert.equal(received.runner, worker.runner); assert.notEqual(received.runner, worker.session.extensionRunner);
     assert.equal(received.session, worker.session); assert.equal(received.models, worker.models);
     assert.equal(received.lifecycle, worker.lifecycle);
@@ -147,7 +159,7 @@ test("bootstrap supplies navigation factory with the same active owner dependenc
   const { worker } = await fixture({ Coordinator: MockCoordinator,
     createNavigationDriver(options) { received = options; return driver; } });
   try {
-    assert.equal(received.sdk, external.sdk); assert.equal(received.core, external.core);
+    assert.equal(received.sdk, integratedExternal.sdk); assert.equal(received.core, external.core);
     assert.equal(received.runner, worker.runner); assert.notEqual(received.runner, worker.session.extensionRunner);
     assert.equal(received.session, worker.session); assert.equal(received.models, worker.models);
     assert.equal(received.lifecycle, worker.lifecycle); assert.equal(worker.coordinator.navigationDriver, driver);
@@ -514,9 +526,13 @@ globalThis.fetch = denied; net.Socket.prototype.connect = denied; http.request =
 import { loadExternalPi } from ${JSON.stringify(pathToFileURL(path.join(candidate, "src/external-pi.mjs")).href)};
 import { runSDKWorkerRpc, bootstrapSDKWorker } from ${JSON.stringify(pathToFileURL(path.join(candidate, "src/sdk-worker.mjs")).href)};
 const external = await loadExternalPi();
+const retentionSdk = ${savedEnv.PI_HARNESS_RETENTION_SDK_MODULE ? `await import(${JSON.stringify(pathToFileURL(savedEnv.PI_HARNESS_RETENTION_SDK_MODULE).href)})` : "null"};
+const integratedExternal = retentionSdk ? { ...external, sdk: { ...external.sdk, SessionManager: retentionSdk.SessionManager,
+  ...(${sourceSdk} ? { createAgentSession: retentionSdk.createAgentSession, ExtensionRunner: retentionSdk.ExtensionRunner } : {}) } } : external;
+${sourceSdk ? `process.env.PI_PACKAGE_DIR = ${JSON.stringify(savedEnv.PI_HARNESS_TEST_SDK_PACKAGE_DIR)};` : ""}
 const modelConfig = ${JSON.stringify(modelConfig)};
 ${fixtureExtension.toString()}
-await runSDKWorkerRpc({ bootstrap: (options) => bootstrapSDKWorker({ ...options, external, extensionFactory: fixtureExtension }) });
+await runSDKWorkerRpc({ bootstrap: (options) => bootstrapSDKWorker({ ...options, external: integratedExternal, extensionFactory: fixtureExtension }) });
 `);
   const actor = new PiSessionActor({ command: process.execPath, cwd: directory,
     env: { PATH: savedEnv.PATH, HOME: directory, PI_CODING_AGENT_DIR: agentDir,
@@ -894,6 +910,9 @@ test("dormant public preparation capture has no provider, transcript, UI or acti
     manager.appendMessage({ role: "user", content: "new ".repeat(100), timestamp: 2 });
     const old = manager.getBranch().find(e => e.type === "message");
     manager.appendContextEdit(old.id, { content: "edited old ".repeat(100) });
+    // Direct fixture writes bypass the coordinator's canonical refresh. Source mode
+    // must rebind its borrowed generation before measuring preparation effects.
+    if (sourceSdk) worker.session.refreshContext();
     const before = structuredClone(manager.getEntries()), leaf = manager.getLeafId();
     const state = structuredClone(worker.session.agent.state.messages), beforeEvents = structuredClone(events);
     worker.coordinator.controller = new AbortController();
@@ -948,4 +967,79 @@ test("supported invalidate then reload removes old veto before successor registr
     assert.equal(check("threshold", 128000), true);
     assert.equal(oldCalls, 1); assert.equal(newCalls, 1);
   } finally { loader.getExtensions().runtime.invalidate("Test complete"); }
+});
+
+
+test("source-aware supervised turns avoid raw hydration while direct worker end events stay full", async t => {
+  if (!sourceSdk) return t.skip("source SDK fixture requires PI_HARNESS_TEST_SOURCE_SDK=1");
+  for (const eventMode of ["full", "supervised-source"]) {
+    const hooks = { legacyContext: 0, sourceContext: 0, legacyEnd: 0, sourceEnd: 0 };
+    const { worker, events } = await fixture({ eventMode, extensionFactory(pi) {
+      fixtureExtension(pi);
+      pi.on("context", () => { hooks.legacyContext++; });
+      pi.on("context_source", ({ source }) => {
+        hooks.sourceContext++;
+        const indices = source.contributions.map((_, index) => index).slice(-2);
+        return { source: { length: indices.length, contributions: indices.map(index => source.contributions[index]),
+          read: index => source.read(indices[index]), readAll: () => indices.map(index => source.read(index)),
+          currentSystemMessage: () => source.currentSystemMessage(), validate: () => source.validate() } };
+      });
+      pi.on("agent_end", ({ messages }) => { hooks.legacyEnd++; assert(messages.length >= 4); });
+      pi.on("agent_end_source", ({ source }) => { hooks.sourceEnd++; assert(source.length >= 4); });
+    } });
+    try {
+      const manager = worker.session.sessionManager;
+      const cold = manager.appendMessage({ role: "user", content: "cold synthetic body".repeat(8192), timestamp: 1 });
+      manager.appendMessage({ role: "assistant", content: [{ type: "text", text: "old answer" }],
+        provider: "worker-fixture", model: "fixture", api: "worker-fixture", stopReason: "stop", timestamp: 2,
+        usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0, totalTokens: 2, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } } });
+      await worker.handle({ type: "prompt", message: "first source request" });
+      await worker.coordinator.waitForIdle();
+      assert.equal(worker.coordinator.failure, null);
+      const read = manager._readStored, reads = [], coldReads = [];
+      manager._readStored = function(stored) {
+        reads.push(stored.id);
+        if (stored.id === cold) coldReads.push(new Error("synthetic cold read").stack);
+        return read.call(this, stored);
+      };
+      await worker.handle({ type: "prompt", message: "warm source request" });
+      await worker.coordinator.waitForIdle();
+      assert.equal(worker.coordinator.failure, null);
+      assert.equal(hooks.sourceContext, 2); assert.equal(hooks.legacyContext, 0);
+      const ends = events.filter(event => event.type === "agent_end");
+      assert.equal(ends.length, 2);
+      if (eventMode === "supervised-source") {
+        assert.equal(reads.includes(cold), false, JSON.stringify(coldReads));
+        assert(ends.every(event => !Object.hasOwn(event, "messages")));
+        assert.equal(hooks.sourceEnd, 2); assert.equal(hooks.legacyEnd, 0);
+      } else {
+        assert.equal(reads.includes(cold), true, "direct full event is an explicit compatibility read");
+        assert(ends.every(event => event.messages[0].content.startsWith("cold synthetic body")));
+        assert.equal(hooks.legacyEnd, 2); assert.equal(hooks.sourceEnd, 0);
+      }
+      assert(worker.session.agent.getMessageSource(), "normal state operations do not expose/pin a raw array");
+      const publicMessages = worker.session.agent.state.messages;
+      assert.equal(publicMessages.length, 6);
+      assert.equal(publicMessages[0].content.startsWith("cold synthetic body"), true);
+      publicMessages.push({ role: "user", content: "owned explicit array", timestamp: 3 });
+      assert.equal(worker.session.agent.state.messages, publicMessages);
+      assert.equal(worker.session.agent.getMessageSource(), undefined);
+      worker.session.refreshContext();
+      assert(worker.session.agent.getMessageSource());
+      if (eventMode === "supervised-source") {
+        const warmStatus = async () => {
+          const expected = worker.session.getContextUsage();
+          reads.length = 0;
+          assert.deepEqual(worker.session.getContextUsage(), expected);
+          await worker.coordinator.maybeAutoCompact();
+          assert.deepEqual(reads, [], "status and automatic threshold checks reuse compact SDK profiles without a veto");
+        };
+        await warmStatus();
+        manager.appendContextEdit(cold, { content: "small replacement of an old source" });
+        worker.session.refreshContext(); await warmStatus();
+        manager.setSessionFile(manager.getSessionFile());
+        worker.session.refreshContext(); await warmStatus();
+      }
+    } finally { await worker.close(); }
+  }
 });
