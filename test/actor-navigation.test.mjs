@@ -112,7 +112,11 @@ for (const kind of ["user", "custom"]) for (const prior of [false, true]) test(`
 test("active cancellation and abort preserve the leaf and context before any canonical mutation", async t => {
   let trees = 0;
   const f = await fixture(t, { hooks(pi) { pi.on("session_before_tree", () => ({ cancel: true })); pi.on("session_tree", () => { trees++; }); } });
-  const ids = seed(f.manager), before = structuredClone(f.manager.getEntries()), messages = structuredClone(f.worker.session.messages);
+  const ids = seed(f.manager);
+  // Direct setup writes bypass the coordinator's canonical refresh, including
+  // the first durable reindex. Rebind before capturing the no-effects oracle.
+  if (f.worker.session.agent.getMessageSource?.()) f.worker.session.refreshContext();
+  const before = structuredClone(f.manager.getEntries()), messages = structuredClone(f.worker.session.messages);
   assert.deepEqual(await f.navigate(ids.input, { summarize: true }), { cancelled: true });
   assert.deepEqual(await f.navigate(ids.input, {}, AbortSignal.abort()), { cancelled: true, aborted: true });
   assert.deepEqual(f.manager.getEntries(), before); assert.deepEqual(f.worker.session.messages, messages);

@@ -8,7 +8,7 @@ import { fastModeOptions, streamSessionRequest, supportsFastMode } from "./fast-
 import { randomUUID } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { isDeepStrictEqual } from "node:util";
-import { projectCanonicalBranch, projectCanonicalContext, projectCanonicalSource, sessionContextInput, sessionBranchHeaders, sessionCallIssuer } from "./canonical-context.mjs";
+import { projectCanonicalBranch, projectCanonicalContext, projectCanonicalSource, refreshCanonicalSessionContext, sessionContextInput, sessionBranchHeaders, sessionCallIssuer } from "./canonical-context.mjs";
 
 const zeroUsage = () => ({ input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0,
   cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } });
@@ -216,7 +216,7 @@ export class ActorCoordinator {
       guard?.(final);
       const entryId = this.manager.appendMessage(final);
       onCommit?.({ entryId, message: final });
-      if (this.contextMode === "source") this.session.refreshContext();
+      if (this.contextMode === "source") refreshCanonicalSessionContext(this.session, this.sdk.buildSessionProjection);
       await this.publish({ type: "message_end", message: final, messageId: final.id, entryId });
       await this.lifecycle.afterCommit?.();
       return { entryId, message: final };

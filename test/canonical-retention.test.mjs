@@ -4,7 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { pathToFileURL } from "node:url";
-import { projectCanonicalContext, projectCanonicalSource, planUnknownRecovery, registerCanonicalSessionManager, sessionContextInput,
+import { projectCanonicalContext, projectCanonicalSource, refreshCanonicalSessionContext, planUnknownRecovery, registerCanonicalSessionManager, sessionContextInput,
   sessionEntryHeaders, sessionBranchHeaders, sessionCallIssuer, sessionNamespaceHistory } from "../src/canonical-context.mjs";
 import { extensionInternals } from "../src/extension.mjs";
 import { SDKWorker } from "../src/sdk-worker.mjs";
@@ -209,6 +209,18 @@ test("real SDK omission/nonproducer selection avoids warm cold hydration and bin
     reads.length = 0;
     assert.deepEqual(lazy.source.estimateContextTokens(), core.estimateContextTokens(expected.messages));
     assert.deepEqual(reads, [], "usage metadata does not hydrate an unchanged raw prefix");
+    const session = { sessionManager: manager, agent: new core.Agent({ streamFn() { throw new Error("must not infer"); } }) };
+    refreshCanonicalSessionContext(session, stock.buildSessionProjection);
+    assert.deepEqual(reads, [], "canonical public-state refresh must not hydrate active or cold messages");
+    const owned = session.agent.state.messages;
+    assert.deepEqual(owned, expected.messages);
+    owned.push(user("explicit mutable public value"));
+    assert.equal(session.agent.state.messages, owned);
+    manager.setSessionFile(manager.getSessionFile());
+    refreshCanonicalSessionContext(session, stock.buildSessionProjection);
+    assert(session.agent.getMessageSource());
+    assert.deepEqual(session.agent.state.messages, expected.messages);
+    assert.equal(owned.at(-1).content, "explicit mutable public value", "refresh/reload cannot revoke an already exposed array");
     const build = manager.buildSessionSource.bind(manager);
     manager.buildSessionSource = () => { const value = build(); return { ...value, contextEntryIds: [...value.contextEntryIds].reverse() }; };
     assert.throws(() => projectCanonicalContext({ sessionManager: manager, mode: "ordinary" }), { code: "ERR_CONTEXT_SOURCE_PROJECTION" });
