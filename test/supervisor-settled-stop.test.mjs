@@ -21,7 +21,7 @@ async function until(probe, description, timeout = 20_000) {
 }
 class Actor extends EventEmitter {
   constructor(options) { super(); this.session = options.session; this.pid = process.pid; this.isRunning = false; this.streaming = false;
-    this.compactEntered = Promise.withResolvers(); this.compactGate = Promise.withResolvers(); this.closeSettled = 0; }
+    this.compactEntered = Promise.withResolvers(); this.compactGate = Promise.withResolvers(); this.closeSettled = 0; this.inputs = []; }
   state() { return { sessionId: this.session.sessionId, sessionFile: this.session.sessionFile, isStreaming: this.streaming, model: null, thinkingLevel: "off" }; }
   async start() { this.isRunning = true; return this.state(); }
   emit(name, event) {
@@ -35,6 +35,8 @@ class Actor extends EventEmitter {
     if (type === "compact") { this.compactEntered.resolve(); await this.compactGate.promise; return { summary: "Synthetic compaction" }; }
     throw new Error(`Unexpected fixture actor request: ${type}`);
   }
+  async submit(message) { this.inputs.push(message); return { outcome: "handled" }; }
+  crash() { this.isRunning = false; this.emit("exit", { code: 1, signal: null, expected: false }); }
   async close() {
     if (!this.isRunning) return;
     this.closeSettled += 1; this.emit("event", { type: "agent_settled" });
@@ -48,7 +50,7 @@ async function fixture(t, { real = false } = {}) {
   const agentDir = path.join(directory, "agent"); const home = path.join(directory, "home");
   await Promise.all([mkdir(skillDir), mkdir(cwd), mkdir(agentDir), mkdir(home)]);
   const saved = { ...process.env }; const workers = []; const rawEvents = []; const errors = [];
-  const entered = Promise.withResolvers(); const release = Promise.withResolvers();
+  const entered = Promise.withResolvers(); const release = Promise.withResolvers(); const readinessReturned = Promise.withResolvers();
   const providerEntered = Promise.withResolvers(); const providerRelease = Promise.withResolvers();
   let hold = false; let gatedCalls = 0; let server; let supervisor; let client;
   t.after(async () => {
@@ -89,7 +91,7 @@ async function fixture(t, { real = false } = {}) {
     actorExtensionPaths: real ? [path.join(import.meta.dirname, "fixtures", "fake-provider.ts")] : [],
     actorFactory(options) { const worker = real ? new PiSessionActor(options) : new Actor(options); workers.push(worker);
       worker.on("event", (event) => rawEvents.push(event)); return worker; },
-    runtimeProvisioner: async () => { if (hold) { gatedCalls += 1; entered.resolve(); await release.promise; } return {}; },
+    runtimeProvisioner: async () => { if (hold) { gatedCalls += 1; entered.resolve(); await release.promise; readinessReturned.resolve(); } return {}; },
     ...(real ? {} : { processIdentityFactory: async (pid) => ({ version: 1, pid, processGroup: pid, startTime: "synthetic", ownerToken: "synthetic" }),
       processTerminator: async () => ({ terminated: true }) }), logger: { error: (error) => errors.push(String(error)) } });
   await supervisor.start(); client = new HarnessClient({ socketPath, heartbeatMs: 0, requestTimeoutMs: 30_000 });
@@ -97,8 +99,14 @@ async function fixture(t, { real = false } = {}) {
   const sessionId = (await client.request("create_root", { cwd, repositoryRoot: null, name: "Stop ordering proof",
     provider: real ? "harness-fake" : null, model: real ? "fake-model" : null, thinkingLevel: "off" })).admission.sessionId;
   await client.request("subscribe_session", { selector: sessionId });
-  return { directory, sessionId, client, supervisor, workers, rawEvents, entered, release, providerEntered, providerRelease,
+  return { directory, sessionId, client, supervisor, workers, rawEvents, entered, release, readinessReturned, providerEntered, providerRelease,
     gatedCalls: () => gatedCalls,
+    async connectActor(id = sessionId) {
+      const launch = supervisor.store.getActorLaunch(id); const connection = new HarnessClient({ socketPath, heartbeatMs: 0 });
+      await connection.start({ registrationType: "register_actor", sessionId: launch.sessionId, sessionFile: launch.sessionFile,
+        cwd: launch.cwd, repositoryRoot: launch.repositoryRoot, actorToken: launch.actorToken, actorGeneration: launch.actorGeneration });
+      t.after(() => connection.stop()); return connection;
+    },
     async changeSkills() {
       const directory = path.join(skillDir, "changed"); await mkdir(directory);
       await writeFile(path.join(directory, "SKILL.md"), "---\nname: changed\ndescription: Synthetic settled-readiness fixture.\n---\nUse only for this isolated regression.\n"); hold = true;
@@ -162,4 +170,63 @@ test("real Pi writer stays stopped after held settled readiness and resumes only
   await until(() => f.supervisor.store.getSession(f.sessionId).lifecycle === "resident", "real explicit activation");
   assert(f.supervisor.store.getSession(f.sessionId).actorGeneration > generation);
   assert.equal(f.rawEvents.filter((event) => event.type === "agent_start").length, 1, "Revival does not fabricate another prompt");
+});
+
+for (const freshInput of [false, true]) test(`settled readiness fences an exited empty actor${freshInput ? " but preserves fresh arrival" : " without revival"}`, { timeout: 30_000 }, async (t) => {
+  const f = await fixture(t); const actor = f.workers[0];
+  const generation = f.supervisor.store.getSession(f.sessionId).actorGeneration;
+  assert.deepEqual(f.supervisor.store.listPendingActorInputs(f.sessionId), []);
+  assert.equal(f.supervisor.store.nextQueuedChildTask(f.sessionId), undefined);
+  assert.equal(f.supervisor.store.submittedChildTask(f.sessionId), undefined);
+  await f.changeSkills(); actor.emit("event", { type: "agent_settled" }); await f.entered.promise;
+  actor.crash(); assert.equal(f.supervisor.store.getSession(f.sessionId).lifecycle, "error");
+  if (freshInput) await f.client.request("submit_input", { sessionId: f.sessionId, message: "FRESH_AFTER_EXIT", behavior: "auto" });
+  f.releaseReadiness(); await f.readinessReturned.promise;
+  if (freshInput) {
+    await until(() => f.workers.some((worker) => worker.inputs.includes("FRESH_AFTER_EXIT")), "fresh input delivered after exited readiness");
+    assert.equal(f.workers.flatMap((worker) => worker.inputs).filter((message) => message === "FRESH_AFTER_EXIT").length, 1);
+    assert.deepEqual(f.supervisor.store.listPendingActorInputs(f.sessionId), []);
+    assert(f.supervisor.store.getSession(f.sessionId).actorGeneration > generation);
+  } else {
+    // Passive RPC cuts observe the completed readiness continuation without granting revival.
+    for (let i = 0; i < 3; i += 1) {
+      await f.client.request("heartbeat"); await f.client.request("list_sessions");
+      await f.client.request("subscribe_session", { selector: f.sessionId, passive: true });
+    }
+    assert.equal(f.supervisor.store.getSession(f.sessionId).lifecycle, "error");
+    assert.equal(f.supervisor.store.getSession(f.sessionId).actorGeneration, generation);
+    assert.equal(f.workers.length, 1);
+    assert.deepEqual(f.supervisor.store.listPendingActorInputs(f.sessionId), []);
+  }
+});
+
+test("family stop_child drains earlier settled readiness without reviving its stopped child", { timeout: 30_000 }, async (t) => {
+  const f = await fixture(t); const parent = await f.connectActor();
+  const childId = crypto.randomUUID(), childFile = path.join(f.directory, "child.jsonl");
+  await writeFile(childFile, `${JSON.stringify({ type: "session", version: 3, id: childId, timestamp: new Date().toISOString(), cwd: f.directory })}\n`);
+  f.supervisor.store.createChild(f.sessionId, { sessionId: childId, sessionFile: childFile, actorToken: crypto.randomUUID(),
+    policy: { name: "stop-proof-child", prompt: "Complete once", cwd: f.directory, repositoryRoot: null } });
+  await f.client.request("subscribe_session", { selector: childId });
+  const child = f.workers.find((worker) => worker.session.sessionId === childId);
+  await until(() => f.supervisor.store.submittedChildTask(childId), "child initial task submission");
+  child.emit("event", { type: "agent_settled" });
+  await f.client.request("get_actor_state", { sessionId: childId });
+  assert.equal(f.supervisor.store.nextQueuedChildTask(childId), undefined);
+  assert.equal(f.supervisor.store.submittedChildTask(childId), undefined);
+  await f.changeSkills(); child.emit("event", { type: "agent_settled" }); await f.entered.promise;
+  const generation = f.supervisor.store.getSession(childId).actorGeneration;
+  let acknowledged = false;
+  const stop = parent.request("stop_child", { selector: childId }).then((reply) => { acknowledged = true; return reply; });
+  await until(() => f.supervisor.store.getSession(childId).lifecycle === "stopped", "family stop reaches child shutdown before readiness release");
+  await f.client.request("heartbeat");
+  assert.equal(acknowledged, false, "Family stop joins its earlier readiness owner before acknowledging");
+  f.releaseReadiness();
+  assert.equal((await stop).child.lifecycle, "stopped"); await f.readinessReturned.promise;
+  for (let i = 0; i < 3; i += 1) {
+    await f.client.request("heartbeat"); await f.client.request("list_sessions");
+    await f.client.request("subscribe_session", { selector: childId, passive: true });
+  }
+  assert.equal(f.supervisor.store.getSession(childId).lifecycle, "stopped");
+  assert.equal(f.supervisor.store.getSession(childId).actorGeneration, generation);
+  assert.equal(f.workers.filter((worker) => worker.session.sessionId === childId).length, 1);
 });

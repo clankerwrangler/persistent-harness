@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { setImmediate as tick } from "node:timers/promises";
+import { ActorToolDispatch } from "../src/actor-tool-dispatch.mjs";
 import { ActorCoordinator } from "../src/actor-coordinator.mjs";
 
 const gate = () => Promise.withResolvers();
@@ -157,6 +158,10 @@ test("late native completion survives an earlier flight and steering within the 
   await state.firstTurn.promise; await tick();
   assert.equal(f.coor.running, true); assert.equal(f.coor.flight, null); assert.equal(f.coor.tasks.size, 1);
   assert.deepEqual(f.turns.map(turn => turn.ids), [[]]);
+  await assert.rejects(f.coor.withServiceMutation(async () => {}), /idle actor/);
+  await assert.rejects(f.coor.compact(), /compaction requires settled tool results/);
+  f.coor.navigationDriver = async () => { assert.fail("a pending task cannot enter navigation"); };
+  await assert.rejects(f.coor.navigateTree("unread-tool-view"), /idle actor/);
   await f.coor.submit("steer during the pending native result");
   await state.continuation.promise;
   state.release.resolve(); await state.committed.promise;
@@ -180,4 +185,60 @@ test("abort waits for a late native result and its canonical publication fence b
   assert.equal(f.results().length, 1); assert.deepEqual(f.turns.map(turn => turn.ids), [[]]);
   await f.start("empty"); await f.coor.waitForIdle(); settled(f);
   assert.deepEqual(f.turns.map(turn => turn.ids), [[], []]); assert.equal(f.results().length, 1);
+});
+
+
+test("tool session values stay borrowed through nested drain; exposed arrays survive source release", async () => {
+  const { core, sdk } = await (await import("../src/external-pi.mjs")).loadExternalPi();
+  for (const expose of [false, true]) {
+    const entered = gate(), released = gate(), leafEntered = gate(), leafReleased = gate();
+    let generation = 0, reads = 0, context, exposed, dispatch;
+    const captured = generation;
+    const original = [{ role: "user", content: "SDK raw public value", timestamp: 1 }];
+    const source = { readAll() {
+      assert.equal(generation, captured); reads++;
+      return structuredClone(original);
+    } };
+    const definitions = [
+      { name: "nested", exposure: "codemode", parameters: { type: "object", properties: {} },
+        async execute(id) {
+          entered.resolve(); await released.promise;
+          const result = await dispatch.execute(id, "leaf", {});
+          return result.result;
+        } },
+      { name: "leaf", exposure: "codemode", parameters: { type: "object", properties: {} },
+        async execute() { leafEntered.resolve(); await leafReleased.promise; return { content: [{ type: "text", text: "real" }] }; } },
+    ];
+    const runner = { getAllRegisteredTools: () => definitions.map(definition => ({ definition })),
+      createToolContext: () => ({}), emitToolCall: async () => undefined, emitToolResult: async () => undefined };
+    dispatch = new ActorToolDispatch({ runner, sdk, activeTools: () => new Set(), emit: async () => {},
+      core: { runToolCall(call, options) {
+        context ??= options.context;
+        if (expose && !exposed) {
+          exposed = context.messages;
+          exposed.push({ role: "user", content: "owned public mutation", timestamp: 2 });
+        }
+        return core.runToolCall(call, options);
+      } } });
+    dispatch.open("parent", new AbortController().signal, { role: "assistant", content: [], timestamp: 1 }, undefined, { messageSource: source });
+    const outcome = dispatch.execute("parent", "nested", {});
+    await entered.promise;
+    assert.equal(reads, expose ? 1 : 0, "actual core and public tool callbacks do not force messages");
+    let finished = false;
+    const finishing = dispatch.finish("parent").then(result => { finished = true; return result; });
+    released.resolve(); await leafEntered.promise;
+    assert.equal(finished, false, "the source owner survives descendant calls started during drain");
+    assert.equal(dispatch.scopes.has("parent"), true);
+    leafReleased.resolve(); await outcome; await finishing;
+    assert.equal(dispatch.scopes.size, 0);
+    generation++;
+    if (expose) {
+      assert.equal(context.messages, exposed);
+      assert.deepEqual(context.messages, [...original, { role: "user", content: "owned public mutation", timestamp: 2 }]);
+      assert.equal(reads, 1, "owned public data no longer depends on the expired borrowed plan");
+    } else {
+      assert.equal(reads, 0);
+      assert.throws(() => context.messages, /no longer borrowed/, "an unexposed plan cannot outlive its scope");
+    }
+  }
 });

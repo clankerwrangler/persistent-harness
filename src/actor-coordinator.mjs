@@ -8,7 +8,7 @@ import { fastModeOptions, streamSessionRequest, supportsFastMode } from "./fast-
 import { randomUUID } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { isDeepStrictEqual } from "node:util";
-import { projectCanonicalBranch } from "./canonical-context.mjs";
+import { projectCanonicalBranch, projectCanonicalContext, projectCanonicalSource, sessionContextInput, sessionBranchHeaders, sessionCallIssuer } from "./canonical-context.mjs";
 
 const zeroUsage = () => ({ input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0,
   cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } });
@@ -43,11 +43,12 @@ class LocalPreparationError extends Error {
 /** One actor's inference, execution, canonical writer, and public extension lifecycle owner. */
 export class ActorCoordinator {
   constructor({ session, runner, sdk, api, core, models, simpleOptions, nativeAdapter, projectContext, planRecovery,
-    lifecycle = {}, resources, promptCapture, publish = () => {}, basePromptOptions = {}, onTiming = () => {}, compactionDriver, navigationDriver, automaticCompactionAllowed = () => true, isProjectTrusted = () => false }) {
+    contextMode = "array", eventMode = "full", lifecycle = {}, resources, promptCapture, publish = () => {}, basePromptOptions = {}, onTiming = () => {}, compactionDriver, navigationDriver, automaticCompactionAllowed = () => true, isProjectTrusted = () => false }) {
     Object.assign(this, { session, runner, sdk, api, core, models, simpleOptions, nativeAdapter, projectContext, planRecovery,
-      lifecycle, resources, promptCapture, publish, basePromptOptions, onTiming, compactionDriver, navigationDriver, automaticCompactionAllowed, isProjectTrusted });
+      contextMode, eventMode, lifecycle, resources, promptCapture, publish, basePromptOptions, onTiming, compactionDriver, navigationDriver, automaticCompactionAllowed, isProjectTrusted });
     this.manager = session.sessionManager;
-    this.birthClock = new ConversationBirthClock(this.manager.getBranch());
+    this.birthClock = new ConversationBirthClock();
+    this.birthClock.sequence = sessionBranchHeaders(this.manager).reduce((n, entry) => Math.max(n, entry.birthSequence), 0);
     this.activeTools = new Set(); this.queue = []; this.tasks = new Map(); this.seenCalls = new Set();
     // Undelivered turn_end results belong to the logical run, not an inference flight.
     this.completedResults = [];
@@ -186,7 +187,7 @@ export class ActorCoordinator {
     return { model: this.session.model, thinkingLevel: this.session.thinkingLevel, isStreaming: this.isBusy,
       isCompacting: this.compacting, isRetrying: this.retrying, retryAttempt: this.retryAttemptNumber - 1, steeringMode: this.steeringMode, followUpMode: this.followUpMode,
       sessionFile: this.manager.getSessionFile(), sessionId: this.manager.getSessionId(), sessionName: this.manager.getSessionName(),
-      messageCount: this.manager.buildSessionProjection().messages.length, pendingMessageCount: this.queue.length,
+      messageCount: typeof this.manager.buildSessionSource === "function" ? this.manager.buildSessionSource().length : this.manager.buildSessionProjection().messages.length, pendingMessageCount: this.queue.length,
       autoCompactionEnabled: this.session.autoCompactionEnabled, ...(this.failure ? { error: this.failure.message } : {}) };
   }
   async emit(event) {
@@ -215,6 +216,7 @@ export class ActorCoordinator {
       guard?.(final);
       const entryId = this.manager.appendMessage(final);
       onCommit?.({ entryId, message: final });
+      if (this.contextMode === "source") this.session.refreshContext();
       await this.publish({ type: "message_end", message: final, messageId: final.id, entryId });
       await this.lifecycle.afterCommit?.();
       return { entryId, message: final };
@@ -340,10 +342,12 @@ export class ActorCoordinator {
   }
   async recover() {
     if (this.recoveryDone) return;
-    const args = { entries: this.manager.getEntries(), leafId: this.manager.getLeafId(), buildSessionProjection: this.sdk.buildSessionProjection, mode: "native" };
+    const args = sessionContextInput(this.manager, this.sdk.buildSessionProjection, "native");
     if (this.planRecovery) for (const result of this.planRecovery({ ...args, timestamp: Date.now() })) await this.commit(result);
-    for (const entry of this.manager.getBranch()) if (entry.type === "message" && entry.message.role === "assistant")
-      for (const part of entry.message.content) if (part.type === "toolCall") this.seenCalls.add(part.id);
+    for (const header of sessionBranchHeaders(this.manager)) if (header.role === "assistant") {
+      // Startup only needs call identities, not historical argument/text bodies.
+      for (const id of header.callIds ?? []) this.seenCalls.add(id);
+    }
     this.recoveryDone = true;
   }
   async maybeAutoCompact() {
@@ -351,13 +355,12 @@ export class ActorCoordinator {
     const settings = this.session.settingsManager.getCompactionSettings();
     if (!settings.enabled) return false;
     if (!this.automaticCompactionAllowed("threshold", this.session.model?.contextWindow)) return false;
+    const tokens = this.session.getContextUsage()?.tokens;
+    if (tokens == null || !this.sdk.shouldCompact(tokens, this.session.model.contextWindow, settings)) return false;
     const entries = this.manager.getBranch();
     const latestCompaction = this.sdk.getLatestCompactionEntry(entries);
     const assistant = [...entries].reverse().find(entry => entry.type === "message" && entry.message.role === "assistant" && !["error", "aborted"].includes(entry.message.stopReason));
     if (!assistant || (latestCompaction && assistant.message.timestamp <= Date.parse(latestCompaction.timestamp))) return false;
-    const tokens = this.session.getContextUsage()?.tokens;
-    if (tokens == null) return false;
-    if (!this.sdk.shouldCompact(tokens, this.session.model.contextWindow, settings)) return false;
     try { await this.compact(undefined, { automatic: true, reason: "threshold", willRetry: false }); }
     catch (error) {
       if (error?.code === "ERR_COMPACTION_CANCELLED") return false;
@@ -462,10 +465,22 @@ export class ActorCoordinator {
       this.failure = error; this.controller.abort(); return false;
     } finally { this.retrying = false; }
   }
+  projectedSource() {
+    if (this.contextMode !== "source" || this.projectContext !== projectCanonicalContext) return undefined;
+    const input = sessionContextInput(this.manager, this.sdk.buildSessionProjection,
+      nativeModel(this.session.model) ? "native" : "ordinary");
+    if (!input.sessionManager) return undefined;
+    const projection = projectCanonicalSource(input);
+    const blocking = projection.diagnostics.filter(item => item.severity === "blocking");
+    if (blocking.length) throw new Error(`canonical context is not ready: ${blocking.map(item => item.code).join(", ")}`);
+    return projection.source;
+  }
   projectedMessages() {
+    const source = this.projectedSource();
+    if (source) return source.readAll();
     if (!this.projectContext) return this.manager.buildSessionProjection().messages;
-    const projection = this.projectContext({ entries: this.manager.getEntries(), leafId: this.manager.getLeafId(),
-      buildSessionProjection: this.sdk.buildSessionProjection, mode: nativeModel(this.session.model) ? "native" : "ordinary" });
+    const projection = this.projectContext(sessionContextInput(this.manager, this.sdk.buildSessionProjection,
+      nativeModel(this.session.model) ? "native" : "ordinary"));
     const blocking = projection.diagnostics?.filter(item => item.severity === "blocking") ?? [];
     if (blocking.length) throw new Error(`canonical context is not ready: ${blocking.map(item => item.code).join(", ")}`);
     return projection.messages;
@@ -534,7 +549,10 @@ export class ActorCoordinator {
         // changed the per-run prompt, before taking the matching message snapshot.
       } while (preparedOptions !== this.runPromptOptions);
       this.currentPrompt = prompt?.systemPrompt ?? this.runPrompt;
-      let messages = this.projectedMessages(); messages = await this.runner.emitContext(messages); live();
+      const source = this.projectedSource();
+      const messages = source ? (await this.runner.emitContextSource(source)).readAll()
+        : await this.runner.emitContext(this.projectedMessages());
+      live();
       this.sentRevision = this.revision;
       const tools = this.runner.getAllRegisteredTools().filter(item => this.activeTools.has(item.definition.name)).map(item => item.definition);
       const useNative = nativeModel(this.session.model);
@@ -577,7 +595,8 @@ export class ActorCoordinator {
           const { committed, calls, nativeBatch } = await commitPlan(step.final);
           const final = committed.message;
           if (calls.length && !nativeBatch) await this.toolTail;
-          const tokens = this.core.estimateContextTokens(this.projectedMessages()).tokens;
+          const source = this.projectedSource();
+          const tokens = (source?.estimateContextTokens?.() ?? this.core.estimateContextTokens(source ? source.readAll() : this.projectedMessages())).tokens;
           this.contextUsage = { tokens, contextWindow: this.session.model.contextWindow, percent: tokens / this.session.model.contextWindow * 100 };
           this.naturalStop = final.stopReason === "stop" && !final.content.some(part => part.type === "toolCall");
           this.continueNative = false;
@@ -626,10 +645,10 @@ export class ActorCoordinator {
       // Tool execution owns an admitted, still-pending parent. Its public session
       // view is not a provider request; ordinary replay readiness applies only
       // after the real result exists, not before dispatch can produce it.
-      const messages = this.manager.buildSessionProjection().messages;
-      const issuer = this.manager.getBranch().map(entry => entry.message).findLast(message => message?.role === "assistant"
-        && message.content.some(part => part.type === "toolCall" && part.id === call.id));
-      this.toolDispatch.open(call.id, executionController.signal, issuer, messages);
+      const messageSource = typeof this.manager.buildSessionSource === "function" ? this.manager.buildSessionSource() : undefined;
+      const messages = messageSource ? undefined : this.manager.buildSessionProjection().messages;
+      const issuer = sessionCallIssuer(this.manager, call.id);
+      this.toolDispatch.open(call.id, executionController.signal, issuer, messages, { messageSource });
       try {
         if (executionController.signal.aborted) throw new Error("Tool cancelled before execution; it did not run.");
         if (blockedReason) throw new Error(blockedReason);
@@ -671,7 +690,10 @@ export class ActorCoordinator {
     // fenced, no later turn can consume these originals; canonical clones remain.
     // Release before asynchronous end hooks, including when a hook rejects.
     this.completedResults.length = 0;
-    await this.emit({ type: "agent_end", messages: this.manager.buildSessionProjection().messages });
+    if (this.contextMode === "source" && this.eventMode === "supervised-source") {
+      await this.runner.emitAgentEndSource(this.manager.buildSessionSource());
+      await this.publish({ type: "agent_end" });
+    } else await this.emit({ type: "agent_end", messages: this.manager.buildSessionProjection().messages });
     this.running = false; this.stopping = false;
     await this.emit({ type: "agent_settled" }); this.notifyIdle();
   }
@@ -687,10 +709,10 @@ export class ActorCoordinator {
       const previous = this.controller; const controller = new AbortController(); this.controller = controller;
       try {
         const result = await this.navigationDriver(target, options, { coordinator: this, signal: controller.signal });
-        if (!result.cancelled) { this.recoveryDone = false; this.seenCalls.clear(); this.contextUsage = undefined; this.birthClock.reset(this.manager.getBranch()); }
+        if (!result.cancelled) { this.recoveryDone = false; this.seenCalls.clear(); this.contextUsage = undefined; this.birthClock.sequence = sessionBranchHeaders(this.manager).reduce((n, entry) => Math.max(n, entry.birthSequence), 0); }
         return result;
       } catch (error) {
-        if (error?.committed === true) { this.recoveryDone = false; this.seenCalls.clear(); this.contextUsage = undefined; this.birthClock.reset(this.manager.getBranch()); }
+        if (error?.committed === true) { this.recoveryDone = false; this.seenCalls.clear(); this.contextUsage = undefined; this.birthClock.sequence = sessionBranchHeaders(this.manager).reduce((n, entry) => Math.max(n, entry.birthSequence), 0); }
         throw error;
       } finally { this.controller = previous; }
     });

@@ -1828,3 +1828,19 @@ test("supervisor shares one private compile cache and drains workers and pending
   started.resolve(); await stopping; await Promise.all(pending);
   await assert.rejects(lstat(cache), { code: "ENOENT" });
 });
+
+
+test("full and source-aware worker end events retain the same type-only live and replay surface", async t => {
+  const { client, actor, sessionId } = await activityEventFixture(t, 0);
+  const frames = []; client.on("event", frame => { if (frame.event === "actor_event" && frame.data?.sessionId === sessionId) frames.push(frame.data.event); });
+  await client.request("subscribe_session", { selector: sessionId });
+  actor.emit("event", { type: "agent_start" });
+  actor.emit("event", { type: "agent_end", messages: [{ role: "user", content: "synthetic omitted public payload" }] });
+  actor.emit("event", { type: "agent_end" });
+  await eventually(() => frames.filter(frame => frame.type === "agent_end").length === 2);
+  assert.deepEqual(frames.filter(frame => frame.type === "agent_end"), [{ type: "agent_end" }, { type: "agent_end" }]);
+  const replay = await client.request("subscribe_session", { selector: sessionId });
+  assert.deepEqual(replay.events.filter(frame => frame.event.type === "agent_end").map(frame => frame.event),
+    [{ type: "agent_end" }, { type: "agent_end" }]);
+  assert.doesNotMatch(JSON.stringify(replay.events), /synthetic omitted public payload|messages/);
+});

@@ -9,6 +9,7 @@ import { zstdDecompressSync } from "node:zlib";
 import { pathToFileURL } from "node:url";
 import { HarnessClient } from "../../src/client.mjs";
 import { HarnessSupervisor } from "../../src/supervisor.mjs";
+import { PiSessionActor } from "../../src/session-actor.mjs";
 import { verifyOwnedProcessIdentity } from "../../src/process-ownership.mjs";
 import { sessionSidecarPaths } from "../../src/session-paths.mjs";
 
@@ -66,6 +67,7 @@ function respond(response, id, { calls = [], answer = id, usage = { input_tokens
 }
 
 async function fixture(t, script, { customCompaction = false, nativeAsync = true, modelId = "gpt-6-astra", clmExtension = undefined, retry = undefined } = {}) {
+  const retentionModule = process.env.PI_HARNESS_RETENTION_SDK_MODULE;
   const buildRoot = process.env.PI_HARNESS_NATIVE_ASYNC_BUILD_ROOT;
   const artifacts = process.env.PI_HARNESS_NATIVE_TEST_ARTIFACTS;
   assert(buildRoot, "Set PI_HARNESS_NATIVE_ASYNC_BUILD_ROOT to the explicit immutable stock install root");
@@ -191,7 +193,24 @@ export default function customCompactionFixture(pi) {
   const baseUrl = `http://127.0.0.1:${server.address().port}`;
   process.env.HARNESS_FAKE_NATIVE_BASE_URL = baseUrl;
   const socketPath = path.join(root, "run", "supervisor.sock");
+  // Source-only SDK integration uses the normal worker bootstrap and the same
+  // literal corrected SessionManager for every isolated actor, including reopen.
+  let actorFactory;
+  if (retentionModule) {
+    const driver = path.join(root, "bounded-sdk-worker.mjs");
+    await writeFile(driver, `import { loadExternalPi } from ${JSON.stringify(new URL("../../src/external-pi.mjs", import.meta.url).href)};
+import { runSDKWorkerRpc, bootstrapSDKWorker } from ${JSON.stringify(new URL("../../src/sdk-worker.mjs", import.meta.url).href)};
+import * as candidateSDK from ${JSON.stringify(pathToFileURL(retentionModule).href)};
+const external = await loadExternalPi();
+external.sdk = { ...external.sdk, SessionManager: candidateSDK.SessionManager,
+  ...(${process.env.PI_HARNESS_TEST_SOURCE_SDK === "1"} ? { createAgentSession: candidateSDK.createAgentSession, ExtensionRunner: candidateSDK.ExtensionRunner } : {}) };
+${process.env.PI_HARNESS_TEST_SOURCE_SDK === "1" ? `process.env.PI_PACKAGE_DIR = ${JSON.stringify(process.env.PI_HARNESS_TEST_SDK_PACKAGE_DIR)};` : ""}
+await runSDKWorkerRpc({ bootstrap: options => bootstrapSDKWorker({ ...options, external }) });
+`);
+    actorFactory = config => new PiSessionActor({ ...config, args: [driver, ...config.args.slice(1)] });
+  }
   supervisor = new HarnessSupervisor({ socketPath, databasePath: path.join(root, "state", "harness.sqlite"),
+    ...(actorFactory ? { actorFactory } : {}),
     pidPath: path.join(root, "run", "supervisor.pid"), actorExtensionPaths: [providerPath, ...(customCompaction ? [customExtensionPath] : []), ...(clmExtension ? [clmExtension] : [])], actorInactivityMs: 0 });
   client = new HarnessClient({ socketPath, heartbeatMs: 0, requestTimeoutMs: 30_000 });
   await supervisor.start();
@@ -473,6 +492,15 @@ for (const nativeAsync of [false, true]) test(`${nativeAsync ? "native" : "ordin
     await assert.rejects(access(path.join(f.cwd, "family-held-finished")), /ENOENT/);
     assert(!f.requests.some(body => text(body).includes("HUMAN_AFTER_WORK")), "family checkpoint does not promote human follow-up");
   } else {
+    // Sender settlement proves host acceptance, not receiver queue arrival.
+    const deadline = Date.now() + 30_000;
+    let state;
+    do {
+      state = await f.state();
+      if (state.pendingMessageCount >= 4) break;
+      await new Promise(resolve => setTimeout(resolve, 20));
+    } while (Date.now() < deadline);
+    assert.equal(state.pendingMessageCount, 4, "receiver holds the human follow-up and all three accepted family messages before real completion");
     assert.equal(f.requests.filter(body => text(body).includes("START_FAMILY_CHECKPOINT")).length, 1, "ordinary family delivery retains the real tool barrier");
   }
   f.gate("family-held").release.resolve();
@@ -926,10 +954,11 @@ test("abnormal real child exit wakes its parent with one canonical sanitized rec
   const children = f.supervisor.store.listChildren(f.sessionId);
   assert.equal(children.length, 1);
   const child = children[0];
-  const deadline = Date.now() + 30_000;
-  while (f.supervisor.store.getSession(child.sessionId).activity !== "idle" && Date.now() < deadline) {
-    await new Promise(resolve => setTimeout(resolve, 20));
-  }
+  await f.client.request("subscribe_session", { selector: child.sessionId });
+  await f.log.waitFrame(frame => frame.event === "actor_event" && frame.data.sessionId === child.sessionId
+    && frame.data.event.type === "agent_settled", "child first accepted task actually settled before crash");
+  assert.equal(f.supervisor.store.nextQueuedChildTask(child.sessionId), undefined, "child has no queued first task");
+  assert.equal(f.supervisor.store.submittedChildTask(child.sessionId), undefined, "child first task completion is durable");
   const since = f.log.frames.length;
   await crashActor({ ...f, sessionId: child.sessionId });
   const received = await bounded(wake.promise, "automatic parent wake after real child exit");

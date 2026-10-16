@@ -12,6 +12,22 @@ export function addToolUsage(first, second) {
   return sum;
 }
 
+// A task borrows the canonical plan until all nested calls drain. An explicitly
+// exposed mutable array owns its values independently of that borrowed lifetime.
+function toolMessageView(messages, source) {
+  let owned = messages, borrowed = source;
+  return {
+    read() {
+      if (owned === undefined) {
+        if (!borrowed) throw new Error("Tool session source is no longer borrowed");
+        owned = borrowed.readAll();
+      }
+      return owned;
+    },
+    release() { borrowed = undefined; },
+  };
+}
+
 export class ActorToolDispatch {
   constructor({ runner, sdk, core, activeTools, emit }) {
     Object.assign(this, { runner, sdk, core, activeTools, emit });
@@ -27,9 +43,9 @@ export class ActorToolDispatch {
     }), this.runner);
   }
 
-  open(id, signal, assistantMessage, messages) {
+  open(id, signal, assistantMessage, messages, { messageSource } = {}) {
     if (this.scopes.has(id)) throw new Error("duplicate tool scope");
-    const root = { calls: [], complete: true, argumentBytes: 0, pending: new Set(), usage: undefined, assistantMessage, messages };
+    const root = { calls: [], complete: true, argumentBytes: 0, pending: new Set(), usage: undefined, assistantMessage, messageView: toolMessageView(messages, messageSource) };
     this.scopes.set(id, { root, signal, nextId: 1, accepting: true, holdsQueue: false });
   }
 
@@ -40,6 +56,7 @@ export class ActorToolDispatch {
     scope.accepting = false;
     while (scope.root.pending.size) await Promise.allSettled([...scope.root.pending]);
     this.scopes.delete(id);
+    scope.root.messageView.release();
     const { calls, complete, usage } = scope.root;
     return { ...(calls.length || !complete ? { nestedCalls: { calls, complete } } : {}), ...(usage ? { usage } : {}) };
   }
@@ -79,7 +96,7 @@ export class ActorToolDispatch {
       await this.emit({ type: "tool_execution_start", ...event, args: toolCall.arguments });
       const outcome = await this.core.runToolCall(toolCall, {
         tools: this.callableTools(), assistantMessage: root.assistantMessage,
-        context: { messages: root.messages, tools: this.callableTools() }, signal,
+        context: { get messages() { return root.messageView.read(); }, tools: this.callableTools() }, signal,
         beforeToolCall: ({ args }) => this.runner.emitToolCall({ type: "tool_call", ...event, input: args }),
         afterToolCall: ({ args, result, isError }) => this.runner.emitToolResult({ type: "tool_result", ...event,
           input: args, content: result.content, details: result.details, structuredContent: result.structuredContent,

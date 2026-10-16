@@ -19,7 +19,25 @@ Use one matching installed graph, not an SDK from another Pi installation. Use a
 
 The optional explicit bundled SDK is an upstream-shipped alternate root artifact, not an npm export-map subpath. It exposes the same public named SDK APIs in this version. The resolver pins its entry SHA-256 to `df1f4c36758e3d339d42c6caebb2fca1d9f415de658d56b7b1fa6a9a808f0aa5`. This entry check is not a whole-install integrity guarantee. `dist/index.js` is also supported; set both command and SDK to their adjacent `dist/cli.js` and `dist/index.js` paths for that graph. A command-only or package-directory resolver chooses the normal public main entry, not the bundle implicitly.
 
-No Pi patch, replaced module, private engine method, or custom Pi build is required. The worker hosts the public `ExtensionRunner`, `SessionManager`, and `ModelRuntime` APIs. Pin 0.99.1 rather than assuming later SDK versions preserve these seams.
+Unmodified Pi remains supported through the stateless projection path. The worker
+hosts the public `ExtensionRunner`, `SessionManager`, and `ModelRuntime` APIs.
+Pin 0.99.1 rather than assuming later SDK versions preserve these seams.
+
+Bounded persistent-history retention additionally requires the SDK's supported
+`SessionManagerOptions.entryRetention`, ordered `getEntriesRange`, and independent
+`getRevision()` `{revision, generation}` stamps. Avoiding automatic raw-context
+materialization also requires `buildSessionSource()`, source-mode session/Agent
+state, source-aware `ExtensionRunner` context/end dispatch, and source-aware SDK
+status estimation. These extend Pi's existing public owners; they are not a
+replacement manager or an installed-runtime patch. Stock 0.99.1 remains compatible
+but does not provide these payload bounds.
+
+The harness selects the source path only when the required supported surfaces
+exist. Extensions must opt into source handlers to avoid their own eager array
+boundary; default hooks and explicit full-value APIs remain complete. Packaging,
+installation and activation of a matching corrected SDK are separate from source
+verification. See [Canonical history](ARCHITECTURE.md#canonical-history) and the
+[source integration fixtures](VALIDATION.md).
 
 ## Python and skills
 

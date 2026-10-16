@@ -21,6 +21,7 @@ import { applyRetryBranch, KERNEL_RELOAD_COMMAND } from "./session-actions.mjs";
 import { inputIdForEntry, resolveActorInputAssociation } from "./conversation-projection.mjs";
 import { projectAssistantUsageEntry, projectContextUsage } from "./session-telemetry.mjs";
 import { sanitizeGrokCliProviderPayload } from "./grok-cli-payload.mjs";
+import { sessionEntryHeaders, sessionEntriesMatching, sessionNamespaceHistory } from "./canonical-context.mjs";
 
 const PACKAGE_ROOT = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 const WORKSPACE_SKILLS_PATH = path.resolve(process.env.PI_HARNESS_SKILLS_PATH || path.join(PACKAGE_ROOT, "skills"));
@@ -134,6 +135,19 @@ function sessionEntryIdentity(entry) {
 }
 
 function appendedSessionEntries(entries, cursor = { index: 0, anchor: null }) {
+  if (entries && !Array.isArray(entries) && typeof entries.getEntriesRange === "function") {
+    const headers = sessionEntryHeaders(entries), generation = entries.getRevision().generation;
+    let start = cursor.index;
+    if (cursor.generation !== generation || !Number.isInteger(start) || start < 0 || start > headers.length
+      || (start > 0 && sessionEntryIdentity(headers[start - 1]) !== cursor.anchor)) start = 0;
+    const end = headers.length;
+    function* appended() {
+      for (let index = start; index < end; index++) yield entries.getEntriesRange(index, 1)[0];
+    }
+    return { entries: appended(),
+      cursor: { index: end, anchor: end ? sessionEntryIdentity(headers[end - 1]) : null, generation } };
+  }
+  if (entries && !Array.isArray(entries)) entries = entries.getEntries();
   const source = Array.isArray(entries) ? entries : [];
   let start = cursor.index;
   if (!Number.isInteger(start) || start < 0 || start > source.length
@@ -356,12 +370,12 @@ export function createActorInputDelivery({ pi, getClient, getContext }) {
     enqueued.delete(inputId); return true;
   }
   async function flush() {
-    const scanned = appendedSessionEntries(getContext()?.sessionManager?.getEntries(), cursor);
-    cursor = scanned.cursor;
+    const scanned = appendedSessionEntries(getContext()?.sessionManager, cursor);
     for (const entry of scanned.entries) {
       const inputId = inputIdForEntry(entry);
       if (typeof inputId === "string" && inputId && inputId.length <= 128) pendingReports.add(inputId);
     }
+    cursor = scanned.cursor;
     if (!pendingReports.size) return;
     const receipts = new Map();
     for (const inputId of pendingReports) {
@@ -371,8 +385,9 @@ export function createActorInputDelivery({ pi, getClient, getContext }) {
     }
     // Capture complete historical evidence after receipt awaits, then resolve once per input.
     const groups = new Map();
-    for (const entry of getContext()?.sessionManager?.getEntries() ?? []) {
-      const inputId = inputIdForEntry(entry); if (!receipts.has(inputId)) continue;
+    const manager = getContext()?.sessionManager;
+    for (const entry of manager ? sessionEntriesMatching(manager, header => receipts.has(header.inputId)) : []) {
+      const inputId = inputIdForEntry(entry);
       const entries = groups.get(inputId) ?? []; entries.push(entry); groups.set(inputId, entries);
     }
     for (const [inputId, input] of receipts) {
@@ -390,7 +405,7 @@ export function createActorInputDelivery({ pi, getClient, getContext }) {
     if (!["cron", "background"].includes(input.source)) throw new Error("custom input requires a verified internal source");
     if (input.state === "completed") { enqueued.delete(inputId); return; }
     const payload = actorInputCustomPayload(input);
-    const entries = (ctx.sessionManager.getEntries() ?? []).filter((entry) => inputIdForEntry(entry) === inputId);
+    const entries = sessionEntriesMatching(ctx.sessionManager, header => header.inputId === inputId);
     const association = resolveActorInputAssociation(entries, { sessionId: input.sessionId, inputReceipt: input });
     if (association.state === "unresolved") { pendingReports.add(inputId); return; }
     if (association.state === "proven") {
@@ -415,7 +430,7 @@ export function createActorInputDelivery({ pi, getClient, getContext }) {
       enqueued.clear(); pendingReports.clear();
       // The supervisor reconciles durable pending inputs against full canonical
       // history before submission. This actor reports only subsequent appends.
-      cursor = appendedSessionEntries(entries).cursor;
+      cursor = entries && !Array.isArray(entries) && Number.isInteger(entries.index) ? entries : appendedSessionEntries(entries).cursor;
     },
   };
 }
@@ -481,6 +496,18 @@ export default function persistentHarnessExtension(pi, owner = null) {
       : sessionManager.appendCustomEntry(type, data);
   }
 
+  function historyEntry(sessionManager, customType, key, value, direction) {
+    const seen = new Set();
+    let found;
+    for (const header of sessionEntryHeaders(sessionManager)) {
+      if (header.type !== "custom" || header.customType !== customType
+        || (direction && header.direction !== direction) || typeof header[key] !== "string") continue;
+      if (seen.has(header[key])) throw new Error(`duplicate ${customType === CHILD_CREATION_ENTRY_TYPE ? "child creation" : direction === "to" ? "outgoing agent message" : "incoming agent message"} entry: ${header[key]}`);
+      seen.add(header[key]); if (header[key] === value) found = header.id;
+    }
+    return found ? sessionManager.getEntry(found) : undefined;
+  }
+
   async function ensureOutgoingAgentMessage(message) {
     const sessionManager = activeContext?.sessionManager;
     if (!sessionManager || sessionManager.getSessionId() !== ACTOR_ID || !client?.isConnected) {
@@ -488,7 +515,7 @@ export default function persistentHarnessExtension(pi, owner = null) {
     }
     const expected = { messageId: message.messageId, direction: "to", peerId: message.targetId,
       peerName: message.targetName ?? message.targetShortId, relationship: message.relationship, body: message.body };
-    let entry = outgoingAgentMessageEntries(sessionManager.getEntries()).get(message.messageId);
+    let entry = historyEntry(sessionManager, AGENT_MESSAGE_ENTRY_TYPE, "messageId", message.messageId, "to");
     if (entry) {
       for (const key of ["messageId", "direction", "peerId", "relationship", "body"]) {
         if (entry.data?.[key] !== expected[key]) throw new Error("outgoing agent message entry conflicts with its durable reservation");
@@ -515,7 +542,7 @@ export default function persistentHarnessExtension(pi, owner = null) {
     }
     const expected = { messageId: message.messageId, direction: "from", peerId: message.senderId,
       peerName: message.senderName ?? message.senderShortId, relationship: message.relationship, body: message.body };
-    let entry = incomingAgentMessageEntries(sessionManager.getEntries()).get(message.messageId);
+    let entry = historyEntry(sessionManager, AGENT_MESSAGE_ENTRY_TYPE, "messageId", message.messageId, "from");
     if (entry) {
       for (const key of ["messageId", "direction", "peerId", "relationship", "body"]) {
         if (entry.data?.[key] !== expected[key]) throw new Error("incoming agent message entry conflicts with its durable reservation");
@@ -545,7 +572,7 @@ export default function persistentHarnessExtension(pi, owner = null) {
     }
     const expected = { taskId: message.taskId, childId: message.childId, childName: message.childName,
       relationship: "child", body: message.body };
-    let entry = childCreationEntries(sessionManager.getEntries()).get(message.childId);
+    let entry = historyEntry(sessionManager, CHILD_CREATION_ENTRY_TYPE, "childId", message.childId);
     if (entry) {
       for (const key of ["taskId", "childId", "childName", "relationship", "body"]) {
         if (entry.data?.[key] !== expected[key]) throw new Error("child creation entry conflicts with its durable task");
@@ -716,7 +743,7 @@ ${catalog.diagnostics.map((item) => item.error).join("\n")}`);
     if (!resultEvent && kernel?.isRunning && namespaceRecovery?.kernel === kernel) {
       return namespaceRecoveryText(namespaceRecovery.report);
     }
-    const entries = ctx.sessionManager.getBranch();
+    const entries = sessionNamespaceHistory(ctx.sessionManager);
     if (!nativeAsyncEnabled(ctx.model) && !hasNativeNamespaceHistory(entries)) return "";
     const source = resultEvent ? [...entries, { type: "message", message: {
       role: "toolResult", toolName: resultEvent.toolName, toolCallId: resultEvent.toolCallId, details: resultEvent.details,
@@ -788,8 +815,7 @@ ${catalog.diagnostics.map((item) => item.error).join("\n")}`);
 
   function collectNewSettlementEntries() {
     if (!activeContext) return;
-    const scanned = appendedSessionEntries(activeContext.sessionManager.getEntries(), settlementEntryCursor);
-    settlementEntryCursor = scanned.cursor;
+    const scanned = appendedSessionEntries(activeContext.sessionManager, settlementEntryCursor);
     for (const entry of scanned.entries) {
       if (entry?.type === "custom_message" && entry.customType === INCOMING_MESSAGE_TYPE
         && typeof entry.details?.messageId === "string") {
@@ -801,6 +827,7 @@ ${catalog.diagnostics.map((item) => item.error).join("\n")}`);
       const usage = usageFromMessageEntry(entry);
       if (usage && !knownUsageEntryIds.has(usage.entryId)) pendingUsageEntries.set(usage.entryId, usage);
     }
+    settlementEntryCursor = scanned.cursor;
     for (const entryId of knownUsageEntryIds) pendingUsageEntries.delete(entryId);
   }
 
@@ -1028,18 +1055,22 @@ ${catalog.diagnostics.map((item) => item.error).join("\n")}`);
     activeContext = ctx;
     registerPythonTool(ctx.model);
     enforceHarnessTools(ctx.model);
-    const entries = ctx.sessionManager.getEntries();
-    actorInputs.reset(entries);
-    knownDeliveredIds = deliveredMessageIds(entries);
+    const manager = ctx.sessionManager, headers = sessionEntryHeaders(manager);
+    knownDeliveredIds = new Set(headers.filter(header => header.type === "custom_message"
+      && header.customType === INCOMING_MESSAGE_TYPE && typeof header.messageId === "string").map(header => header.messageId));
     persistedDeliveredIds = new Set(knownDeliveredIds);
-    knownUsageEntryIds = recordedUsageEntryIds(entries);
+    knownUsageEntryIds = new Set(headers.filter(header => header.type === "custom" && header.customType === USAGE_ENTRY_TYPE
+      && typeof header.entryId === "string").map(header => header.entryId));
     pendingUsageEntries = new Map();
-    const initialScan = appendedSessionEntries(entries);
-    settlementEntryCursor = initialScan.cursor;
-    for (const entry of initialScan.entries) {
-      const usage = usageFromMessageEntry(entry);
-      if (usage && !knownUsageEntryIds.has(usage.entryId)) pendingUsageEntries.set(usage.entryId, usage);
+    for (const header of headers) {
+      if (header.type !== "message" || header.role !== "assistant" || knownUsageEntryIds.has(header.id)) continue;
+      const usage = usageFromMessageEntry(manager.getEntry(header.id));
+      if (usage) pendingUsageEntries.set(usage.entryId, usage);
     }
+    const cursor = { index: headers.length, anchor: headers.length ? sessionEntryIdentity(headers.at(-1)) : null,
+      ...(typeof manager.getRevision === "function" ? { generation: manager.getRevision().generation } : {}) };
+    actorInputs.reset(cursor);
+    settlementEntryCursor = cursor;
     pendingAcknowledgements = new Set();
     deliveryChain = Promise.resolve();
     outgoingHistoryTail = Promise.resolve();
@@ -1176,6 +1207,7 @@ ${catalog.diagnostics.map((item) => item.error).join("\n")}`);
   });
 
   pi.on("context", () => actorInputs.flush());
+  pi.on("context_source", () => actorInputs.flush());
 
   pi.on("message_start", async (event) => {
     // Earlier message_end events have persisted before this assistant event.

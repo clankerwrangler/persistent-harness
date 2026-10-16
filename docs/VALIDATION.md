@@ -21,6 +21,42 @@ npm run test:native
 
 Set `PI_HARNESS_TEST_CLM_EXTENSION` to a separately maintained candidate CLM `index.ts` to include the direct-mirror integration: inference during a paused Python writer, canonical acceptance, and reopen. Without that optional checkout, this one cross-project test is skipped.
 
+For bounded-history SDK integration, set `PI_HARNESS_RETENTION_SDK_MODULE` to a
+source-test artifact or SDK entry exporting the corrected literal `SessionManager`.
+For the complete source-mode path, also set `PI_HARNESS_TEST_SOURCE_SDK=1` and
+`PI_HARNESS_TEST_SDK_PACKAGE_DIR` to that coding-agent package's asset directory;
+the artifact must export its matching `createAgentSession` and `ExtensionRunner`.
+Worker/native fixtures use those three corrected public owners while keeping the
+verified stock public providers/helpers. Installed files remain unchanged. With
+no override the fixtures exercise stock compatibility.
+
+`canonical-retention.test.mjs` checks source-generation invalidation, producing
+selection, append cursors, compact namespace/native facts, complete ordered range
+validation and explicit history. Canonical differential fixtures retain native,
+signature, alias, edit, getter/rejection and failure assertions. Actual source-mode
+worker checks cover mutable public Agent arrays, source/legacy hooks, direct/full
+versus supervised/type-only end events, and SDK status plus automatic threshold
+checks without a veto after append/edit/reload. Tool fixtures cover unread source
+lifetime through nested drain and independent exposed-array ownership.
+
+A separately selected source-aware context editor is tested through the actual
+SDK/H/extension request path with accepted shortening and no stock compaction:
+warm requests do not read the archived omitted entry, while full history and
+all 16 captured drafts remain available. Its own tests cover exact captured values
+after same-path overwrite, source expiration, checkpoint recovery, file ownership,
+exclusive-create collisions, failed capture and final-owner cleanup. Legacy eager
+array hooks remain explicit compatibility boundaries, not evidence of a source-only
+bound. Optional cross-project fixtures do not install that dependency.
+
+The isolated synthetic comparison measures both entry-count and payload-size
+axes for stock compaction, context-edit omission/nonproduction/small replacement,
+and source-aware extension shortening with 16 retained views. Record retained heap,
+external/array-buffer bytes, RSS, payload hydration and compact metadata separately;
+endpoint heap deltas are not total allocated bytes. Supplementary SDK system-replay
+fixtures keep the effective prompt fixed while superseded system sections or an
+unrelated compaction summary grow. Cold payload bounds do not imply total RAM is
+independent of entry count, pending work, explicit full APIs, or legacy consumers.
+
 This suite uses synthetic loopback Responses transport and real Python. It covers early results and save ordering, FIFO, cancellation, wait barriers, actor/kernel loss, no-replay recovery, family wake, default compaction and public compaction hooks, source-order admission, encrypted reasoning amendments, and safe inference-only retry.
 
 Compaction regressions hold a summary while an authenticated family message arrives, require the canonical snapshot to remain unchanged, and then verify one summary, one delivery, acknowledgement, and resumed inference. Coordinator checks cover queued bookkeeping after success, failure, and cancellation, plus a durable automatic-compaction error and recovery on later input. Cancellation checks distinguish manual callback rejection, threshold continuation without a loop, and overflow termination with the original provider failure and no retry. Public stock-runner tests cover structured and forced prompt chains, final observer ordering, first and subsequent requests, fresh resources, idle tool metadata, and input delivered during owner preparation.
@@ -144,7 +180,10 @@ replay. Legacy pending/completed receipts keep their original identity/digest.
 
 `SettledWakeOrdering` checks both mutation orderings: a wake registered before Stop
 is joined, and a later settled callback cannot reenter readiness after Stop.
-Registration leaves the mutation queue before readiness waits. The existing
+Registration leaves the mutation queue before readiness waits. Automatic empty
+exited-child intent is revalidated at the actual start boundary after asynchronous
+skill reconciliation; a fresh pending input still wakes it. Both stop_session and
+the family stop_child route cancel and join earlier readiness ownership. The existing
 `supervisor-settled-stop.test.mjs` cases also verify that a real stopped writer
 cannot append and that only explicit later activation revives it.
 
@@ -196,3 +235,14 @@ segment sampling and byte decoding; `event-log-reader.test.mjs` checks rotated
 order, pinned inodes, missing segments, UTF-8 boundaries, large records, short
 reads, concurrent truncation, descriptor cleanup, and suffix-only I/O. A log read
 remains a best-effort observation of two segments, not an atomic rotation snapshot.
+
+`CanonicalContextRetention` complements `CanonicalContext` and
+`CanonicalContextBudget`: revision/generation ownership, leaf changes,
+compaction-pruned native/alias/signature facts, and working-payload scope.
+`BadLeaf`, `BadColdFacts`, `BadGeneration`, `BadSourceHydration` and stale-profile
+controls must fail their distinct invariants. Source materialization also retains
+the captured effective process-wide budget. The SDK's `SessionEntryRetention` separately checks cache ownership,
+committed snapshots, pending sole copies, source reload and ordered range extent
+(including duplicate-ID tails); its alias and range-extent controls must fail. These finite models abstract JSONL byte decoding, JavaScript aliases
+and actual allocations. SDK UTF-8/value tests, differential projections and
+synthetic retained-memory measurements cover those boundaries.
