@@ -8,6 +8,7 @@ import test, { after } from "node:test";
 import { execFileSync } from "node:child_process";
 import {
   CANONICAL_CONTEXT_LIMITS, CanonicalContextError, THINKING_SIGNATURE_CUSTOM_TYPE,
+  ORDINARY_NON_ADMISSION_CUSTOM_TYPE, createOrdinaryNonAdmissionWitness,
   THINKING_SIGNATURE_VERSION, projectCanonicalContext, projectCanonicalSource, projectCanonicalBranch, planUnknownRecovery, registerCanonicalSessionManager,
 } from "../src/canonical-context.mjs";
 
@@ -1283,4 +1284,141 @@ test("source plans reject altered ordered metadata and full-value native/envelop
   ]) assert.throws(() => managedProject(entries, "native", "e1", source => ({ ...source, read(index) {
     const message = source.read(index); if (index === 0) mutate(message); return message;
   } })), error => ["ERR_CONTEXT_SOURCE_PROJECTION", "ERR_CONTEXT_CALL_PROJECTION"].includes(error.code));
+});
+
+// Synthetic writer-owned marker. Request/attempt IDs are correlation, not a
+// capability to turn arbitrary historical or provider text into admission proof.
+function ownedFailedSuffix() {
+  const entries = ordinaryFailedSuffix();
+  delete entries[1].message.diagnostics;
+  entries[1].message.errorMessage = "unclassified failure";
+  return entries;
+}
+function appendOwnedWitness(entries) {
+  const target = entries[1];
+  const witness = { type: "custom", id: "non-admission", parentId: target.id, timestamp,
+    customType: ORDINARY_NON_ADMISSION_CUSTOM_TYPE,
+    data: createOrdinaryNonAdmissionWitness(target, { requestId: "owned-request", attemptId: "owned-attempt" }) };
+  entries[2].parentId = witness.id;
+  entries.splice(2, 0, witness);
+  return witness;
+}
+
+test("owned failed ordinary witness omits exact partial/complete calls, never raw history or genuine results", () => {
+  for (const stopReason of ["error", "aborted"]) for (const id of ["plain-call", "call_ordinary|fc_ordinary"])
+    for (const code of ["print(f\"partial", "print('complete')"]) {
+      const entries = ownedFailedSuffix(), failed = entries[1].message;
+      failed.stopReason = stopReason; failed.content[2].id = id; failed.content[2].arguments.code = code;
+      // The owned planner contract is provider-independent, unlike old transport diagnostics.
+      failed.api = "fixture-api"; failed.provider = "fixture-provider";
+      const witness = appendOwnedWitness(entries), before = structuredClone(entries);
+      assert.deepEqual(witness.data.calls.map(c => [c.contentIndex, c.toolCallId, c.toolName]), [[2, id, "python"]]);
+      for (const mode of ["ordinary", "native"]) {
+        const view = project(entries, mode);
+        assert.deepEqual(view.messages, [entries[0].message, { ...failed, content: failed.content.slice(0, 2) }, entries[3].message]);
+        assert.deepEqual(view.diagnostics.map(d => d.code), ["UNADMITTED_CALL_OMITTED"]);
+        assert.deepEqual(view.outstanding, []); assert.equal(synthetic(view.messages).length, 0);
+        assert.deepEqual(planUnknownRecovery({ ...input(entries, mode), timestamp: 5 }), []);
+      }
+      assert.deepEqual(entries, before);
+      assert(project(entries, "ordinary", "e1").diagnostics.some(d => d.code === "ORDINARY_ASSISTANT_NOT_REPLAYABLE"));
+    }
+});
+
+test("owned witness requires complete exact schema, target, direct child, and call fingerprints", () => {
+  for (const mutate of [
+    w => { w.customType += ":unknown"; }, w => { w.data.version = 2; }, w => { w.data = null; },
+    w => { w.data.extra = true; }, w => { delete w.data.calls; }, w => { w.data.calls = {}; },
+    w => { w.data.messageEntryId = "foreign-entry"; }, w => { w.data.messageId = "foreign-message"; },
+    w => { w.data.requestId = ""; }, w => { w.data.attemptId = null; },
+    w => { w.data.calls = []; }, w => { w.data.calls.push(structuredClone(w.data.calls[0])); },
+    w => { w.data.calls[0].contentIndex = 1; }, w => { w.data.calls[0].toolCallId = "foreign-call"; },
+    w => { w.data.calls[0].toolName = "foreign-tool"; }, w => { w.data.calls[0].callDigest = "0".repeat(64); },
+    w => { w.data.calls[0].extra = true; },
+  ]) {
+    const entries = ownedFailedSuffix(), w = appendOwnedWitness(entries); mutate(w);
+    const view = project(entries, "ordinary");
+    assert(view.diagnostics.some(d => d.code === "ORDINARY_ASSISTANT_NOT_REPLAYABLE"));
+    assert(!view.diagnostics.some(d => d.code === "UNADMITTED_CALL_OMITTED"));
+  }
+  const entries = ownedFailedSuffix(); appendOwnedWitness(entries);
+  const late = structuredClone(entries); late[2].parentId = "e2"; late[3].parentId = "e1";
+  assert(project(late, "ordinary", "non-admission").diagnostics.some(d => d.severity === "blocking"));
+  const foreign = ownedFailedSuffix(); foreign[1].message.id = "other-attempt-message";
+  const copied = appendOwnedWitness(foreign); copied.data = structuredClone(entries[2].data);
+  assert(project(foreign, "ordinary").diagnostics.some(d => d.severity === "blocking"));
+  assert(project(ownedFailedSuffix(), "ordinary").diagnostics.some(d => d.severity === "blocking"), "historical missing proof stays blocked");
+});
+
+test("owned witness cannot bless native, successful, changed or partially witnessed messages", () => {
+  for (const mutate of [
+    m => { m.stopReason = "stop"; }, m => { m.stopReason = "toolUse"; }, m => { m.stopReason = "length"; },
+    m => { m.nativeTransport = undefined; }, m => { m.nativeProviderError = null; },
+    m => { m.content[2].async = true; }, m => { m.content[2].nativeProvenance = undefined; },
+    m => { m.content[2].providerCallId = "call_ordinary"; }, m => { m.content[2].providerItemId = "fc_ordinary"; },
+    m => { m.content[2].arguments.code = "changed"; }, m => { m.content[2].opaque = { changed: true }; },
+    m => { m.content.push({ type: "toolCall", id: "other-call", name: "python", arguments: {} }); },
+  ]) {
+    const entries = ownedFailedSuffix(); appendOwnedWitness(entries); mutate(entries[1].message);
+    const view = project(entries, "ordinary");
+    assert(!view.diagnostics.some(d => d.code === "UNADMITTED_CALL_OMITTED"));
+    assert(view.diagnostics.some(d => d.severity === "blocking"));
+  }
+});
+
+test("owned proof retains full-branch alias/result/native-observation vetoes across compaction and edits", () => {
+  for (const conflict of [result("call_ordinary|fc_ordinary"), result("call_ordinary"), result("fc_ordinary"),
+    assistant("collision", [{ type: "toolCall", id: "call_ordinary|other", name: "python", arguments: {} }]),
+    { ...assistant("peer", []), stopReason: "error", nativeTransport: { attempts: [{
+      observedCalls: [{ callId: "call_ordinary", itemId: "fc_ordinary", complete: false, native: false }] }] } }]) {
+    const entries = ownedFailedSuffix(); appendOwnedWitness(entries);
+    entries.push(messageEntry("peer", "e2", conflict));
+    assert(project(entries, "ordinary").diagnostics.some(d => d.code === "ORDINARY_ASSISTANT_NOT_REPLAYABLE"));
+    assert(!project(entries, "ordinary", "e2").diagnostics.some(d => d.severity === "blocking"), "sibling conflicts cannot veto");
+    if (conflict.toolCallId !== "call_ordinary|fc_ordinary") {
+      const reordered = [messageEntry("peer", null, conflict), ...entries.slice(0, -1).map((e, i) => i ? e : { ...e, parentId: "peer" })];
+      reordered.push({ type: "compaction", id: "compact-owned", parentId: "e2", timestamp,
+        summary: "fixture", tokensBefore: 10, firstKeptEntryId: "e1" });
+      assert(project(reordered, "ordinary").diagnostics.some(d => d.code === "ORDINARY_ASSISTANT_NOT_REPLAYABLE"));
+    } else {
+      entries.push({ type: "context_edit", id: "omit-result-owned", parentId: "peer", timestamp, targetId: "peer", replacement: null });
+      assert(project(entries, "ordinary").diagnostics.some(d => d.code === "RESULT_PRUNED"));
+    }
+  }
+  const entries = ownedFailedSuffix(); appendOwnedWitness(entries);
+  entries.push({ type: "context_edit", id: "edit-owned", parentId: "e2", timestamp, targetId: "e1",
+    replacement: { content: [{ type: "text", text: "edited noncall" }, entries[1].message.content[2]] } });
+  assert.deepEqual(project(entries, "ordinary").messages[1].content, [{ type: "text", text: "edited noncall" }]);
+  const signed = ownedFailedSuffix(); appendOwnedWitness(signed);
+  signed[1].message.content[0].thinkingSignature = JSON.stringify({ type: "reasoning", id: "rs" });
+  signed.push(amendment(signed[1], "owned-signature", "e2"));
+  assert.equal(JSON.parse(project(signed, "ordinary").messages[1].content[0].thinkingSignature).encrypted_content, "fixture-encryption");
+});
+
+test("owned omission checks every indexed full/component alias, including multi-component and opaque IDs", () => {
+  for (const id of ["opaque-call", "call_left|fc_mid", "call_left|fc_mid|extra", "call_left||extra"]) {
+    const aliases = [...new Set([id, ...id.split("|")].filter(Boolean))];
+    for (const alias of aliases) for (const kind of ["result", "call", "observation"]) {
+      const entries = ownedFailedSuffix(); entries[1].message.content[2].id = id; appendOwnedWitness(entries);
+      const conflict = kind === "result" ? result(alias) : kind === "call"
+        ? assistant("alias-peer", [{ type: "toolCall", id: `${alias}|peer`, name: "python", arguments: {} }])
+        : { ...assistant("observation-peer", []), stopReason: "error", nativeTransport: {
+          observedCalls: [{ callId: alias, itemId: "peer-item", complete: true, native: true }] } };
+      const peer = messageEntry("alias-conflict", "e2", conflict), before = structuredClone(entries);
+      const view = project([...entries, peer], "ordinary");
+      assert(view.diagnostics.some(d => d.code === "ORDINARY_ASSISTANT_NOT_REPLAYABLE"), `${id}/${alias}/${kind}`);
+      assert(!view.diagnostics.some(d => d.code === "UNADMITTED_CALL_OMITTED"));
+      assert(!project([...entries, peer], "ordinary", "e2").diagnostics.some(d => d.severity === "blocking"));
+      assert.deepEqual(entries, before);
+      if (!(kind === "result" && alias === id)) {
+        const reordered = [messageEntry("alias-conflict", null, conflict), ...entries.map((e, i) => i ? e : { ...e, parentId: "alias-conflict" })];
+        reordered.push({ type: "compaction", id: "compact-alias", parentId: "e2", timestamp,
+          summary: "fixture", tokensBefore: 10, firstKeptEntryId: "e1" });
+        assert(project(reordered, "ordinary").diagnostics.some(d => d.code === "ORDINARY_ASSISTANT_NOT_REPLAYABLE"));
+      }
+    }
+    // An owned opaque identity still works without contrary evidence.
+    const entries = ownedFailedSuffix(); entries[1].message.content[2].id = id; appendOwnedWitness(entries);
+    assert.deepEqual(project(entries, "ordinary").diagnostics.map(d => d.code), ["UNADMITTED_CALL_OMITTED"]);
+  }
 });

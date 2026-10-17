@@ -6,6 +6,8 @@ import { inputIdForEntry } from "./conversation-projection.mjs";
 /** appendCustomEntry(THINKING_SIGNATURE_CUSTOM_TYPE, data). No message append. */
 export const THINKING_SIGNATURE_CUSTOM_TYPE = "persistent-harness:assistant-thinking-signature:v1";
 export const THINKING_SIGNATURE_VERSION = 1;
+/** Sole-writer evidence from an acknowledged failed ordinary commit, not tool results. */
+export const ORDINARY_NON_ADMISSION_CUSTOM_TYPE = "persistent-harness:ordinary-non-admission:v1";
 export const CANONICAL_CONTEXT_LIMITS = Object.freeze({
   entries: 100_000,
   nodes: 2_000_000,
@@ -402,6 +404,54 @@ function ordinaryFailedTerminal(message) {
         : ["auto", "websocket"].includes(item.details.configuredTransport)));
 }
 
+// Only the coordinator's current, acknowledged ordinary failed plan may produce
+// this record. Its IDs correlate that owned commit; their spelling is not proof
+// of ownership. A crash before the direct-child append deliberately fails closed.
+function ordinaryNonNativeFailure(message) {
+  return message.role === "assistant" && identifier(message.id)
+    && [message.api, message.provider, message.model].every(identifier)
+    && ["error", "aborted"].includes(message.stopReason)
+    && !Object.hasOwn(message, "nativeTransport") && !Object.hasOwn(message, "nativeProviderError")
+    && Array.isArray(message.content) && message.content.every(call => call.type !== "toolCall"
+      || (call.async !== true && !["nativeProvenance", "providerCallId", "providerItemId"].some(key => Object.hasOwn(call, key))));
+}
+
+function nonAdmissionCalls(info) {
+  return info?.ordinaryNonNativeFailure && info.valid && info.calls.length > 0
+    && info.calls.every(call => call.valid) && new Set(info.calls.map(call => call.id)).size === info.calls.length
+    ? info.calls.map(call => ({ contentIndex: call.contentIndex, toolCallId: call.id,
+      toolName: call.name, callDigest: call.digest })) : null;
+}
+
+export function createOrdinaryNonAdmissionWitness(entry, { requestId, attemptId }) {
+  if (entry?.type !== "message" || !isRecord(entry.message) || !identifier(entry.id) || !identifier(requestId) || !identifier(attemptId)) return null;
+  const info = messageFacts(entry.message), calls = nonAdmissionCalls(info);
+  return calls ? { version: 1, messageEntryId: entry.id, messageId: info.id, requestId, attemptId, calls } : null;
+}
+
+function witnessedNonAdmission(entry, target) {
+  const data = entry.data;
+  if (entry.type !== "custom" || entry.customType !== ORDINARY_NON_ADMISSION_CUSTOM_TYPE
+    || !isRecord(data) || data.version !== 1 || !identifier(data.requestId) || !identifier(data.attemptId)
+    || entry.parentId !== target?.id || data.messageEntryId !== target.id || data.messageId !== target.message?.id
+    || !isDeepStrictEqual(Object.keys(data).sort(), ["version", "messageEntryId", "messageId", "requestId", "attemptId", "calls"].sort())) return [];
+  const calls = nonAdmissionCalls(target.message);
+  return calls && isDeepStrictEqual(data.calls, calls) ? calls.map(call => call.toolCallId) : [];
+}
+
+function ownedNonAdmissions(selected) {
+  const prior = new Map(), witnessed = new Set();
+  for (const entry of selected) {
+    if (entry.type === "custom" && entry.customType === ORDINARY_NON_ADMISSION_CUSTOM_TYPE) {
+      const target = prior.get(entry.parentId);
+      const header = target?.type === "message" ? { id: target.id, message: messageFacts(target.message) } : undefined;
+      for (const id of witnessedNonAdmission(entry, header)) witnessed.add(id);
+    }
+    prior.set(entry.id, entry);
+  }
+  return witnessed;
+}
+
 function omissionAliases(canonical, selected) {
   // Index the FULL selected branch, including calls/results before a compaction
   // cut. Even an orphan result with a plain provider call ID vetoes exclusion.
@@ -438,19 +488,27 @@ function omissionAliases(canonical, selected) {
   return { aliases, observedAliases };
 }
 
+function omissionCallAliases(id, tuple, owned) {
+  // Match the full-branch index even for opaque or multi-component owned IDs.
+  // Legacy transport evidence still requires its original provider tuple.
+  return owned ? [...new Set([id, ...id.split("|")].filter(identifier))] : tuple;
+}
+
 function omitUnadmittedCalls(messages, canonical, selected, diagnostics, aliasFacts) {
   const { aliases, observedAliases } = aliasFacts ?? omissionAliases(canonical, selected);
+  const nonAdmissions = aliasFacts?.nonAdmissions ?? ownedNonAdmissions(selected);
   const proof = new Map();
   for (const message of messages) {
     if (message.role !== "assistant" || !["error", "aborted"].includes(message.stopReason)) continue;
     message.content = message.content.filter(call => {
       if (call.type !== "toolCall" || call.async === true || Object.hasOwn(call, "nativeProvenance")) return true;
       const tuple = providerTuple(call), record = canonical.calls.get(call.id);
-      if (!tuple || tuple.some(alias => aliases.get(alias)?.size !== 1
+      const owned = nonAdmissions.has(call.id), callAliases = omissionCallAliases(call.id, tuple, owned);
+      if (!callAliases || callAliases.some(alias => aliases.get(alias)?.size !== 1
         || (observedAliases.has(alias) && (observedAliases.get(alias).size !== 1 || !observedAliases.get(alias).has(call.id))))
         || canonical.results.has(call.id)) return true;
-      const ordinary = ordinaryFailedTerminal(record.message)
-        && tuple.every(alias => !observedAliases.has(alias));
+      const ordinary = (owned || ordinaryFailedTerminal(record.message))
+        && callAliases.every(alias => !observedAliases.has(alias));
       if (!ordinary) {
         if (!proof.has(record.message)) proof.set(record.message, incompleteObservations(record.message.nativeTransport));
         if (!proof.get(record.message).has(call.id)) return true;
@@ -664,13 +722,13 @@ function contentFacts(content, replacement = false) {
   const blocks = typeof content === "string" ? [{ type: "text", text: content }] : content;
   const valid = Array.isArray(blocks) && blocks.length <= CANONICAL_CONTEXT_LIMITS.contentBlocks
     && blocks.every(block => isRecord(block) && identifier(block.type));
-  return { valid, ...(replacement ? { digest: valueDigest(content), blockDigest: valueDigest(blocks) } : {}), calls: valid ? blocks.filter(block => block.type === "toolCall").map(call => ({
-    id: identifier(call.id) ? call.id : undefined, name: identifier(call.name) ? call.name : undefined,
+  return { valid, ...(replacement ? { digest: valueDigest(content), blockDigest: valueDigest(blocks) } : {}), calls: valid ? blocks.flatMap((call, contentIndex) => call.type !== "toolCall" ? [] : [{
+    contentIndex, id: identifier(call.id) ? call.id : undefined, name: identifier(call.name) ? call.name : undefined,
     async: typeof call.async === "boolean" ? call.async : undefined, digest: valueDigest(call),
     valid: identifier(call.id) && identifier(call.name) && isRecord(call.arguments)
       && (call.async === undefined || typeof call.async === "boolean"),
     nativeProvenance: Object.hasOwn(call, "nativeProvenance"), tuple: identifier(call.id) ? providerTuple(call) : null,
-  })) : [] };
+  }]) : [] };
 }
 function finalizedInputMessage(message) {
   return message.content == null && ["system", "user"].includes(message.role)
@@ -679,7 +737,9 @@ function finalizedInputMessage(message) {
 function messageFacts(message) {
   const { content, ...envelope } = message;
   const incomplete = message.role === "assistant" ? incompleteObservations(message.nativeTransport) : new Set();
-  return { digest: valueDigest(finalizedInputMessage(message)), envelopeDigest: valueDigest(envelope), role: typeof message.role === "string" ? message.role : undefined,
+  return { id: identifier(message.id) ? message.id : undefined,
+    ordinaryNonNativeFailure: ordinaryNonNativeFailure(message),
+    digest: valueDigest(finalizedInputMessage(message)), envelopeDigest: valueDigest(envelope), role: typeof message.role === "string" ? message.role : undefined,
     stopReason: typeof message.stopReason === "string" ? message.stopReason : undefined,
     toolCallId: identifier(message.toolCallId) ? message.toolCallId : undefined,
     toolName: identifier(message.toolName) ? message.toolName : undefined,
@@ -744,6 +804,10 @@ function addSelectedFacts(manager, state, facts, header, order, estimateContextT
     previous.set(data.contentIndex, entry.id);
     facts.signatureBlocks.set(targetId, previous);
     facts.signatures.set(targetId, [...previous.values()]);
+  }
+  if (entry.type === "custom" && entry.customType === ORDINARY_NON_ADMISSION_CUSTOM_TYPE
+    && facts.positions.has(entry.parentId)) {
+    for (const id of witnessedNonAdmission(entry, state.byId.get(entry.parentId))) facts.nonAdmissions.add(id);
   }
   if (entry.type === "message") {
     const indexed = indexMessages([{ message: entry.message, entryId: entry.id }]);
@@ -813,7 +877,7 @@ function managedState(manager, factsRequired = true) {
     requireThat(header.validCompaction && kept >= 0 && kept <= checkpoint, "ERR_CONTEXT_COMPACTION");
   }
   const facts = extendsBranch ? state.facts : { calls: new Map(), results: new Map(), aliases: new Map(),
-    observedAliases: new Map(), signatures: new Map(), signatureBlocks: new Map(), signatureDiagnostics: [], positions: new Map() };
+    observedAliases: new Map(), nonAdmissions: new Set(), signatures: new Map(), signatureBlocks: new Map(), signatureDiagnostics: [], positions: new Map() };
   for (let i = selectedStart; i < selected.length; i++) addSelectedFacts(manager, state, facts, selected[i], i, owner.estimateContextTokens);
   state.selected = selected; state.facts = facts; state.stamp = { ...stamp }; state.factCount = count; state.leaf = leaf;
   owner.state = state;
@@ -957,11 +1021,12 @@ function projectManagedSource(manager, mode, stringCodeUnits) {
     }
     const omitted = [];
     if (role === "assistant" && ["error", "aborted"].includes(info.stopReason)) for (const call of calls) {
-      if (call.async === true || call.nativeProvenance || !call.tuple) continue;
-      if (call.tuple.some(alias => facts.aliases.get(alias)?.size !== 1
+      const owned = facts.nonAdmissions.has(call.id), callAliases = omissionCallAliases(call.id, call.tuple, owned);
+      if (call.async === true || call.nativeProvenance || !callAliases) continue;
+      if (callAliases.some(alias => facts.aliases.get(alias)?.size !== 1
         || (facts.observedAliases.has(alias) && (facts.observedAliases.get(alias).size !== 1 || !facts.observedAliases.get(alias).has(call.id))))
         || facts.results.has(call.id)) continue;
-      const ordinary = info.ordinaryFailed && call.tuple.every(alias => !facts.observedAliases.has(alias));
+      const ordinary = (owned || info.ordinaryFailed) && callAliases.every(alias => !facts.observedAliases.has(alias));
       if (!ordinary && !info.incomplete.includes(call.id)) continue;
       omitted.push(call.id); retainedCalls.delete(call.id);
       diagnostics.push({ code: "UNADMITTED_CALL_OMITTED", severity: "info", ...identity(facts.calls.get(call.id), true) });

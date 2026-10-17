@@ -4,7 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { pathToFileURL } from "node:url";
-import { projectCanonicalContext, projectCanonicalSource, refreshCanonicalSessionContext, planUnknownRecovery, registerCanonicalSessionManager, sessionContextInput,
+import { ORDINARY_NON_ADMISSION_CUSTOM_TYPE, createOrdinaryNonAdmissionWitness, projectCanonicalContext, projectCanonicalSource, refreshCanonicalSessionContext, planUnknownRecovery, registerCanonicalSessionManager, sessionContextInput,
   sessionEntryHeaders, sessionBranchHeaders, sessionCallIssuer, sessionNamespaceHistory } from "../src/canonical-context.mjs";
 import { extensionInternals } from "../src/extension.mjs";
 import { SDKWorker } from "../src/sdk-worker.mjs";
@@ -243,5 +243,52 @@ test("real SDK omission/nonproducer selection avoids warm cold hydration and bin
         core.estimateContextTokens(full.messages));
       assert.deepEqual(reads, []);
     }
+  } finally { rmSync(directory, { recursive: true, force: true }); }
+});
+
+test("owned non-admission compact facts survive real SDK append/branch/edit/reload without cold hydration", t => {
+  if (typeof candidate.SessionManager.prototype.enableBoundedEntryRetention !== "function") return t.skip("requires the bounded SDK seam");
+  const directory = mkdtempSync(path.join(os.tmpdir(), "canonical-owned-retention-"));
+  try {
+    const manager = candidate.SessionManager.create(directory, directory, { entryRetention: { maxCachedBytes: 1024 } });
+    const cold = manager.appendMessage(user("cold private body".repeat(8192)));
+    const call = { type: "toolCall", id: "call_owned|fc_owned", name: "ipython", arguments: { code: "synthetic" } };
+    const failed = manager.appendMessage({ ...assistant([{ type: "text", text: "partial" }, call]), stopReason: "error", errorMessage: "unclassified" });
+    const witness = manager.appendCustomEntry(ORDINARY_NON_ADMISSION_CUSTOM_TYPE,
+      createOrdinaryNonAdmissionWitness(manager.getEntry(failed), { requestId: "owned-request", attemptId: "owned-attempt" }));
+    manager.appendCompaction("summary", failed, 1);
+    registerCanonicalSessionManager(manager, { estimateContextTokens: core.estimateContextTokens });
+    const full = () => projectCanonicalContext({ entries: manager.getEntries(), leafId: manager.getLeafId(), mode: "ordinary", buildSessionProjection: stock.buildSessionProjection });
+    const view = () => projectCanonicalContext({ sessionManager: manager, mode: "ordinary" });
+    const file = manager.getSessionFile(), prefix = readFileSync(file);
+    assert.deepEqual(view(), full());
+    assert.deepEqual(view().diagnostics.map(d => d.code), ["UNADMITTED_CALL_OMITTED"]);
+    const read = manager._readStored, reads = [];
+    manager._readStored = function(stored) { reads.push(stored.id); return read.call(this, stored); };
+    let source = projectCanonicalSource({ sessionManager: manager, mode: "ordinary" }).source;
+    source.estimateContextTokens(); reads.length = 0;
+    source = projectCanonicalSource({ sessionManager: manager, mode: "ordinary" }).source;
+    source.estimateContextTokens();
+    assert.deepEqual(reads, [], "warm policy and token reads retain no cold message or proof body");
+    source.readAll(); assert(!reads.includes(cold)); assert(!reads.includes(witness));
+    reads.length = 0;
+    manager.appendMessage(user("suffix")); view(); assert(!reads.includes(cold)); assert(!reads.includes(witness));
+    assert(!JSON.stringify(sessionEntryHeaders(manager)).includes("cold private body"));
+    manager.branch(failed);
+    assert(view().diagnostics.some(d => d.code === "ORDINARY_ASSISTANT_NOT_REPLAYABLE"), "witness on another branch is not proof");
+    manager.branch(witness);
+    manager.appendContextEdit(failed, { content: [{ type: "text", text: "edited text" }, call] });
+    assert.deepEqual(view(), full()); assert(!view().diagnostics.some(d => d.severity === "blocking"));
+    manager.setSessionFile(file); assert.deepEqual(view(), full());
+    assert.deepEqual(readFileSync(file).subarray(0, prefix.length), prefix);
+    const rows = readFileSync(file, "utf8").trim().split("\n").map(line => JSON.parse(line));
+    rows.find(e => e.id === failed).message.content[1].arguments.code = "changed synthetic call";
+    // Remove the edit in this synthetic rewritten generation so the stale call
+    // is checked as raw history, not rejected earlier as a forged content edit.
+    const changed = rows.filter(e => e.type !== "context_edit");
+    writeFileSync(file, changed.map(row => JSON.stringify(row)).join("\n") + "\n");
+    manager.setSessionFile(file);
+    assert.deepEqual(view(), full());
+    assert(view().diagnostics.some(d => d.code === "ORDINARY_ASSISTANT_NOT_REPLAYABLE"), "old fingerprint cannot survive a changed source generation");
   } finally { rmSync(directory, { recursive: true, force: true }); }
 });

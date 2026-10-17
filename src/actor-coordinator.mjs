@@ -8,7 +8,7 @@ import { fastModeOptions, streamSessionRequest, supportsFastMode } from "./fast-
 import { randomUUID } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { isDeepStrictEqual } from "node:util";
-import { projectCanonicalBranch, projectCanonicalContext, projectCanonicalSource, refreshCanonicalSessionContext, sessionContextInput, sessionBranchHeaders, sessionCallIssuer } from "./canonical-context.mjs";
+import { createOrdinaryNonAdmissionWitness, ORDINARY_NON_ADMISSION_CUSTOM_TYPE, projectCanonicalBranch, projectCanonicalContext, projectCanonicalSource, refreshCanonicalSessionContext, sessionContextInput, sessionBranchHeaders, sessionCallIssuer } from "./canonical-context.mjs";
 
 const zeroUsage = () => ({ input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0,
   cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } });
@@ -499,7 +499,7 @@ export class ActorCoordinator {
     const abort = () => requestController.abort(this.controller.signal.reason);
     this.controller.signal.addEventListener("abort", abort, { once: true });
     this.flight = { ...attempt, controller: requestController, observation: attempt };
-    let planner, lastTerminal;
+    let planner, lastTerminal, useNative;
     const started = new Set();
     const live = () => {
       if (epoch !== this.attemptEpoch || requestController.signal.aborted) throw new Error("retired inference attempt");
@@ -509,7 +509,7 @@ export class ActorCoordinator {
       started.add(message.id); await this.emit({ type: "message_start", message: clone(message), messageId: message.id });
     };
     const commitPlan = async plan => {
-      let accepted = plan, calls, remainder;
+      let accepted = plan, calls, remainder, witnessEntryId;
       await startMessage(plan.message);
       const committed = await this.commit(plan.message, {
         prepare: message => {
@@ -524,8 +524,22 @@ export class ActorCoordinator {
           const acknowledged = planner.acknowledge({ planId: accepted.planId, ...actual });
           calls = acknowledged.calls; remainder = acknowledged.remainder;
           for (const item of calls) { this.seenCalls.add(item.call.id); attempt.unstarted.set(item.call.id, item); }
+          // Producer authority is this just-acknowledged plan and owned flight,
+          // never an error string or counters recovered from a later attempt.
+          if (useNative === false && this.flight?.observation === attempt && this.flight.epoch === epoch
+            && epoch === this.attemptEpoch && !requestController.signal.aborted
+            && accepted.kind === "final" && accepted.calls.length === 0
+            && ["error", "aborted"].includes(accepted.message.stopReason)
+            && accepted.message.content.some(part => part.type === "toolCall")
+            && attempt.admittedCount === 0 && attempt.dispatchedCount === 0) {
+            const entry = this.manager.getEntry(actual.entryId);
+            const witness = entry?.id === this.manager.getLeafId() && isDeepStrictEqual(entry.message, actual.message)
+              ? createOrdinaryNonAdmissionWitness(entry, attempt) : null;
+            if (witness) witnessEntryId = this.manager.appendCustomEntry(ORDINARY_NON_ADMISSION_CUSTOM_TYPE, witness);
+          }
         },
       });
+      if (witnessEntryId) await this.publish({ type: "entry_appended", entryId: witnessEntryId });
       if (remainder && epoch === this.attemptEpoch && !requestController.signal.aborted) await startMessage(remainder);
       const nativeBatch = calls.length > 0 && calls.every(item => item.native && item.disposition === "execute");
       for (const item of calls) {
@@ -555,7 +569,7 @@ export class ActorCoordinator {
       live();
       this.sentRevision = this.revision;
       const tools = this.runner.getAllRegisteredTools().filter(item => this.activeTools.has(item.definition.name)).map(item => item.definition);
-      const useNative = nativeModel(this.session.model);
+      useNative = nativeModel(this.session.model);
       if (useNative && !this.nativeAdapter) throw new Error("native provider adapter is not integrated in this candidate");
       const options = { ...fastModeOptions(this.session.model, prompt?.fastMode), signal: requestController.signal, reasoning: this.session.thinkingLevel === "off" ? undefined : this.session.thinkingLevel,
         sessionId: this.manager.getSessionId(), transport: this.session.settingsManager.getTransport?.(),

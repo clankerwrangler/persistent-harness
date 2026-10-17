@@ -1,10 +1,10 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, readFile, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { createAgentStartPromptCapture } from "../src/actor-prompt.mjs";
-import { projectCanonicalContext } from "../src/canonical-context.mjs";
+import { projectCanonicalContext, ORDINARY_NON_ADMISSION_CUSTOM_TYPE, registerCanonicalSessionManager } from "../src/canonical-context.mjs";
 import { ActorCoordinator } from "../src/actor-coordinator.mjs";
 import { createCompactionDriver, createCompactionPreparationCapture } from "../src/actor-compaction.mjs";
 import { projectVisibleMessage } from "../src/conversation-projection.mjs";
@@ -13,7 +13,7 @@ const { sdk, api, core } = await loadExternalPi();
 const deferred = () => Promise.withResolvers();
 const wait = async (promise, message) => Promise.race([promise, new Promise((_, reject) => { const timer = setTimeout(() => reject(new Error(message)), 5000); timer.unref(); })]);
 const usage = () => ({ input: 1, output: 1, cacheRead: 0, cacheWrite: 0, totalTokens: 2, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } });
-async function fixture(t, { prepareRequest, script, retry, compaction, compactionDriver, hooks, promptExtensions = [], captureFirst = false, basePromptOptions, automaticCompactionAllowed, model: suppliedModel } = {}) {
+async function fixture(t, { persistent = false, prepareRequest, script, retry, compaction, compactionDriver, hooks, promptExtensions = [], captureFirst = false, basePromptOptions, automaticCompactionAllowed, model: suppliedModel } = {}) {
   const root = await mkdtemp(path.join(os.tmpdir(), "sc-"));
   const model = suppliedModel ?? { id: "fixture", name: "Fixture", provider: "coordinator-test", api: "coordinator-test-api", reasoning: false,
     input: ["text"], cost: usage().cost, contextWindow: 32000, maxTokens: 1000 };
@@ -58,7 +58,9 @@ async function fixture(t, { prepareRequest, script, retry, compaction, compactio
   await dormant.reload();
   const empty = { getExtensions: () => dormant.getExtensions() };
   for (const name of ["getSkills", "getPrompts", "getThemes", "getAgentsFiles", "getSystemPrompt", "getSystemPromptSource", "getAppendSystemPrompt", "getAppendSystemPromptSources", "extendResources", "reload"]) empty[name] = active[name].bind(active);
-  const manager = sdk.SessionManager.inMemory(root);
+  const manager = persistent
+    ? sdk.SessionManager.create(root, path.join(root, "sessions"), { entryRetention: { maxCachedBytes: 1024 } })
+    : sdk.SessionManager.inMemory(root);
   const { session } = await sdk.createAgentSession({ cwd: root, agentDir: path.join(root, "agent"), model: models.getModel(model.provider, model.id), modelRuntime: models, settingsManager: settings, sessionManager: manager, resourceLoader: empty, tools: [] });
   const loaded = active.getExtensions(); const runner = new sdk.ExtensionRunner(loaded.extensions, loaded.runtime, root, manager, new sdk.ModelRegistry(models));
   coor = new ActorCoordinator({ session, runner, sdk, api, core, models, resources: active, promptCapture, lifecycle: { prepareRequest }, publish: event => events.push(event),
@@ -77,6 +79,7 @@ test("ordinary input keeps real result barrier and compatible canonical events",
   assert.equal(f.requests[1].messages.filter(m => m.role === "toolResult").length, 1);
   assert.equal(f.manager.getBranch().filter(e => e.type === "message" && e.message.role === "user")[0].message.id, "durable-input");
   assert.equal(f.events.filter(e => e.type === "agent_settled").length, 1);
+  assert(!f.manager.getEntries().some(e => e.customType === ORDINARY_NON_ADMISSION_CUSTOM_TYPE), "successful call/result admission is never non-admission proof");
 });
 
 for (const outcome of ["success", "failure", "abort"]) test(`compaction ${outcome} releases ordered bookkeeping without changing the in-flight history`, async t => {
@@ -734,4 +737,121 @@ for (const witness of ["websocket", "sse"]) for (const completion of ["partial",
   assert.deepEqual(f.requests[1].messages.filter(m => m.role === "user").map(m => m.id), ["original-input", "next-input"]);
   assert.equal(f.requests[1].messages.some(m => m.role === "toolResult" || m.content?.some?.(p => p.type === "toolCall")), false);
 
+});
+
+for (const mode of ["array", "source"]) for (const completion of ["partial", "complete"])
+  for (const callId of ["plain-owned-call", "call_owned|fc_owned"]) test(`owned non-admission survives a real packaged SDK cold resume and genuine later inference: ${mode}/${completion}/${callId}`, async t => {
+    if (mode === "source" && typeof sdk.SessionManager.prototype.enableBoundedEntryRetention !== "function")
+      return t.skip("bounded source-mode integration requires the source-capable public SDK");
+    const call = { type: "toolCall", id: callId, name: "hold", arguments: { code: completion === "partial" ? "print(f\"partial" : "print(1)" } };
+    const f = await fixture(t, { persistent: true, retry: { enabled: false }, compaction: { enabled: false },
+      script: (_context, n) => n === 1 ? { content: [call], stopReason: "error", errorMessage: "unclassified failed stream",
+        events: message => [{ type: "toolcall_start", contentIndex: 0, partial: { ...message, stopReason: "pending" } }, completion === "complete"
+          ? { type: "toolcall_end", contentIndex: 0, toolCall: call, partial: { ...message, stopReason: "pending" } }
+          : { type: "toolcall_delta", contentIndex: 0, delta: "partial", partial: { ...message, stopReason: "pending" } }] }
+        : [{ type: "text", text: "GENUINE_LATER_INFERENCE" }] });
+    f.coor.projectContext = projectCanonicalContext; f.coor.contextMode = mode;
+    if (mode === "source") registerCanonicalSessionManager(f.manager, { estimateContextTokens: core.estimateContextTokens });
+    const appends = [], append = f.manager.appendMessage.bind(f.manager);
+    f.manager.appendMessage = message => {
+      const id = append(message), attempt = f.coor.flight?.observation;
+      if (message.role === "assistant") appends.push({ id, requestId: attempt?.requestId, attemptId: attempt?.attemptId,
+        admitted: attempt?.admittedCount, dispatched: attempt?.dispatchedCount });
+      return id;
+    };
+    await f.coor.submit("original synthetic input", "auto", [], "owned-original-input");
+    await wait(f.coor.waitForIdle(), "owned failed stream did not settle");
+    assert.equal(f.requests.length, 1); assert.equal(f.runs(), 0);
+    const before = f.manager.getEntries(), failed = before.find(e => e.message?.stopReason === "error");
+    const witness = before.find(e => e.customType === ORDINARY_NON_ADMISSION_CUSTOM_TYPE);
+    assert(witness); assert.equal(witness.parentId, failed.id); assert.equal(before[before.indexOf(failed) + 1].id, witness.id);
+    assert.equal(witness.data.messageEntryId, failed.id); assert.equal(witness.data.messageId, failed.message.id);
+    assert.equal(witness.data.requestId, appends[0].requestId); assert.equal(witness.data.attemptId, appends[0].attemptId);
+    assert.equal(appends[0].admitted, 0); assert.equal(appends[0].dispatched, 0);
+    assert.equal(failed.message.diagnostics, undefined); assert.deepEqual(failed.message.content, [call]);
+    assert.equal(before.filter(e => e.message?.role === "assistant").length, 1, "no secondary canonical guard failure");
+    assert(f.events.some(e => e.type === "entry_appended" && e.entryId === witness.id));
+    const raw = await readFile(f.manager.getSessionFile());
+    f.manager.setSessionFile(f.manager.getSessionFile());
+    assert.deepEqual(f.manager.getEntries(), before);
+    const projection = projectCanonicalContext({ entries: before, leafId: f.manager.getLeafId(),
+      mode: "ordinary", buildSessionProjection: sdk.buildSessionProjection });
+    assert.deepEqual(projection.diagnostics.map(d => d.code), ["UNADMITTED_CALL_OMITTED"]);
+    await f.coor.submit("new explicit synthetic input", "auto", [], "owned-next-input");
+    await wait(f.coor.waitForIdle(), "next genuine inference did not settle");
+    assert.equal(f.requests.length, 2); assert.equal(f.runs(), 0); assert.equal(f.coor.failure, null);
+    assert.deepEqual(f.manager.getEntries().slice(0, before.length), before);
+    assert.deepEqual((await readFile(f.manager.getSessionFile())).subarray(0, raw.length), raw);
+    assert.equal(f.manager.getEntries().filter(e => e.message?.role === "toolResult").length, 0);
+    assert.equal(f.events.filter(e => e.type === "tool_execution_start").length, 0);
+    assert.deepEqual(f.requests[1].messages.filter(m => m.role === "user").map(m => m.id), ["owned-original-input", "owned-next-input"]);
+    assert(!f.requests[1].messages.some(m => m.role === "toolResult" || m.content?.some?.(p => p.type === "toolCall")));
+    assert.equal(f.manager.getEntries().filter(e => e.customType === ORDINARY_NON_ADMISSION_CUSTOM_TYPE).length, 1);
+  });
+
+for (const failure of ["message-append", "witness-append", "acknowledgement", "hook", "retired", "admitted", "dispatched", "native-provenance"])
+  test(`owned non-admission fails closed at the real commit boundary: ${failure}`, async t => {
+    const call = { type: "toolCall", id: "call_blocked|fc_blocked", name: "hold", arguments: {},
+      ...(failure === "native-provenance" ? { nativeProvenance: {} } : {}) };
+    const f = await fixture(t, { retry: { enabled: false }, compaction: { enabled: false },
+      script: () => ({ content: [call], stopReason: "error", errorMessage: "unclassified failure" }) });
+    f.coor.projectContext = projectCanonicalContext;
+    const append = f.manager.appendMessage.bind(f.manager), custom = f.manager.appendCustomEntry.bind(f.manager);
+    const end = f.coor.runner.emitMessageEnd.bind(f.coor.runner);
+    f.coor.runner.emitMessageEnd = async event => {
+      if (event.message.content?.some?.(p => p.type === "toolCall")) {
+        if (failure === "hook") throw new Error("synthetic failed hook");
+        if (failure === "retired") f.coor.attemptEpoch++;
+        if (failure === "admitted") f.coor.flight.observation.admittedCount++;
+        if (failure === "dispatched") f.coor.flight.observation.dispatchedCount++;
+      }
+      return end(event);
+    };
+    f.manager.appendMessage = message => {
+      if (message.content?.some?.(p => p.type === "toolCall")) {
+        if (failure === "message-append") throw new Error("synthetic failed append");
+      }
+      const id = append(message);
+      return failure === "acknowledgement" && message.content?.some?.(p => p.type === "toolCall") ? null : id;
+    };
+    f.manager.appendCustomEntry = (type, data) => {
+      if (type === ORDINARY_NON_ADMISSION_CUSTOM_TYPE && failure === "witness-append") throw new Error("synthetic crash before witness");
+      return custom(type, data);
+    };
+    await f.coor.submit("first input"); await wait(f.coor.waitForIdle(), "failure control did not settle");
+    const before = f.manager.getEntries();
+    assert.equal(f.requests.length, 1, "the real provider attempt must reach this negative control");
+    assert.equal(before.filter(e => e.customType === ORDINARY_NON_ADMISSION_CUSTOM_TYPE).length, 0);
+    assert.equal(f.runs(), 0);
+    if (["witness-append", "acknowledgement", "admitted", "dispatched", "native-provenance"].includes(failure)) {
+      assert(before.some(e => e.message?.content?.some?.(p => p.type === "toolCall")), "failed call remains raw");
+      const view = projectCanonicalContext({ entries: before, leafId: f.manager.getLeafId(), mode: "ordinary", buildSessionProjection: sdk.buildSessionProjection });
+      assert(view.diagnostics.some(d => d.code === "ORDINARY_ASSISTANT_NOT_REPLAYABLE"));
+      await f.coor.submit("explicit next input"); await wait(f.coor.waitForIdle(), "unsafe history did not settle");
+      assert.equal(f.requests.length, 1, "no provider inference on unsafe history");
+    }
+  });
+
+test("a native-owned failed final never emits an ordinary witness even without native report fields", async t => {
+  const previous = process.env.PI_HARNESS_NATIVE_ASYNC;
+  process.env.PI_HARNESS_NATIVE_ASYNC = "1";
+  t.after(() => { if (previous === undefined) delete process.env.PI_HARNESS_NATIVE_ASYNC; else process.env.PI_HARNESS_NATIVE_ASYNC = previous; });
+  const f = await fixture(t, { retry: { enabled: false }, compaction: { enabled: false },
+    model: { id: "gpt-6-astra", name: "Fixture Native", provider: "openai-codex", api: "openai-codex-responses",
+      compat: { supportsAsyncTools: true }, reasoning: false, input: ["text"], cost: usage().cost, contextWindow: 32000, maxTokens: 1000 } });
+  assert.equal(f.coor.session.model.compat.supportsAsyncTools, true);
+  f.coor.projectContext = projectCanonicalContext;
+  let streams = 0;
+  f.coor.nativeAdapter = { nativeCompletion: () => null, stream: () => {
+    streams++;
+    const stream = api.createAssistantMessageEventStream();
+    const message = { ...f.coor.assistant([{ type: "toolCall", id: "native-unknown", name: "hold", arguments: {} }], usage(), "error"), errorMessage: "unclassified native failure" };
+    stream.push({ type: "start", partial: { ...message, content: [] } });
+    stream.push({ type: "error", reason: "error", error: message }); stream.end(); return stream;
+  } };
+  await f.coor.submit("native synthetic input"); await wait(f.coor.waitForIdle(), "native negative did not settle");
+  assert.equal(streams, 1); assert.equal(f.runs(), 0);
+  assert(!f.manager.getEntries().some(e => e.customType === ORDINARY_NON_ADMISSION_CUSTOM_TYPE));
+  assert(projectCanonicalContext({ entries: f.manager.getEntries(), leafId: f.manager.getLeafId(), mode: "ordinary",
+    buildSessionProjection: sdk.buildSessionProjection }).diagnostics.some(d => d.code === "ORDINARY_ASSISTANT_NOT_REPLAYABLE"));
 });
