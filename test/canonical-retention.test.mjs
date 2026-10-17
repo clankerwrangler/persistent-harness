@@ -292,3 +292,92 @@ test("owned non-admission compact facts survive real SDK append/branch/edit/relo
     assert(view().diagnostics.some(d => d.code === "ORDINARY_ASSISTANT_NOT_REPLAYABLE"), "old fingerprint cannot survive a changed source generation");
   } finally { rmSync(directory, { recursive: true, force: true }); }
 });
+
+
+test("cold ingestion folds compact facts once without retaining source payloads", () => {
+  const rows = [entry("call", null, assistant([{ ...call("native"), arguments: { code: "cold-argument-marker" } }])),
+    entry("result", "call", { role: "toolResult", toolCallId: "native", toolName: "ipython", isError: false,
+      content: [{ type: "text", text: "cold-result-marker" }], timestamp: 1 }),
+    { id: "metadata", parentId: "result", type: "custom", customType: "live-context-state",
+      data: { projectedMessages: [{ content: "cold-checkpoint-marker".repeat(16384) }] } },
+    { id: "progress", parentId: "metadata", type: "custom", customType: "persistent-harness.progress-v1",
+      data: { harnessBirth: { version: 1, sequence: 3, createdAt: "2026-01-01T00:00:00.000Z" } } },
+    entry("active", "progress", user("active")),
+    { id: "sibling", parentId: null, type: "custom", customType: "persistent-harness.progress-v1",
+      data: { harnessBirth: { version: 1, sequence: 99, createdAt: "2026-01-01T00:00:00.000Z" } } }];
+  const manager = fixture(rows); manager.branch("active");
+  registerCanonicalSessionManager(manager, { estimateContextTokens: core.estimateContextTokens });
+  const headers = sessionBranchHeaders(manager);
+  assert.deepEqual(manager.reads.ranges, rows.map((_, i) => [i, 1]));
+  assert.deepEqual(manager.reads.ids, [], "eager selected validation must reuse the first committed read");
+  assert.equal(Math.max(...headers.map(header => header.birthSequence)), 3, "birth recovery is branch-local");
+  const retained = JSON.stringify(sessionEntryHeaders(manager), (_, value) =>
+    value instanceof Map ? [...value] : value instanceof Set ? [...value] : value);
+  for (const marker of ["cold-argument-marker", "cold-result-marker", "cold-checkpoint-marker"]) assert(!retained.includes(marker));
+  manager.resetReads(); sessionBranchHeaders(manager);
+  assert.deepEqual(manager.reads, { ranges: [], ids: [] });
+  manager.append(entry("suffix", "active", user("suffix"))); sessionEntryHeaders(manager); manager.resetReads();
+  assert.equal(sessionBranchHeaders(manager).at(-1).id, "suffix");
+  assert.deepEqual(manager.reads, { ranges: [], ids: [] }, "header-first suffix ingestion must not trigger another payload pass");
+});
+
+test("compact selected folding follows ancestry, defers inactive rejection, and recovers after failure", () => {
+  const result = entry("result", "call", { role: "toolResult", toolCallId: "ordered", toolName: "ipython",
+    isError: false, content: [], timestamp: 1 });
+  const parent = entry("call", null, assistant([call("ordered")]));
+  for (const [name, message, code] of [
+    ["invalid result", { ...result.message, isError: "false" }, "ERR_CONTEXT_RESULT"],
+    ["invalid role", { role: "", content: [] }, "ERR_CONTEXT_MESSAGE"],
+    ["invalid call", assistant([{ ...call("bad"), arguments: [] }]), "ERR_CONTEXT_CALL"],
+    ["duplicate call", assistant([call("same"), call("same")]), "ERR_CONTEXT_DUPLICATE_CALL_ID"],
+  ]) {
+    const rows = [result, parent, entry("inactive", null, message)];
+    const manager = fixture(rows); manager.branch("result");
+    assert.deepEqual(sessionBranchHeaders(manager).map(header => header.id), ["call", "result"], name);
+    assert.deepEqual(manager.reads.ids, [], name);
+    assert.deepEqual(project(manager), projectCanonicalContext({ entries: rows, leafId: "result", mode: "native", buildSessionProjection: stock.buildSessionProjection }));
+    manager.branch("inactive"); assert.throws(() => sessionBranchHeaders(manager), { code }, name);
+    manager.branch("result"); assert.equal(sessionBranchHeaders(manager).at(-1).id, "result", "failed folds publish no stale selected state");
+  }
+  const profiled = fixture([entry("profile-bad", null, user("profile payload")), entry("profile-good", null, user("good"))]);
+  registerCanonicalSessionManager(profiled, { estimateContextTokens: messages => {
+    if (messages[0].content === "profile payload") throw new Error("private estimator failure");
+    return core.estimateContextTokens(messages);
+  } });
+  assert.equal(sessionBranchHeaders(profiled).at(-1).id, "profile-good");
+  assert.deepEqual(profiled.reads.ids, []);
+  assert(!JSON.stringify(sessionEntryHeaders(profiled)).includes("private estimator failure"));
+  profiled.branch("profile-bad");
+  assert.throws(() => sessionBranchHeaders(profiled), /private estimator failure/);
+  assert.deepEqual(profiled.reads.ids, ["profile-bad"], "only an exceptional selected estimator may reread its source");
+  const reversed = [result, { ...parent, parentId: "result" }];
+  assert.throws(() => sessionBranchHeaders(fixture(reversed)), { code: "ERR_CONTEXT_BRANCH_CYCLE" });
+  assert.throws(() => sessionBranchHeaders(fixture([{ ...parent, parentId: "missing" }])), { code: "ERR_CONTEXT_BRANCH_MISSING" });
+});
+
+test("single-ingest aliases preserve explicit provider fields, orphan results, and all transport observation vetoes", () => {
+  const failedCall = call("owned|multi|call", false);
+  const failed = entry("failed", null, { ...assistant([failedCall]), stopReason: "error", errorMessage: "terminated" });
+  const witness = { type: "custom", id: "witness", parentId: "failed", customType: ORDINARY_NON_ADMISSION_CUSTOM_TYPE,
+    data: createOrdinaryNonAdmissionWitness(failed, { requestId: "request", attemptId: "attempt" }) };
+  assert(witness.data);
+  const projectRows = rows => projectCanonicalContext({ entries: rows, leafId: rows.at(-1).id, mode: "ordinary", buildSessionProjection: stock.buildSessionProjection });
+  const baseline = [failed, witness];
+  assert(projectRows(baseline).diagnostics.some(item => item.code === "UNADMITTED_CALL_OMITTED"));
+  const observations = report => entry("extra", "witness", { ...assistant([]), stopReason: "error", nativeTransport: report });
+  const variants = [
+    entry("extra", "witness", assistant([{ ...call("other|item", false), providerCallId: "owned" }])),
+    entry("extra", "witness", { role: "toolResult", toolCallId: "owned", toolName: "ipython", isError: true, content: [], timestamp: 1 }),
+    observations({ observedCalls: [{ callId: "owned", itemId: "other", complete: true, native: false }] }),
+    observations({ observedCalls: [{ callId: "owned", itemId: "other" }] }),
+    observations({ attempts: [{ observedCalls: [{ callId: "owned", itemId: "other", complete: false, native: true }] }] }),
+    observations({ observedCalls: [{ callId: "owned", itemId: "one", complete: false, native: false }],
+      attempts: [{ observedCalls: [{ callId: "owned", itemId: "two", complete: false, native: false }] }] }),
+  ];
+  for (const extra of variants) {
+    const rows = [...baseline, extra], manager = fixture(rows);
+    const actual = projectCanonicalContext({ sessionManager: manager, mode: "ordinary" });
+    assert.deepEqual(actual, projectRows(rows));
+    assert(!actual.diagnostics.some(item => item.code === "UNADMITTED_CALL_OMITTED" && item.toolCallId === failedCall.id));
+  }
+});

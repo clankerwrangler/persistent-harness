@@ -757,10 +757,33 @@ function compactCall(record) {
     ...(identifier(providerItemId) ? { providerItemId } : {}) } };
 }
 
-function addAliasFacts(facts, entry, records) {
-  // Reuse the exact existing alias/observation rules on one validated entry.
-  const added = omissionAliases(records, [entry]);
-  for (const name of ["aliases", "observedAliases"]) for (const [key, values] of added[name]) {
+// Capture selected-only validation outcomes while the committed payload is already
+// in hand. Only compact records/alias vetoes survive; invalid inactive messages
+// still fail only if their branch is selected.
+function ingestMessageFacts(entry, header, estimateContextTokens) {
+  let indexed;
+  try { indexed = indexMessages([{ message: entry.message, entryId: entry.id }]); }
+  catch (error) {
+    if (!(error instanceof CanonicalContextError)) throw error;
+    header.selectedFacts = { error: error.code }; return;
+  }
+  const calls = new Map([...indexed.calls].map(([id, record]) => [id, compactCall(record)]));
+  const results = new Map([...indexed.results].map(([id, record]) => [id,
+    { entryId: record.entryId, toolName: record.message.toolName }]));
+  const selected = { calls, results, ...omissionAliases({ calls, results }, [entry]) };
+  if (estimateContextTokens) {
+    try { header.profile = copyData(estimateContextTokens([finalizedInputMessage(entry.message)])); }
+    catch {
+      // Do not retain arbitrary estimator errors or reject an inactive branch.
+      // A failing estimator is retried against its original selected source.
+      selected.profileDeferred = true;
+    }
+  }
+  header.selectedFacts = selected;
+}
+
+function addAliasFacts(facts, selected) {
+  for (const name of ["aliases", "observedAliases"]) for (const [key, values] of selected[name]) {
     if (!facts[name].has(key)) facts[name].set(key, new Set());
     for (const value of values) facts[name].get(key).add(value);
   }
@@ -784,9 +807,9 @@ function overlaidEntry(manager, state, facts, id) {
 }
 
 function addSelectedFacts(manager, state, facts, header, order, estimateContextTokens) {
-  const entry = readManagedEntry(manager, state, header.id);
-  if (entry.type === "assistant_thinking_signature"
-    || (entry.type === "custom" && entry.customType === THINKING_SIGNATURE_CUSTOM_TYPE)) {
+  if (header.type === "assistant_thinking_signature"
+    || (header.type === "custom" && header.customType === THINKING_SIGNATURE_CUSTOM_TYPE)) {
+    const entry = readManagedEntry(manager, state, header.id);
     const data = entry.type === "custom" ? entry.data : entry;
     if (entry.type === "custom") requireThat(isRecord(data) && data.version === THINKING_SIGNATURE_VERSION, "ERR_SIGNATURE_VERSION");
     const targetId = data?.messageEntryId;
@@ -805,35 +828,40 @@ function addSelectedFacts(manager, state, facts, header, order, estimateContextT
     facts.signatureBlocks.set(targetId, previous);
     facts.signatures.set(targetId, [...previous.values()]);
   }
-  if (entry.type === "custom" && entry.customType === ORDINARY_NON_ADMISSION_CUSTOM_TYPE
-    && facts.positions.has(entry.parentId)) {
+  if (header.type === "custom" && header.customType === ORDINARY_NON_ADMISSION_CUSTOM_TYPE
+    && facts.positions.has(header.parentId)) {
+    const entry = readManagedEntry(manager, state, header.id);
     for (const id of witnessedNonAdmission(entry, state.byId.get(entry.parentId))) facts.nonAdmissions.add(id);
   }
-  if (entry.type === "message") {
-    const indexed = indexMessages([{ message: entry.message, entryId: entry.id }]);
-    if (estimateContextTokens) header.profile = copyData(estimateContextTokens([finalizedInputMessage(entry.message)]));
-    const compact = { calls: new Map(), results: new Map() };
+  if (header.type === "message") {
+    const indexed = header.selectedFacts;
+    requireThat(indexed && !indexed.error, indexed?.error ?? "ERR_CONTEXT_MANAGER");
+    if (indexed.profileDeferred && estimateContextTokens) {
+      const entry = readManagedEntry(manager, state, header.id);
+      header.profile = copyData(estimateContextTokens([finalizedInputMessage(entry.message)]));
+      delete indexed.profileDeferred;
+    }
     for (const [id, source] of indexed.calls) {
       requireThat(!facts.calls.has(id), "ERR_CONTEXT_DUPLICATE_CALL_ID");
-      const record = compactCall({ ...source, order });
+      const record = { ...source, order };
       const result = facts.results.get(id);
       if (result) {
         requireThat(record.call.name === result.toolName, "ERR_CONTEXT_RESULT_NAME");
         requireThat(order < result.order, "ERR_CONTEXT_RESULT_BEFORE_CALL");
       }
-      facts.calls.set(id, record); compact.calls.set(id, record);
+      facts.calls.set(id, record);
     }
     for (const [id, source] of indexed.results) {
       requireThat(!facts.results.has(id), "ERR_CONTEXT_DUPLICATE_RESULT_ID");
-      const record = { entryId: source.entryId, order, toolName: source.message.toolName };
+      const record = { ...source, order };
       const call = facts.calls.get(id);
       if (call) {
         requireThat(call.call.name === record.toolName, "ERR_CONTEXT_RESULT_NAME");
         requireThat(call.order < order, "ERR_CONTEXT_RESULT_BEFORE_CALL");
       }
-      facts.results.set(id, record); compact.results.set(id, record);
+      facts.results.set(id, record);
     }
-    addAliasFacts(facts, entry, compact);
+    addAliasFacts(facts, indexed);
   }
   facts.positions.set(header.id, order);
 }
@@ -859,6 +887,7 @@ function managedState(manager, factsRequired = true) {
     const budget = { nodes: state.nodes, depth: 1, codeUnits: String(i).length };
     const entry = copyData(range[0], { budget });
     const header = archiveHeader(entry, i, budget.codeUnits);
+    if (entry.type === "message") ingestMessageFacts(entry, header, owner.estimateContextTokens);
     requireThat(!state.byId.has(header.id), "ERR_CONTEXT_DUPLICATE_ENTRY_ID");
     state.headers.push(header); state.byId.set(header.id, header); state.nodes = budget.nodes;
   }
