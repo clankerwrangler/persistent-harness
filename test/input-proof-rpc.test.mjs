@@ -34,12 +34,12 @@ for (const [name, prompt, expected] of [
   await writeFile(log, "");
   const store = new HarnessStore(path.join(dir, "harness.sqlite"));
   store.createRoot({ sessionId, sessionFile, cwd: dir, name: "Input proof", actorToken: "fixture-only" });
-  const events = []; let actor;
+  const events = []; let actor, heapCapReceipt;
   t.after(async () => {
     if (process.env.PI_HARNESS_INPUT_PROOF_ARTIFACTS) {
       await mkdir(process.env.PI_HARNESS_INPUT_PROOF_ARTIFACTS, { recursive: true });
       await writeFile(path.join(process.env.PI_HARNESS_INPUT_PROOF_ARTIFACTS, `${name.replaceAll(" ", "-")}.json`),
-        JSON.stringify({ sessionId, events, provider: (await readFile(log, "utf8")).trim().split("\n").filter(Boolean).map(JSON.parse),
+        JSON.stringify({ sessionId, events, heapCapReceipt, provider: (await readFile(log, "utf8")).trim().split("\n").filter(Boolean).map(JSON.parse),
           canonical: (await readFile(sessionFile, "utf8")).trim().split("\n").map(JSON.parse), stderr: actor?.stderr }, null, 2));
     }
     await actor?.close(); store.close(); await rm(dir, { recursive: true, force: true });
@@ -54,6 +54,14 @@ for (const [name, prompt, expected] of [
     "--provider", "input-proof-fixture", "--model", "proof", "--session", sessionFile],
     cwd: dir, env, requestTimeoutMs: 15000, shutdownTimeoutMs: 1000 });
   actor.on("event", event => events.push(event)); await actor.start();
+  if (launch.heapCapProof) {
+    heapCapReceipt = JSON.parse(await readFile(launch.heapCapProof.file, "utf8"));
+    assert.equal(heapCapReceipt.pid, actor.pid);
+    assert.equal(heapCapReceipt.configuredFlag, launch.heapCapProof.flag);
+    assert.deepEqual(heapCapReceipt.execArgv, [launch.heapCapProof.flag]);
+    assert.equal(heapCapReceipt.heapSizeLimit, launch.heapCapProof.heapSizeLimit);
+    assert.equal(heapCapReceipt.phase, "pre-sdk-bootstrap");
+  }
   assert((await actor.request("get_commands")).commands.some(command => command.name === "input-proof-template"), actor.stderr);
   const settled = new Promise((resolve, reject) => {
     const timer = setTimeout(() => { actor.off("event", listener); reject(new Error(`input did not settle: ${actor.stderr}`)); }, 15000);
