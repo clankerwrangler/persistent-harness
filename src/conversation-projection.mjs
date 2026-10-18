@@ -32,9 +32,9 @@ function visibleUserImages(content, { references = false, entryId } = {}) {
   const candidates = content.filter((part) => part?.type === "image")
     .map((part) => ({ type: "image", data: part.data, mimeType: part.mimeType }));
   try {
-    return normalizeInputImages(candidates).map((image, index) => ({
-      type: "image", mimeType: image.mimeType, name: `Pasted image ${index + 1}`,
-      size: Buffer.from(image.data, "base64").length,
+    return normalizeInputImages(candidates, { allowMetadata: true }).map((image, index) => ({
+      type: "image", mimeType: image.mimeType, name: image.name,
+      size: image.size,
       ...(references ? { ref: { entryId, index }, contentHash: imageContentHash(image) } : { data: image.data }),
     }));
   } catch { return []; }

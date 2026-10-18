@@ -7,8 +7,11 @@ import test from "node:test";
 import { actorInputCustomPayload } from "../src/extension.mjs";
 import { projectVisibleMessage, pendingInputMessage } from "../src/conversation-projection.mjs";
 import { VisibleTranscriptReader } from "../src/visible-transcript-reader.mjs";
+import { normalizeInputImages } from "../src/input-images.mjs";
 
 const PNG = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=";
+// A complete 1x1 grayscale JPEG with one constant block.
+const JPEG = "/9j/4AAQSkZJRgABAQAAAQABAAD/2wBDAAEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQH/wAALCAABAAEBAREA/8QAJgABAAAAAAAAAAAAAAAAAAAAABABAAAAAAAAAAAAAAAAAAAAAP/aAAgBAQAAPwA//9k=";
 const acceptedAt = Date.parse("2026-01-01T00:00:00.000Z");
 const receipt = (inputId, source = "user") => ({ inputId, sessionId: "session", source, origin: source === "user" ? null : { jobId: "bg-proof" },
   acceptedAt, clientMessageId: "client-proof", delivery: { state: "accepted", inputId,
@@ -79,4 +82,74 @@ test("retrying a later text item stops at its internal input, never an older use
   const later = visible.messages.find((message) => message.text === "Later reply.");
   assert.deepEqual(await reader.resolveRetryTurn({ sessionFile, sessionId: "session", assistantId: later.id }),
     { assistantId: "answer", userId: "internal", branchFromId: "old-user" });
+});
+
+test("visible image metadata preserves names, order, references, and input values across projection roles", () => {
+  const png = { type: "image", data: PNG, mimeType: "image/png" };
+  const jpeg = { type: "image", data: JPEG, mimeType: "image/jpeg" };
+  for (const images of [[png, jpeg], [jpeg, png]]) {
+    const content = [{ type: "text", text: "before" },
+      ...images.map(image => ({ ...image, name: "caller name", size: -1, ref: { index: 99 }, contentHash: "caller hash" })),
+      { type: "text", text: "after" }];
+    const entries = [
+      { type: "message", id: "user", message: { role: "user", content } },
+      ...["background", "cron"].map(source => ({ type: "custom_message", id: source,
+        timestamp: "2026-01-01T00:00:01.000Z",
+        ...actorInputCustomPayload({ ...receipt(source, source), message: "internal", images,
+          origin: { jobId: "job", runId: "run" } }), content })),
+      { type: "message", id: "tool", message: { role: "toolResult", content } },
+    ];
+    for (const entry of entries) for (const imageReferences of [false, true]) {
+      const original = structuredClone(entry);
+      const tool = entry.id === "tool";
+      if (tool) assert.equal(projectVisibleMessage(entry), undefined, "tool images still require authorization");
+      const visible = projectVisibleMessage(entry, { imageReferences, allowToolImages: tool });
+      assert.equal(visible.text, tool ? "" : "beforeafter");
+      assert.equal(visible.role, tool ? "tool_output" : entry.id === "cron" ? "scheduled_job"
+        : entry.id === "background" ? "background_notification" : "user");
+      const expected = images.map((image, index) => ({ type: "image", mimeType: image.mimeType,
+        name: `${tool ? "Output" : "Pasted"} image ${index + 1}`, size: Buffer.from(image.data, "base64").length,
+        ...(imageReferences ? { ref: { entryId: entry.id, index },
+          contentHash: createHash("sha256").update(image.mimeType).update("\0").update(image.data, "base64").digest("hex") }
+          : { data: image.data }) }));
+      assert.deepEqual(visible.images, expected);
+      for (let i = 0; i < expected.length; i += 1) assert.deepEqual(Object.keys(visible.images[i]), Object.keys(expected[i]));
+      assert.deepEqual(entry, original, "projection must not rewrite caller metadata or input content");
+    }
+  }
+});
+
+test("visible image metadata reuse retains validation and hides the whole invalid image set", () => {
+  const image = { type: "image", data: PNG, mimeType: "image/png" };
+  const png = (width, height, depth = 8) => {
+    const bytes = Buffer.from(PNG, "base64"); bytes.writeUInt32BE(width, 16); bytes.writeUInt32BE(height, 20);
+    bytes[24] = depth; bytes[25] = 6; return bytes.toString("base64");
+  };
+  const padded = Buffer.alloc(2 * 1024 * 1024); Buffer.from(PNG, "base64").copy(padded);
+  for (const [name, images, error] of [
+    ["count", Array(5).fill(image), /at most 4/],
+    ["MIME", [{ ...image, mimeType: "image/gif" }], /mimeType/],
+    ["base64 syntax", [{ ...image, data: "!png" }], /canonical base64/],
+    ["base64 pad bits", [{ ...image, data: "AB==" }], /canonical base64/],
+    ["encoded bound", [{ ...image, data: "A".repeat(4 * 1024 * 1024 + 4) }], /bounded/],
+    ["total bytes", Array(2).fill({ ...image, data: padded.toString("base64") }), /byte total limit/],
+    ["PNG container", [{ ...image, data: "AA==" }], /container/],
+    ["JPEG container", [{ ...image, mimeType: "image/jpeg" }], /container/],
+    ["zero dimension", [{ ...image, data: png(0, 1) }], /oversized/],
+    ["dimension bound", [{ ...image, data: png(8193, 1) }], /oversized/],
+    ["pixel bound", [{ ...image, data: png(4096, 4096) }], /oversized/],
+    ["decoded bound", [{ ...image, data: png(4096, 2100, 16) }], /oversized/],
+    ["mixed invalid", [image, { ...image, data: "AA==" }], /container/],
+  ]) {
+    assert.throws(() => normalizeInputImages(images), error, name);
+    const content = [{ type: "text", text: "kept" }, ...images];
+    const original = structuredClone(content);
+    for (const role of ["user", "toolResult"]) for (const imageReferences of [false, true]) {
+      const visible = projectVisibleMessage({ type: "message", id: "invalid", message: { role, content } },
+        { imageReferences, allowToolImages: true });
+      if (role === "toolResult") assert.equal(visible, undefined, name);
+      else { assert.equal(visible.text, "kept", name); assert.equal(Object.hasOwn(visible, "images"), false, name); }
+    }
+    assert.deepEqual(content, original, name);
+  }
 });
