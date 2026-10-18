@@ -10,6 +10,9 @@ npm test
 
 The tests use isolated temporary state, fake providers, and local processes. All supervisor tests, including fake-worker tests, need private `HOME` and `PI_CODING_AGENT_DIR`: a temporary database alone does not isolate transcripts or background notifications. The default background directory is `$PI_CODING_AGENT_DIR/state/background-jobs` (otherwise `$HOME/.pi/agent/state/background-jobs`); any explicit `backgroundJobsDirectory` must also be test-private. Never point tests at running service state or live credentials. For offline real-worker checks, set `PI_HARNESS_PYTHON` to an existing compatible interpreter and `PI_HARNESS_AUTO_INSTALL=0`.
 
+Fixtures with literal `harness.presentation.v1` directives require
+`PI_HARNESS_PRESENTATION_NAMESPACE=harness` in the test process.
+
 The managed-runtime test explicitly exercises actual managed reuse and dependency rebuild, not the interpreter override. The stock-worker provisioning fixture also clears the override locally to check the real consent path. An optional `PI_HARNESS_TEST_MANAGED_SEED` can contain only cached `bin/uv-0.12.3`, `python/cpython-3.12.12-linux-x86_64-gnu`, and package `cache/` prerequisites. Both fixtures copy only these prerequisites into their temporary runtime; neither copies completed environments. The kernel test denies Node fetch. Set `UV_OFFLINE=1` for both offline runs. Do not supply completed environments, sessions, credentials, or kernel state as the seed. Without cached prerequisites, managed provisioning needs its documented downloads.
 
 Native integration additionally requires `PI_HARNESS_NATIVE_ASYNC_BUILD_ROOT` to identify the same external Pi install prefix:
@@ -298,6 +301,22 @@ including genuine stock-worker slim events, restart, branch navigation,
 pagination, protected metadata, and injected append failure. The separate WebUI
 browser regression checks keyed progress nodes during live text arrival and
 completion, then independently checks reload reconstruction.
+
+`LiveConversationAccounting` checks each abstract mutation from every bounded
+ordered initial row state: maintained bytes equal retained per-chunk bytes,
+reference/candidate rows and truncation agree, byte/row limits hold, and fitting
+appends and trimming avoid Buffer creation and a redundant sum, respectively.
+The configuration uses three IDs, a three-byte budget, and two retained rows.
+It covers replacement, removal, complete-only reconciliation, settlement,
+ordered eviction, and the truncation reset. The `BadReplace`, `BadRemove`,
+`BadReconcile`, and `BadEviction` controls must violate accounting; `BadOrder`
+must violate equivalence; `EagerFit` and `Resum` must violate the work invariant.
+Prefix lengths abstract UTF-8 decoding. `provider-message-boundaries` tests cover
+actual exact-limit prefixes, fitting and overflowing unpaired surrogates,
+per-chunk accounting, replacement after truncation, and 512-row eviction.
+`conversation-birth`, `supervisor-text-identity`, and `supervisor-input-association`
+retain identity and actual supervisor caller coverage with synthetic in-process
+actors.
 
 `EventLogTail` compares a reverse nonempty-line scan with the complete forward
 log oracle, including malformed-line quota and exact truncation detection. It

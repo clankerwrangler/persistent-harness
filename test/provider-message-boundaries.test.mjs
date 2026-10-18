@@ -104,3 +104,75 @@ test("core text item identity survives provider metadata and rebased segments", 
   assert.equal(assistantTextPart(legacy, 1).id,
     assistantMessageParts({ type: "message", id: "legacy-entry", message: legacy })[0].id);
 });
+
+const liveUpdate = (id, type, fields = {}, extra = {}) => ({ type: "message_update", messageId: id,
+  createdAt: new Date(timestamp).toISOString(), assistantMessageEvent: { type, ...fields }, ...extra });
+
+test("live UTF-8 prefixes preserve exact fitting strings and stored per-chunk byte counts", () => {
+  const limit = 256 * 1024;
+  for (let available = 0; available <= 7; available += 1) {
+    const live = new LiveConversation();
+    live.accept(liveUpdate("fill", "text_delta", { delta: "x".repeat(limit - available) }));
+    live.accept(liveUpdate("edge", "text_delta", { delta: "é😀z" }));
+    const expected = available === 7 ? "é😀z" : (available >= 6 ? "é😀" : available >= 2 ? "é" : "") + "…";
+    assert.equal(live.snapshot().at(-1).text, expected); assert.equal(live.truncated, available < 7);
+  }
+  const live = new LiveConversation();
+  live.accept(liveUpdate("halves", "text_delta", { delta: "\ud83d" }));
+  assert.equal(live.snapshot()[0].text, "\ud83d", "A fitting unpaired surrogate is stored unchanged");
+  live.accept(liveUpdate("halves", "text_delta", { delta: "\ude00" }));
+  assert.equal(live.snapshot()[0].text, "😀");
+  live.accept(liveUpdate("fill", "text_delta", { delta: "x".repeat(limit - 6) }));
+  assert.equal(live.truncated, false);
+  live.accept(liveUpdate("extra", "text_delta", { delta: "!" }));
+  assert.equal(live.snapshot().at(-1).text, "…", "Separate surrogate chunks account for six bytes, not four");
+  live.remove("halves"); live.accept(liveUpdate("capacity", "text_delta", { delta: "123456" }));
+  assert.equal(live.snapshot().at(-1).text, "123456");
+  const overflowing = new LiveConversation();
+  overflowing.accept(liveUpdate("fill", "text_delta", { delta: "x".repeat(limit - 3) }));
+  overflowing.accept(liveUpdate("edge", "text_delta", { delta: "\ud800x" }));
+  assert.equal(overflowing.snapshot().at(-1).text, "�…", "Overflow retains Buffer/TextDecoder conversion");
+});
+
+test("live replacements, removals and complete-only reconciliation release exactly retained bytes", () => {
+  const live = new LiveConversation(); const limit = 256 * 1024;
+  const accept = (id, type, fields = {}, extra = {}) => live.accept(liveUpdate(id, type, fields, extra));
+  accept("fill", "text_delta", { delta: "x".repeat(limit - 1) });
+  accept("edge", "text_delta", { delta: "😀" });
+  accept("edge", "text_delta", { delta: "ignored" });
+  assert.equal(live.snapshot().at(-1).text, "…");
+  live.remove("fill"); accept("edge", "text_end", { text: "replacement" });
+  assert.equal(live.truncated, false); assert.equal(live.snapshot()[0].status, "complete");
+  accept("stream", "text_delta", { delta: "x".repeat(limit - 11) });
+  assert.equal(live.truncated, false);
+  live.reconcile(new Set(["edge", "stream"]));
+  assert.deepEqual(live.snapshot().map(row => row.id), ["stream"]);
+  accept("new", "text_delta", { delta: "12345678901" }); assert.equal(live.truncated, false);
+  accept("new", "text_end", { text: "not authoritative" }, { truncated: true });
+  assert.equal(live.snapshot().at(-1).text, "12345678901");
+  live.accept({ type: "message_end", message: { role: "assistant", content: [
+    { type: "text", id: "new", createdAt: new Date(timestamp).toISOString(), text: "done" } ] } });
+  accept("stream", "text_delta", { delta: "1234567" }); assert.equal(live.truncated, false);
+  live.accept({ type: "agent_settled" }); live.reconcile(new Set(["stream", "new"]));
+  assert.deepEqual(live.snapshot(), []);
+  live.upsert({ id: "user", role: "user", text: "x".repeat(limit), createdAt: new Date(timestamp).toISOString(), status: "complete", inputId: "public-input" });
+  live.upsert({ id: "user", role: "user", text: null, createdAt: new Date(timestamp).toISOString(), status: "complete", inputId: "public-input" });
+  assert.deepEqual(live.snapshot(), []);
+  accept("fresh", "text_delta", { delta: "x".repeat(limit) }); assert.equal(live.truncated, false);
+  live.remove("fresh"); live.remove("absent");
+  for (const delta of [undefined, null, ""]) accept("empty", "text_delta", { delta });
+  assert.throws(() => accept("empty", "text_delta", { delta: 42 }), TypeError);
+  assert.deepEqual(live.snapshot(), []);
+});
+
+test("live row bound evicts in insertion order and marks only incomplete eviction as truncation", () => {
+  const live = new LiveConversation();
+  live.accept(liveUpdate("row-0", "text_end", { text: "complete" }));
+  for (let index = 1; index < 512; index += 1) live.accept(liveUpdate(`row-${index}`, "text_delta", { delta: "x" }));
+  assert.equal(live.snapshot().length, 512); assert.equal(live.truncated, false);
+  live.accept(liveUpdate("row-512", "text_delta", { delta: "x" }));
+  assert.equal(live.snapshot().length, 512); assert.equal(live.snapshot()[0].id, "row-1"); assert.equal(live.truncated, false);
+  live.accept(liveUpdate("row-513", "text_delta", { delta: "x" }));
+  assert.equal(live.snapshot()[0].id, "row-2"); assert.equal(live.truncated, true);
+  live.accept({ type: "agent_start" }); assert.equal(live.truncated, false);
+});
