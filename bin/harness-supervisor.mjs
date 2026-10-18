@@ -1,4 +1,6 @@
 #!/usr/bin/env node
+import { randomUUID } from "node:crypto";
+import { HarnessClient } from "../src/client.mjs";
 import { spawn } from "node:child_process";
 import { mkdir, open, readFile, unlink } from "node:fs/promises";
 import os from "node:os";
@@ -9,8 +11,8 @@ import { HarnessSupervisor } from "../src/supervisor.mjs";
 
 function parseArgs(argv) {
   const command = argv[0];
-  if (!["start", "ensure", "status", "shutdown"].includes(command)) {
-    throw new Error("usage: harness-supervisor <start|ensure|status|shutdown> [--socket PATH] [--db PATH] [--pid PATH]");
+  if (!["start", "ensure", "status", "memory", "shutdown"].includes(command)) {
+    throw new Error("usage: harness-supervisor <start|ensure|status|memory --session ID|shutdown> [--socket PATH] [--db PATH] [--pid PATH]");
   }
   const agentDir = process.env.PI_CODING_AGENT_DIR || path.join(os.homedir(), ".pi", "agent");
   const harnessDir = path.join(agentDir, "harness");
@@ -25,7 +27,8 @@ function parseArgs(argv) {
     const flag = argv[index];
     const value = argv[index + 1];
     if (!value) throw new Error(`${flag} requires a value`);
-    if (flag === "--socket") options.socketPath = path.resolve(value);
+    if (flag === "--session" && command === "memory") options.sessionId = value;
+    else if (flag === "--socket") options.socketPath = path.resolve(value);
     else if (flag === "--db") options.databasePath = path.resolve(value);
     else if (flag === "--pid") {
       options.pidPath = path.resolve(value);
@@ -33,6 +36,7 @@ function parseArgs(argv) {
     }
     else throw new Error(`unknown option: ${flag}`);
   }
+  if (command === "memory" && !options.sessionId) throw new Error("memory requires --session ID");
   return options;
 }
 
@@ -115,6 +119,15 @@ async function main() {
   const options = parseArgs(process.argv.slice(2));
   if (options.command === "ensure") {
     console.log(JSON.stringify(await ensureSupervisor(options)));
+    return;
+  }
+  if (options.command === "memory") {
+    // Connect only: this explicit observation never calls ensure or subscribes.
+    const client = new HarnessClient({ socketPath: options.socketPath, heartbeatMs: 0 });
+    try {
+      if (!await client.start({ registrationType: "register_client", clientInstanceId: randomUUID() })) throw new Error("supervisor is not available");
+      console.log(JSON.stringify(await client.request("get_memory_diagnostics", { sessionId: options.sessionId }), null, 2));
+    } finally { await client.stop(); }
     return;
   }
   if (options.command === "status") {

@@ -53,7 +53,7 @@ const requestTypes = new Set([
   "create_root", "list_sessions", "rename_session", "subscribe_session", "unsubscribe_session", "subscribe_root_output", "unsubscribe_root_output",
   "submit_input", "respond_extension_ui", "get_session_inference", "set_session_inference", "set_session_fast_mode", "get_actor_state", "get_actor_entries", "get_visible_messages", "get_visible_image", "compact_session", "restart_kernel", "abort_session",
   "get_skill_runtime_plan", "provision_skill_runtime",
-  "stop_session", "revive_session", "delete_session", "get_liveness", "get_status", "get_usage", "shutdown_daemon",
+  "stop_session", "revive_session", "delete_session", "get_memory_diagnostics", "get_liveness", "get_status", "get_usage", "shutdown_daemon",
 ]);
 
 export class ProtocolError extends Error {
@@ -393,6 +393,7 @@ const validators = new Map([
   ["create_root", createRoot], ["rename_session", renameSession], ["subscribe_session", subscribe], ["subscribe_root_output", subscribeRootOutput], ["unsubscribe_root_output", empty],
   ["unsubscribe_session", (p) => sessionIdParam(p)], ["submit_input", submit], ["respond_extension_ui", extensionUiResponse],
   ["get_session_inference", (p) => ({ sessionId: sessionIdParam(p).sessionId })], ["set_session_inference", setInference], ["set_session_fast_mode", setFastMode],
+  ["get_memory_diagnostics", (p) => ({ sessionId: sessionIdParam(p).sessionId })],
   ["get_actor_state", (p) => sessionIdParam(p)], ["get_actor_entries", entries], ["get_visible_messages", visibleMessages], ["get_visible_image", visibleImage], ["compact_session", (p) => sessionIdParam(p)], ["restart_kernel", (p) => sessionIdParam(p)], ["abort_session", (p) => sessionIdParam(p)],
   ["get_skill_runtime_plan", empty], ["provision_skill_runtime", provisionSkillRuntime],
   ["stop_session", (p) => sessionIdParam(p)], ["revive_session", (p) => sessionIdParam(p)], ["delete_session", (p) => sessionIdParam(p)],

@@ -4,6 +4,7 @@ import { mkdir, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { JsonLineDecoder, encodeFrame } from "./framing.mjs";
 import { dispatchExtensionTool } from "./extension-tool-host.mjs";
+import { historyMemoryDiagnostics } from "./memory-diagnostics.mjs";
 
 const KERNEL_FRAME_BYTES = 1024 * 1024;
 
@@ -132,6 +133,8 @@ export class PythonKernel {
   #checkpointError;
   #controlError;
   #closed = false;
+  #ready = false;
+  #queuedOperations = 0;
 
   constructor({
     pythonPath,
@@ -225,6 +228,7 @@ export class PythonKernel {
       this.#process = undefined;
       this.#control = undefined;
       this.#readyPromise = undefined;
+      this.#ready = false;
     });
     return this.#readyPromise;
   }
@@ -239,6 +243,7 @@ export class PythonKernel {
     }
     for (const frame of frames) {
       if (frame.type === "ready") {
+        this.#ready = true;
         this.#resolveReady?.(frame);
         continue;
       }
@@ -256,7 +261,7 @@ export class PythonKernel {
           frame.outputType === undefined);
         continue;
       }
-      if (["done", "snapshot_done", "shutdown_done", "protocol_error"].includes(frame.type)) {
+      if (["done", "snapshot_done", "shutdown_done", "memory_diagnostics_done", "protocol_error"].includes(frame.type)) {
         this.#pending.delete(frame.id);
         if ((frame.type === "snapshot_done" && frame.ok === false) || frame.type === "protocol_error") {
           pending.reject(new Error(frame.error ?? "kernel command failed"));
@@ -342,6 +347,7 @@ export class PythonKernel {
           : "Python kernel failed while this cell was queued. The cell did not run; prior execution outcome may be unknown.",
         stdout: "", stderr: "", truncated: false, totalBytes: 0 };
     };
+    this.#queuedOperations += 1;
     const operation = this.#tail.then(async () => {
       const queuedFailure = notAdmitted();
       if (queuedFailure) return queuedFailure;
@@ -459,7 +465,8 @@ export class PythonKernel {
         this.#active = undefined;
       }
     });
-    this.#tail = operation.then(() => undefined, () => undefined);
+    const settled = operation.finally(() => { this.#queuedOperations -= 1; });
+    this.#tail = settled.then(() => undefined, () => undefined);
     if (!deferred) return operation;
     operation.then(deferred.resolve, deferred.reject);
     return deferred.promise;
@@ -502,11 +509,26 @@ export class PythonKernel {
   }
 
   #enqueueSnapshot({ onlyIfDirty = false } = {}) {
+    this.#queuedOperations += 1;
     const operation = this.#tail.then(async () => {
       if (!this.isRunning) return { found: false, saved: [], skipped: [] };
       if (onlyIfDirty && this.#generation <= this.#snapshotGeneration) return this.#lastSnapshot;
       return this.#takeSnapshot();
     });
+    this.#tail = operation.finally(() => { this.#queuedOperations -= 1; }).then(() => undefined, () => undefined);
+    return operation;
+  }
+
+  memoryDiagnostics() {
+    if (this.#closed || this.#queuedOperations || this.#pending.size || this.#active
+      || (this.isRunning && !this.#ready)) return Promise.resolve({ state: "unavailable-busy" });
+    if (!this.isRunning) return Promise.resolve({ state: "unavailable-not-running" });
+    // Synchronous reservation: never enqueue behind work or enter a host wait.
+    // Later executions and close retain the existing FIFO/drain owner.
+    this.#queuedOperations += 1;
+    const operation = this.#command("memory_diagnostics")
+      .then(frame => historyMemoryDiagnostics(frame.diagnostics), () => ({ state: "unavailable-error" }))
+      .finally(() => { this.#queuedOperations -= 1; });
     this.#tail = operation.then(() => undefined, () => undefined);
     return operation;
   }

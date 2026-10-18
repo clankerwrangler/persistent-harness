@@ -21,6 +21,40 @@ Before restarting, identify what owns the supervisor lifetime. `harness-restart`
 
 Bind recovery to the service/container generation as well as PID and process start time; replacement containers can reuse the same numeric PID. Record the target session and idempotent continuation receipt before interruption, then verify both service readiness and actual session return. A healthy replacement alone does not prove continuation. Preserve interrupted restart-job evidence rather than replaying shutdown or fabricating a completed receipt.
 
+## Explicit numeric memory observation
+
+```sh
+node bin/harness-supervisor.mjs memory --session FULL_SESSION_ID
+```
+
+This connect-only operator command uses registered-client `get_memory_diagnostics`
+with exactly `{sessionId}`. It does not ensure a daemon, subscribe, start or revive
+an actor/kernel, or change conversation/checkpoint state. Actor connections cannot
+use it. Normal `status` and liveness polling do not collect these counters.
+
+The v1 result contains supervisor and, when resident, worker numeric
+`rss`, `heapTotal`, `heapUsed`, `external`, `arrayBuffers`, `v8HeapTotal` and
+`v8HeapUsed` bytes. It requests no GC or heap snapshot. Worker transport has a
+one-second deadline; failures return a fixed unavailable state, not raw errors.
+
+Python observes only Out, text-repr history and MIME-output history. Its result
+contains root entry counts and combined deduplicated counts/shallow byte sizes
+for exact `str`, `bytes` and builtin containers (`stringBytes`, `bytesBytes`,
+`containerBytes`). Dictionary keys, MIME names and payload text are not returned.
+The walk stops after 10,000 visited references or 25 ms; `state` is `complete`,
+`truncated` or `unknown` (unsupported values/owners). `unknown` also counts
+unmeasured objects. Root counts are null when their owner type is unknown.
+These are partial ownership estimates, not a full Python heap census, retained
+size, allocator overhead, RSS attribution or a regression baseline.
+
+A queued/active Python tool, host callback, snapshot, startup or close returns
+`unavailable-busy` without joining its queue or writing into its response pipe.
+An absent process returns `unavailable-not-running`. An admitted idle observation
+briefly reserves the existing FIFO; later tools and shutdown drain that read.
+No namespace enumeration, arbitrary evaluation, user sizing/iteration hooks,
+file access or runtime imports occur in the collector. Observations are best
+effort; other Python threads can mutate history independently.
+
 ## State locations
 
 `PI_CODING_AGENT_DIR` defaults to `~/.pi/agent`. The normal supervisor paths beneath it are:
