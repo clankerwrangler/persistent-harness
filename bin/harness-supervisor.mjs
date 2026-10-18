@@ -1,13 +1,11 @@
 #!/usr/bin/env node
 import { randomUUID } from "node:crypto";
-import { HarnessClient } from "../src/client.mjs";
 import { spawn } from "node:child_process";
 import { mkdir, open, readFile, unlink } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { controlRequest } from "../src/control.mjs";
-import { HarnessSupervisor } from "../src/supervisor.mjs";
 
 function parseArgs(argv) {
   const command = argv[0];
@@ -123,6 +121,7 @@ async function main() {
   }
   if (options.command === "memory") {
     // Connect only: this explicit observation never calls ensure or subscribes.
+    const { HarnessClient } = await import("../src/client.mjs");
     const client = new HarnessClient({ socketPath: options.socketPath, heartbeatMs: 0 });
     try {
       if (!await client.start({ registrationType: "register_client", clientInstanceId: randomUUID() })) throw new Error("supervisor is not available");
@@ -139,6 +138,7 @@ async function main() {
     return;
   }
 
+  const { HarnessSupervisor } = await import("../src/supervisor.mjs");
   const supervisor = new HarnessSupervisor(options);
   const status = await supervisor.start();
   console.log(JSON.stringify(status));
