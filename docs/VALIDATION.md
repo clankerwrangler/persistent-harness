@@ -115,14 +115,22 @@ The broader private integration checkpoint also exercised a browser client. Brow
 `OwnIdleRetirement` separates the worker's quiet age from descendant display
 activity. It checks safe and available inactivity/capacity retirement, stable
 own age, generation/interval expiry fencing, independent children, input/family
-wake availability, and optional preparation. Its seven negative configurations
-must fail their intended invariants. Isolated supervisor fixtures reproduce the
+wake availability, and optional preparation. Its seven policy negative
+configurations must fail their intended invariants. Isolated supervisor fixtures reproduce the
 old retained delegating parent, hold preparation during retirement, keep children
 working, deliver input and family wakes before and after retirement, and hold
 own input, wake, tool, compaction, and serialized control work through retirement
 attempts. The retirement callback uses its existing mutation owner; that owner
 must not reject itself as unrelated pending work. Family notification tests keep
 settlement dependent on the child after the parent retires.
+`OwnIdleRetirement.Projection.cfg` separately checks fresh five-field local
+actor-state reads, the readiness loop's conditional first sample and separate
+error sample, deferred preparation/expiry decisions, and omitted family,
+ancestry, and JSON work. Its seven projection controls must fail their intended
+invariants. Store and public faux fixtures retain missing/deleted rows,
+generation/error/activity changes, quiet-age rechecks, full session APIs,
+readiness retirement fences, and capacity selection. The model abstracts row
+values and work, not SQLite isolation, runtime allocation, or wall-clock latency.
 `NotificationLifecycle.Snapshot.cfg` separately checks one family projection per
 synchronous observation, fresh direct/default and next-call reads, authoritative
 null, and equivalent decisions. Its reread, stale, null-fallback, and root-only

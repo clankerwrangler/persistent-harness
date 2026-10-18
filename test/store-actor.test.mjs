@@ -632,3 +632,64 @@ test("child-exit retry batches do not strand receipts behind unacknowledged mess
   assert.equal(store.listPendingChildExitMessages(second.at(-1).messageId).length,0);
   assert.equal(store.listPendingChildExitMessages().length,100,"a fresh scan retries earlier unacknowledged receipts");
 });
+
+
+test("local actor-state reads stay fresh without mapping family or launch metadata", async t => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), "harness-local-state-"));
+  const databasePath = path.join(dir, "store.sqlite"), store = new HarnessStore(databasePath), writer = new DatabaseSync(databasePath);
+  t.after(async () => { writer.close(); store.close(); await rm(dir, { recursive: true, force: true }); });
+  const metadata = { ...launch("Root"), capabilities: [{ id: "large-unused", description: "x".repeat(8192) }] };
+  store.createRoot({ sessionId: "root", sessionFile: "/root.jsonl", cwd: dir, name: "Root", actorToken: "root", launch: metadata }, 1);
+  for (const [id, parent, depth] of [["child", "root", 1], ["grandchild", "child", 2]]) {
+    store.createChild(parent, { sessionId: id, sessionFile: `/${id}.jsonl`, actorToken: id,
+      policy: { ...launch(id, "work"), cwd: dir, depth }, now: 2 + depth });
+  }
+  const keys = ["lifecycle", "actorGeneration", "activity", "quietSince", "lastError"];
+  const select = session => session && Object.fromEntries(keys.map(key => [key, session[key]]));
+  function read(id) {
+    const prepare = DatabaseSync.prototype.prepare, parse = JSON.parse, executions = []; let parses = 0;
+    DatabaseSync.prototype.prepare = function(sql) {
+      const statement = Reflect.apply(prepare, this, [sql]), get = statement.get;
+      statement.get = function(...args) { executions.push(sql); return Reflect.apply(get, this, args); };
+      return statement;
+    };
+    JSON.parse = function(...args) { parses++; return Reflect.apply(parse, this, args); };
+    let value;
+    try { value = store.getSessionActorState(id); }
+    finally { DatabaseSync.prototype.prepare = prepare; JSON.parse = parse; }
+    assert.deepEqual(executions, ["SELECT lifecycle, actor_generation, activity, quiet_since, last_error FROM sessions WHERE id = ?"]);
+    assert.equal(parses, 0);
+    if (value) assert.deepEqual(Object.keys(value), keys);
+    return value;
+  }
+  assert.equal(read("absent"), undefined);
+  for (const id of ["root", "child", "grandchild"]) assert.deepEqual(read(id), select(store.getSession(id)));
+  const identity = { pid: 101, synthetic: "identity" };
+  for (const id of ["root", "child", "grandchild"]) store.markActorStarted(id, 1, { pid: 101, processIdentity: identity }, 5);
+  store.setActorActivity("grandchild", 1, true, 6);
+  assert.equal(read("root").activity, "delegating"); assert.equal(read("root").quietSince, 5);
+  for (const id of ["root", "child", "grandchild"]) assert.deepEqual(read(id), select(store.getSession(id)));
+  const before = Object.freeze(read("root"));
+  writer.prepare("UPDATE sessions SET lifecycle='resident', actor_generation=7, activity='idle', quiet_since=0, last_error='' WHERE id='root'").run();
+  const current = read("root");
+  assert.notEqual(current, before);
+  assert.deepEqual(before, { lifecycle: "resident", actorGeneration: 1, activity: "delegating", quietSince: 5, lastError: null });
+  assert.deepEqual(current, { lifecycle: "resident", actorGeneration: 7, activity: "idle", quietSince: 0, lastError: "" });
+  const full = store.getSession("root");
+  assert.deepEqual(read("root"), select(full)); assert.deepEqual(store.getSession("root"), full);
+  assert.equal(full.workingDescendantCount, 1); assert.equal(full.lineage, "Root");
+  assert.deepEqual(full.actorIdentity, identity); assert.deepEqual(full.launch.capabilityIds, ["large-unused"]);
+  assert.equal(store.getActorLaunch("root").launch.capabilities[0].description.length, 8192);
+  const victim = store.findIdleResidentActor();
+  assert.equal(victim.sessionId, "root"); assert.equal(victim.lineage, "Root"); assert.deepEqual(victim.launch, full.launch);
+  store.markActorLifecycle("root", 7, "error", "fresh error", 7);
+  assert.deepEqual(read("root"), select(store.getSession("root"))); assert.equal(read("root").lastError, "fresh error");
+  store.prepareActorRevival("root", "next", 8);
+  assert.equal(read("root").actorGeneration, 8); assert.equal(read("root").lifecycle, "starting");
+  store.markActorLifecycle("root", 8, "stopped", null, 9);
+  store.deleteSession("root", 10);
+  for (const id of ["root", "child", "grandchild"]) {
+    assert.equal(read(id).lifecycle, "deleted"); assert.deepEqual(read(id), select(store.getSession(id)));
+  }
+  assert.equal(read("still-absent"), undefined);
+});

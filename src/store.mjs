@@ -909,6 +909,12 @@ export class HarnessStore {
   }
 
   getSession(sessionId) { return this.#mappedSession(sessionId); }
+
+  getSessionActorState(sessionId) {
+    const row = this.#db.prepare("SELECT lifecycle, actor_generation, activity, quiet_since, last_error FROM sessions WHERE id = ?").get(sessionId);
+    return row ? { lifecycle: row.lifecycle, actorGeneration: Number(row.actor_generation),
+      activity: row.activity, quietSince: row.quiet_since, lastError: row.last_error } : undefined;
+  }
   resolveSession(selector) {
     const rows = this.#db.prepare(`SELECT id FROM sessions WHERE lifecycle <> 'deleted'
       AND (id = ? OR short_id = ? OR display_name = ?) ORDER BY created_at, id LIMIT 2`).all(selector, selector, selector);
