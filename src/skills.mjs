@@ -16,7 +16,7 @@ function sha256(value) {
   return createHash("sha256").update(value).digest("hex");
 }
 
-async function hashDirectory(directory) {
+async function hashDirectory(directory, loadedFiles) {
   const digest = createHash("sha256");
   async function visit(current, relativeBase = "") {
     const entries = (await readdir(current, { withFileTypes: true }))
@@ -28,7 +28,7 @@ async function hashDirectory(directory) {
       digest.update(`${entry.isDirectory() ? "d" : entry.isSymbolicLink() ? "l" : "f"}:${relative}\0`);
       if (entry.isDirectory()) await visit(fullPath, relative);
       else if (entry.isSymbolicLink()) digest.update(await readlink(fullPath));
-      else digest.update(await readFile(fullPath));
+      else digest.update(loadedFiles.get(fullPath) ?? await readFile(fullPath));
       digest.update("\0");
     }
   }
@@ -206,14 +206,18 @@ async function exists(filePath) {
 async function loadSkill(command) {
   const commandPath = command.path ?? command.sourceInfo?.path;
   const skillPath = path.resolve(commandPath);
-  const content = await readFile(skillPath, "utf8");
+  const contentBytes = await readFile(skillPath);
+  const content = contentBytes.toString("utf8");
+  const loadedFiles = new Map([[skillPath, contentBytes]]);
   const markdown = parseSkillMarkdown(content, skillPath);
   const skillDir = path.dirname(skillPath);
   const pyprojectPath = path.join(skillDir, "pyproject.toml");
   let python = null;
   let pyprojectContent = "";
   if (path.basename(skillPath) === "SKILL.md" && await exists(pyprojectPath)) {
-    pyprojectContent = await readFile(pyprojectPath, "utf8");
+    const pyprojectBytes = await readFile(pyprojectPath);
+    loadedFiles.set(pyprojectPath, pyprojectBytes);
+    pyprojectContent = pyprojectBytes.toString("utf8");
   }
   if (pyprojectContent.includes("[tool.persistent-harness]")) {
     const parsed = parsePythonBacking(pyprojectContent, pyprojectPath);
@@ -233,7 +237,7 @@ async function loadSkill(command) {
     throw new Error(`${skillPath}: derived alias ${alias} is not a valid Python identifier`);
   }
   const contentHash = path.basename(skillPath) === "SKILL.md"
-    ? await hashDirectory(skillDir)
+    ? await hashDirectory(skillDir, loadedFiles)
     : sha256(content);
   return {
     id: markdown.name,
