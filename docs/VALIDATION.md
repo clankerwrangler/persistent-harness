@@ -214,6 +214,16 @@ appends during registration, complete-history ambiguity, and offline reporting;
 a real stock-worker test requires native, legacy, and custom historical pending
 receipts to complete through supervisor reconciliation without reinjection.
 
+`PendingInputReads` checks ordered receipt/payload snapshots, one-query pending
+reads, payload-free existence and no-op clear, and current queue selection after
+an asynchronous boundary. Its `NPlusOne`, `EagerClear`, and `StaleQueue` controls
+must fail their corresponding invariants. It abstracts SQLite execution and JSON
+hydration. `pending-input-reads.test.mjs` counts actual prepared queries, synthetic
+payload parsing, and row updates while checking per-ID value parity, timestamps,
+provenance, attachments, repeated failure publication, and affected-only clearing.
+The existing input-location and supervisor reconciliation tests retain legacy
+read-only, post-await evidence, stop, and no-replay coverage.
+
 `ActorCompileCache` checks one supervisor cache owner, cleanup after pending
 launches and writers drain, generation-local runtime identity, unchanged readiness
 validation, source-current loads, and disabled/unavailable fallback. Node's cache

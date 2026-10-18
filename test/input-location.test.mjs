@@ -70,7 +70,9 @@ test("pre-location schema supports read-only observation and additive writable m
   store.createActorInput("root", { inputId: "old", message: "old input" }); store.close();
   const db = new DatabaseSync(dbPath); db.exec("ALTER TABLE actor_inputs DROP COLUMN location_json"); db.close();
   store = new HarnessStore(dbPath, { readOnly: true });
-  assert.equal(store.getActorInput("old", "root").location, undefined); store.close();
+  assert.equal(store.getActorInput("old", "root").location, undefined);
+  assert.deepEqual(store.listPendingActorInputs("root"), [store.getActorInput("old", "root")]);
+  assert.equal(store.hasPendingActorInputs("root"), true); store.close();
   store = new HarnessStore(dbPath);
   try {
     assert.equal(store.getActorInput("old", "root").message, "old input");

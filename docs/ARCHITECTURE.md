@@ -239,6 +239,13 @@ identity resolution and the supervisor verifies the exact entry before delivery.
 This avoids duplicate startup work without changing compaction, delivery, or
 provider-request boundaries.
 
+Pending queue snapshots use one joined read in receipt sequence order. Existence
+checks do not load payloads. Clearing wake errors reads only inputs whose stored
+error changed; an already-clear queue does not hydrate payloads or rewrite rows.
+Repeated nonnull wake errors still publish the complete pending queue. Delivery
+resamples the queue after asynchronous transcript reconciliation; no queue snapshot
+or canonical incorporation decision is cached across that boundary.
+
 Background completions publish accepted input state when their durable receipt is
 created. The monitor owns at most 128 concurrent dispatch promises and continues
 its existing bounded discovery scans while an owner starts. Actor readiness waits
