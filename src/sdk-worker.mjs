@@ -1,3 +1,4 @@
+import { nodeMemoryDiagnostics } from "./memory-diagnostics.mjs";
 import { projectAvailableModels, validateInferenceEffort } from "./inference-options.mjs";
 import { conversationBirth } from "./conversation-birth.mjs";
 import { normalizeInputLocation } from "./input-location.mjs";
@@ -216,6 +217,8 @@ export class SDKWorker {
     const persist = command.persist === undefined ? false : boolean(command.persist, "persist");
     switch (command.type) {
       case "get_state": return coordinator.getState();
+      case "get_memory_diagnostics": return { version: 1, node: nodeMemoryDiagnostics(),
+        python: await this.lifecycle.memoryDiagnostics?.() ?? { state: "unavailable-not-running" } };
       case "prompt": case "steer": case "follow_up": {
         string(command.message, "message");
         if (command.messageId != null) string(command.messageId, "messageId");

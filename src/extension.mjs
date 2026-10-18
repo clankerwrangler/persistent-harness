@@ -467,6 +467,9 @@ export default function persistentHarnessExtension(pi, owner = null) {
   let kernel;
   let kernelPromise;
   let kernelRestartPromise;
+  if (owner) owner.memoryDiagnostics = () => kernelPromise || kernelRestartPromise
+    ? Promise.resolve({ state: "unavailable-busy" })
+    : kernel?.memoryDiagnostics() ?? Promise.resolve({ state: "unavailable-not-running" });
   let currentManifest;
   let lastRestoreReport;
   let namespaceRecovery;

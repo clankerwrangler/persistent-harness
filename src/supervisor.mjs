@@ -1,3 +1,4 @@
+import { nodeMemoryDiagnostics, workerMemoryDiagnostics } from "./memory-diagnostics.mjs";
 import { birthOrder } from "./conversation-birth.mjs";
 import { createHash, randomUUID } from "node:crypto";
 import { chmod, lstat, mkdir, readFile, readlink, rename, rm, symlink, unlink, writeFile } from "node:fs/promises";
@@ -904,6 +905,20 @@ export class HarnessSupervisor {
       if (!prior) this.#broadcastNavigator("input_accepted");
       return acceptedResponse(trusted, !prior || prior.state !== "completed");
     });
+    if (type === "get_memory_diagnostics") {
+      const numeric = nodeMemoryDiagnostics();
+      const unavailable = state => ({ version: 1, supervisor: numeric, worker: { state } });
+      const session = this.store.getSession(params.sessionId);
+      if (!session || session.lifecycle === "deleted") throw requestFailure("not_found", "session does not exist");
+      const actor = this.#actors.get(params.sessionId);
+      if (this.#stoppingPromise || actor?.expectedLifecycle || this.store.isSessionDeleting(params.sessionId)) return unavailable("unavailable-busy");
+      if (!actor?.worker.isRunning || session.lifecycle !== "resident" || actor.generation !== session.actorGeneration) return unavailable("unavailable-not-running");
+      try {
+        const data = await actor.worker.request("get_memory_diagnostics", {}, 1000);
+        if (this.#actors.get(params.sessionId) !== actor || actor.expectedLifecycle) return unavailable("unavailable-busy");
+        return { version: 1, supervisor: numeric, worker: workerMemoryDiagnostics(data) };
+      } catch { return unavailable("unavailable-error"); }
+    }
     if (type === "get_actor_state") { const actor = await this.#ensureActorReady(params.sessionId); return { state: await actor.worker.request("get_state") }; }
     if (type === "get_actor_entries") { const actor = await this.#ensureActorReady(params.sessionId); return this.#boundedEntries(await actor.worker.request("get_entries", params.since ? { since: params.since } : {})); }
     if (type === "get_visible_messages") {

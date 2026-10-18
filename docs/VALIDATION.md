@@ -280,6 +280,17 @@ actual startup/restore source with public synthetic serialized values, checking
 success, truthful decode errors and final temporary-owner release; it does not
 start or inspect a live kernel.
 
+`MemoryDiagnostics` checks operator-only scope, forwarding across drain races,
+immediate busy rejection, synchronous pipe reservation before later work, no
+process startup and no conversation/checkpoint mutation. Its five controls
+(`IgnoreBusy`, `StartMissing`, `SkipReserve`, `MutateRead`, `BypassAuth`) must fail.
+The finite model abstracts numeric collection and OS scheduling. Focused
+`memory-diagnostics.test.mjs` fixtures exercise real isolated kernel history,
+queued tools/snapshots, a nested host-response wait, close after an admitted read,
+fixed peer-field projection, exact-type/subclass/metaclass hook rejection,
+deduplicated sizes, count/time truncation, client-only auth, the connect-only CLI,
+and a held unrelated supervisor mutation without actor start or state changes.
+
 `CanonicalContextRetention` complements `CanonicalContext` and
 `CanonicalContextBudget`: revision/generation ownership, leaf changes,
 compaction-pruned native/alias/signature facts, and working-payload scope.

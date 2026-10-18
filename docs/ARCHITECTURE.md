@@ -116,6 +116,24 @@ Archive snapshots retain complete detached records, including opaque extension d
 
 The complete returned `{messages, outstanding, diagnostics}` view defaults to an aggregate 64 Mi UTF-16 string/key code-unit budget, with 2,000,000 visited values and depth 64 measured from that view's root, after summary metadata and ordinary-mode result ordering. The [process configuration](DEPENDENCIES.md#persistent-configuration) can select a materialized string budget from 64 Mi through 256 Mi code units. One value is captured before each projection and governs both the initial helper-output copy and the final complete view; archive-record and signature limits do not change. An archive's lifetime strings are not one model context, and these limits are not total-archive or heap-memory bounds. Oversized data is rejected, not truncated, skipped, or repaired.
 
+## Explicit memory diagnostics
+
+Registered operators can request v1 `get_memory_diagnostics({sessionId})`; actors
+cannot request another diagnostics scope. This separate path bypasses actor
+readiness and session-mutation queues and is never part of status polling. It
+returns fixed Node numeric memory/V8 counters and bounded Python output-history
+counts/sizes only. There is no GC, heap snapshot, conversation write, namespace
+enumeration or diagnostic-driven process start. Unknown peer fields are dropped.
+
+The existing Python FIFO counts queued work as busy before its microtask starts.
+An idle diagnostic synchronously reserves that FIFO and control request; a later
+tool, snapshot or close drains it. Busy tools, nested host-response waits and
+snapshot/drain ownership reject observation immediately rather than enqueueing it.
+The collector accepts only exact builtin containers and exact IPython history
+owners, deduplicates immutable strings/bytes and containers by identity, and
+checks a fixed reference/time budget while walking values without visiting keys.
+See [numeric observation limits](OPERATIONS.md#explicit-numeric-memory-observation).
+
 ## Session-history retrieval
 
 Actor-authenticated `session_history` list, search, and open requests use the

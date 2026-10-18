@@ -25,6 +25,7 @@ from IPython.core.displayhook import DisplayHook
 from IPython.core.formatters import BaseFormatter, DisplayFormatter
 from IPython.core.displaypub import DisplayPublisher
 from _mime_history import MimeHistory
+from _memory_diagnostics import collect_history_memory
 
 from _persistent_harness import SkillProxy, bootstrap_skills, configure_control, _execution_id
 
@@ -1039,6 +1040,9 @@ while True:
                 "errorType": type(error).__name__ if error is not None else None,
                 "error": str(error) if error is not None else None,
             })
+        elif command_type == "memory_diagnostics":
+            emit({"type": "memory_diagnostics_done", "id": command_id,
+                  "diagnostics": collect_history_memory(shell.history_manager)})
         elif command_type == "snapshot":
             snapshot = save_snapshot(config["snapshotPath"], shell.user_ns, protected_names,
                                      namespace_checkpoint=namespace_checkpoint)
