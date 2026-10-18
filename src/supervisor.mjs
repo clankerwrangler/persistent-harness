@@ -1724,7 +1724,7 @@ export class HarnessSupervisor {
   }
 
   async #reconcileSkillGrantOnce(sessionId, ancestry, check) {
-    const session = this.store.getSession(sessionId);
+    const session = this.store.getSessionSkillGrantContext(sessionId);
     if (!session || session.lifecycle === "deleted" || !session.sessionFile) throw new Error("session does not exist");
     const previous = this.store.getSessionSkillGrant(sessionId);
     let skills;

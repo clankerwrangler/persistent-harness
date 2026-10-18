@@ -129,8 +129,14 @@ error sample, deferred preparation/expiry decisions, and omitted family,
 ancestry, and JSON work. Its seven projection controls must fail their intended
 invariants. Store and public faux fixtures retain missing/deleted rows,
 generation/error/activity changes, quiet-age rechecks, full session APIs,
-readiness retirement fences, and capacity selection. The model abstracts row
-values and work, not SQLite isolation, runtime allocation, or wall-clock latency.
+readiness retirement fences, and capacity selection.
+`OwnIdleRetirement.GrantContext.cfg` separately checks fresh raw lifecycle,
+session-file, kind, and immediate-parent projections at both reconciliation
+observations. Its missing, deleted, file, kind, parent, cache, and full-mapper
+controls must fail. Store/public fixtures retain early grant promotion and
+retained-catalog availability, pre-intent failure, runtime approval, parent
+capability bounds, and Stop/delete sidecar drain. These projection models abstract
+row values and work, not SQLite isolation, allocation, or wall-clock latency.
 `NotificationLifecycle.Snapshot.cfg` separately checks one family projection per
 synchronous observation, fresh direct/default and next-call reads, authoritative
 null, and equivalent decisions. Its reread, stale, null-fallback, and root-only

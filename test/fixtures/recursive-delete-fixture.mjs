@@ -48,14 +48,14 @@ export async function deletionFixture(t) {
   await fixture.supervisor.start();
   fixture.client = new HarnessClient({ socketPath, heartbeatMs: 0, requestTimeoutMs: 20_000 }); fixture.clients.push(fixture.client);
   await fixture.client.start({ registrationType: "register_client", clientInstanceId: randomUUID() });
-  fixture.admit = async (name, parent = null, { start = true } = {}) => {
+  fixture.admit = async (name, parent = null, { start = true, seedGrant = true } = {}) => {
     const sessionId = randomUUID(), sessionFile = path.join(dir, `${sessionId}.jsonl`);
     await writeFile(sessionFile, JSON.stringify({ type: "session", version: 3, id: sessionId, timestamp: new Date().toISOString(), cwd: dir }) + "\n");
     const policy = { name, prompt: "Disposable deletion fixture", cwd: dir, repositoryRoot: null, capabilities: [], skillCatalog: [] };
     const store = fixture.supervisor.store;
     const session = parent ? store.createChild(parent.sessionId, { sessionId, sessionFile, policy, actorToken: randomUUID() }).session
       : store.createRoot({ sessionId, sessionFile, cwd: dir, repositoryRoot: null, name, launch: policy, actorToken: randomUUID() }).session;
-    store.setSessionSkillGrant(sessionId, []);
+    if (seedGrant) store.setSessionSkillGrant(sessionId, []);
     if (start) await fixture.client.request("subscribe_session", { selector: sessionId });
     return session;
   };

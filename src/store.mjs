@@ -1172,6 +1172,12 @@ export class HarnessStore {
     return { version: 1, skills, updatedAt: now };
   }
 
+  getSessionSkillGrantContext(sessionId) {
+    const row = this.#db.prepare("SELECT lifecycle, session_file, kind, parent_session_id FROM sessions WHERE id = ?").get(sessionId);
+    if (!row) return undefined;
+    return { lifecycle: row.lifecycle, sessionFile: row.session_file, kind: row.kind, parentSessionId: row.parent_session_id };
+  }
+
   getSessionSkillGrant(sessionId) {
     const row = this.#db.prepare("SELECT manifest_json, updated_at FROM session_skill_grants WHERE session_id = ?").get(sessionId);
     if (!row) return undefined;
