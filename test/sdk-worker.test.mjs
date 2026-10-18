@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { getHeapStatistics } from "node:v8";
 import WebSocket from "ws";
 import { after, test, mock } from "node:test";
 import { mkdtemp, mkdir, readFile, writeFile, rm, symlink } from "node:fs/promises";
@@ -15,8 +16,10 @@ import { RpcDialogBroker, bootstrapSDKWorker, runSDKWorkerRpc, toWorkerRpcEvent 
 import { PiSessionActor } from "../src/session-actor.mjs";
 import { createCompactionDriver, prepareActorCompaction } from "../src/actor-compaction.mjs";
 import { AUTOMATIC_COMPACTION_CHECK as compactionChannel, createAutomaticCompactionPermission } from "../src/automatic-compaction-permission.mjs";
+import { explicitHeapCap } from "./fixtures/node-heap-cap.mjs";
 import { projectCanonicalBranch } from "../src/canonical-context.mjs";
 
+const workerHeapCap = explicitHeapCap();
 const candidate = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 // Resolve explicit caller selection before scrubbing private fixture environment.
 const selected = await resolveExternalPi();
@@ -214,7 +217,9 @@ test("resolver requires explicit install and uses manifest exports beside bundle
   await assert.rejects(resolveExternalPi({ env: {} }), /explicitly/);
   const byModule = await resolveExternalPi({ env: { PI_HARNESS_PI_MODULE: path.join(stock, "dist/index.js") } });
   const byCommand = await resolveExternalPi({ env: { PI_HARNESS_PI_COMMAND: path.join(stock, "dist/bundle/cli.js") } });
-  assert.deepEqual(byModule, byCommand);
+  const packageManifest = JSON.parse(await readFile(path.join(stock, "package.json"), "utf8"));
+  const programmatic = packageManifest.exports["./programmatic"]?.import;
+  assert.deepEqual(byCommand, { ...byModule, sdk: programmatic ? path.resolve(stock, programmatic) : byModule.sdk });
   assert.equal(byModule.version, "0.99.1");
   assert.equal(byModule.sdk, path.join(stock, "dist/index.js"));
   const apiPackageFile = findPackageJSON(pathToFileURL(byModule.api));
@@ -224,7 +229,7 @@ test("resolver requires explicit install and uses manifest exports beside bundle
   assert.equal(target, "./dist/api/*.js");
   assert.equal(byModule.responsesApi, fileURLToPath(new URL(target.replace("*", "openai-responses-shared"), pathToFileURL(apiPackageFile))));
   const executable = path.join(temporary, "explicit-pi"); await symlink(path.join(stock, "dist/bundle/cli.js"), executable);
-  assert.deepEqual(await resolveExternalPi({ env: { PI_HARNESS_PI_COMMAND: executable } }), byModule);
+  assert.deepEqual(await resolveExternalPi({ env: { PI_HARNESS_PI_COMMAND: executable } }), byCommand);
   assert.equal(typeof external.core.formatPromptTemplateInvocation, "function");
   assert.equal(typeof external.responsesApi.processResponsesStream, "function");
 });
@@ -523,16 +528,27 @@ test("delta projection retains tool identity without partial messages", () => {
 });
 
 
-test("PiSessionActor starts the worker with supervisor flags and receives ordinary events and dialog responses", async () => {
+test("PiSessionActor starts the worker with supervisor flags and receives ordinary events and dialog responses", async t => {
   const directory = await mkdtemp(path.join(temporary, "child-"));
   const agentDir = path.join(directory, "agent"); await mkdir(agentDir);
   const driver = path.join(directory, "fixture-driver.mjs");
+  const capFile = path.join(directory, "worker-heap-cap.json");
+  const capProof = workerHeapCap ? `import assert from "node:assert/strict";
+import { writeFileSync } from "node:fs";
+import { getHeapStatistics } from "node:v8";
+import { explicitHeapCap } from ${JSON.stringify(new URL("./fixtures/node-heap-cap.mjs", import.meta.url).href)};
+const flag = explicitHeapCap(), heapSizeLimit = getHeapStatistics().heap_size_limit;
+assert.equal(flag, ${JSON.stringify(workerHeapCap)});
+assert.equal(heapSizeLimit, ${getHeapStatistics().heap_size_limit});
+writeFileSync(${JSON.stringify(capFile)}, JSON.stringify({ pid: process.pid, flag, heapSizeLimit,
+  execArgv: process.execArgv, phase: "pre-sdk-bootstrap" }));
+` : "";
   await writeFile(driver, `import net from "node:net"; import http from "node:http"; import https from "node:https";
 const denied = () => { throw new Error("Fixture network denied"); };
 globalThis.fetch = denied; net.Socket.prototype.connect = denied; http.request = denied; https.request = denied;
 import { loadExternalPi } from ${JSON.stringify(pathToFileURL(path.join(candidate, "src/external-pi.mjs")).href)};
 import { runSDKWorkerRpc, bootstrapSDKWorker } from ${JSON.stringify(pathToFileURL(path.join(candidate, "src/sdk-worker.mjs")).href)};
-const external = await loadExternalPi();
+${capProof}const external = await loadExternalPi();
 const retentionSdk = ${savedEnv.PI_HARNESS_RETENTION_SDK_MODULE ? `await import(${JSON.stringify(pathToFileURL(savedEnv.PI_HARNESS_RETENTION_SDK_MODULE).href)})` : "null"};
 const integratedExternal = retentionSdk ? { ...external, sdk: { ...external.sdk, SessionManager: retentionSdk.SessionManager,
   ...(${sourceSdk} ? { createAgentSession: retentionSdk.createAgentSession, ExtensionRunner: retentionSdk.ExtensionRunner } : {}) } } : external;
@@ -544,13 +560,20 @@ await runSDKWorkerRpc({ bootstrap: (options) => bootstrapSDKWorker({ ...options,
   const actor = new PiSessionActor({ command: process.execPath, cwd: directory,
     env: { PATH: savedEnv.PATH, HOME: directory, PI_CODING_AGENT_DIR: agentDir,
       PI_HARNESS_PI_MODULE: sdkEntry, PI_OFFLINE: "1", PI_TELEMETRY: "0", PI_SKIP_VERSION_CHECK: "1" },
-    args: [driver, "--mode", "rpc", "--provider", "worker-fixture", "--model", "fixture", "--thinking", "high",
+    args: [...(workerHeapCap ? [workerHeapCap] : []), driver, "--mode", "rpc", "--provider", "worker-fixture", "--model", "fixture", "--thinking", "high",
       "--extension", path.join(candidate, "index.ts"), "--no-extensions", "--no-skills", "--no-context-files",
       "--name", "Child actor", "--session", path.join(directory, "canonical.jsonl")], requestTimeoutMs: 5000,
   });
   const events = []; actor.on("event", (event) => events.push(event));
   try {
     const state = await actor.start();
+    if (workerHeapCap) {
+      const proof = JSON.parse(await readFile(capFile, "utf8"));
+      assert.equal(proof.pid, actor.pid); assert.equal(proof.flag, workerHeapCap);
+      assert.equal(proof.heapSizeLimit, getHeapStatistics().heap_size_limit);
+      assert.deepEqual(proof.execArgv, [workerHeapCap]); assert.equal(proof.phase, "pre-sdk-bootstrap");
+      t.diagnostic(JSON.stringify(proof));
+    }
     assert.equal(state.isStreaming, false); assert.equal(state.sessionName, "Child actor");
     assert.equal(state.thinkingLevel, "high"); assert.equal(state.steeringMode, "all");
     const command = (await actor.request("get_commands")).commands.find((item) => item.name === "dialog");
