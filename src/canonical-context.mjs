@@ -770,7 +770,12 @@ function ingestMessageFacts(entry, header, estimateContextTokens) {
   const calls = new Map([...indexed.calls].map(([id, record]) => [id, compactCall(record)]));
   const results = new Map([...indexed.results].map(([id, record]) => [id,
     { entryId: record.entryId, toolName: record.message.toolName }]));
-  const selected = { calls, results, ...omissionAliases({ calls, results }, [entry]) };
+  // Empty per-record containers carry no evidence; keep them transient rather
+  // than retaining four Maps for every ordinary user/text message.
+  const selected = {};
+  for (const [name, records] of Object.entries({ calls, results, ...omissionAliases({ calls, results }, [entry]) })) {
+    if (records.size) selected[name] = records;
+  }
   if (estimateContextTokens) {
     try { header.profile = copyData(estimateContextTokens([finalizedInputMessage(entry.message)])); }
     catch {
@@ -783,7 +788,7 @@ function ingestMessageFacts(entry, header, estimateContextTokens) {
 }
 
 function addAliasFacts(facts, selected) {
-  for (const name of ["aliases", "observedAliases"]) for (const [key, values] of selected[name]) {
+  for (const name of ["aliases", "observedAliases"]) for (const [key, values] of selected[name] ?? []) {
     if (!facts[name].has(key)) facts[name].set(key, new Set());
     for (const value of values) facts[name].get(key).add(value);
   }
@@ -884,7 +889,7 @@ function addSelectedFacts(manager, state, facts, header, order, estimateContextT
       header.profile = copyData(estimateContextTokens([finalizedInputMessage(entry.message)]));
       delete indexed.profileDeferred;
     }
-    for (const [id, source] of indexed.calls) {
+    for (const [id, source] of indexed.calls ?? []) {
       requireThat(!facts.calls.has(id), "ERR_CONTEXT_DUPLICATE_CALL_ID");
       const record = { ...source, order };
       const result = facts.results.get(id);
@@ -894,7 +899,7 @@ function addSelectedFacts(manager, state, facts, header, order, estimateContextT
       }
       facts.calls.set(id, record);
     }
-    for (const [id, source] of indexed.results) {
+    for (const [id, source] of indexed.results ?? []) {
       requireThat(!facts.results.has(id), "ERR_CONTEXT_DUPLICATE_RESULT_ID");
       const record = { ...source, order };
       const call = facts.calls.get(id);

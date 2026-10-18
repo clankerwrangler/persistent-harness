@@ -458,6 +458,12 @@ test("cold ingestion folds compact facts once without retaining source payloads"
   const manager = fixture(rows); manager.branch("active");
   registerCanonicalSessionManager(manager, { estimateContextTokens: core.estimateContextTokens });
   const headers = sessionBranchHeaders(manager);
+  const plain = headers.find(header => header.id === "active");
+  assert.deepEqual(plain.selectedFacts, {}, "ordinary messages retain no empty fact Maps");
+  const issuing = headers.find(header => header.id === "call").selectedFacts;
+  assert.deepEqual([...issuing.calls.keys()], ["native"]);
+  assert.equal(issuing.results, undefined); assert.equal(issuing.observedAliases, undefined);
+  assert(issuing.aliases.size > 0, "nonempty admission/alias evidence remains retained");
   assert.deepEqual(manager.reads.ranges, rows.map((_, i) => [i, 1]));
   assert.deepEqual(manager.reads.ids, [], "eager selected validation must reuse the first committed read");
   assert.equal(Math.max(...headers.map(header => header.birthSequence)), 3, "birth recovery is branch-local");

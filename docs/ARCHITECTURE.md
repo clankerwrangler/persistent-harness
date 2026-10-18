@@ -71,8 +71,9 @@ archive data and selected native/signature/alias facts once per committed source
 generation, then validates appended records incrementally. A fresh independent
 `{revision, generation}` stamp invalidates facts after reload/rewrite/file changes;
 leaf-only changes rebuild selected-branch facts. Cold indexes retain identities,
-positions and validation facts, not message bodies, arguments, result payloads or
-encrypted signatures. `buildSessionSource()` selects producing contributions before hydration, including
+positions and nonempty validation facts, not message bodies, arguments, result
+payloads or encrypted signatures. Empty per-message fact Maps are transient;
+ordinary messages do not retain four empty containers. `buildSessionSource()` selects producing contributions before hydration, including
 context-edit omissions and replacements; genuine pending calls remain recovery
 facts even outside the model view. Input receipts,
 settlement cursors, issuer lookup and family bookkeeping use that same index.

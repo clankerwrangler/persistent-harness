@@ -267,6 +267,19 @@ SDK/coordinator fixture checks cold resume, the first ordinary request, recovery
 and bookkeeping with public-read counters. Default/array managers and explicit
 history, tree, edit, and branch operations retain complete values.
 
+`CanonicalFactStorage` checks omission of empty per-message fact containers,
+exact nonempty native/alias/observation evidence, selected rejection and reload.
+Its empty-retention and dropped-fact controls must fail. The retention regression
+also checks the sparse representation without weakening its existing projection,
+branch, signature and no-replay assertions.
+
+`RecoveryValueLifetime` checks descriptor-bound bytes through restore and release
+before readiness, including a reported decode failure. Its early-release and
+retained-ready controls must fail. `kernel-recovery-lifetime.test.mjs` executes the
+actual startup/restore source with public synthetic serialized values, checking
+success, truthful decode errors and final temporary-owner release; it does not
+start or inspect a live kernel.
+
 `CanonicalContextRetention` complements `CanonicalContext` and
 `CanonicalContextBudget`: revision/generation ownership, leaf changes,
 compaction-pruned native/alias/signature facts, and working-payload scope.
