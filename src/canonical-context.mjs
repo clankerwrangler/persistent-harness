@@ -650,7 +650,7 @@ export function sessionContextInput(manager, buildSessionProjection, mode) {
 }
 
 function newArchiveState() {
-  return { headers: [], byId: new Map(), profiles: new Map(), nodes: 1, stamp: null, generation: null, factCount: 0, leaf: null, selected: [], facts: null, entrySource: null };
+  return { headers: [], byId: new Map(), profiles: new Map(), nodes: 1, stamp: null, generation: null, factCount: 0, leaf: null, selected: [], facts: null, entrySource: null, entryReader: false };
 }
 
 // Exact plain-data value identity: object key order is irrelevant, presence and array holes are not.
@@ -827,12 +827,13 @@ function readManagedEntry(manager, state, id) {
   }
   const source = state.entrySource;
   source.validate();
-  requireThat(source.entries[header.position]?.key === header.sourceKey, "ERR_CONTEXT_SOURCE_PROJECTION");
+  const descriptor = state.entryReader ? source.getEntryHeader(header.position) : source.entries[header.position];
+  requireThat(descriptor?.key === header.sourceKey, "ERR_CONTEXT_SOURCE_PROJECTION");
   const firstRead = header.sourceDigest === undefined;
   // Replace descriptor accounting with consumed-record accounting, rather than
   // charging both inventories against the archive structure budget.
   const budget = { nodes: firstRead ? state.nodes - header.metadataNodes : 0, depth: 1, codeUnits: String(header.position).length };
-  const entry = copyData(source.read(header.position), { budget });
+  const entry = copyData(state.entryReader ? source.read(header.position, header.sourceKey) : source.read(header.position), { budget });
   requireThat(entry?.id === id && entry.type === header.type && entry.parentId === header.parentId
     && (typeof entry.customType === "string" ? entry.customType : undefined) === header.customType
     && (typeof entry.message?.role === "string" ? entry.message.role : undefined) === header.role,
@@ -929,19 +930,22 @@ function managedState(manager, factsRequired = true) {
   // Never publish partially validated facts after an append/reload failure.
   owner.state = null;
   const start = state.headers.length;
-  if (typeof manager.buildSessionEntrySource === "function" && (!state.entrySource || start < count)) {
+  const entryReader = typeof manager.buildSessionEntryReader === "function";
+  const buildEntrySource = entryReader ? manager.buildSessionEntryReader : manager.buildSessionEntrySource;
+  if (typeof buildEntrySource === "function" && (!state.entrySource || start < count)) {
     let source;
-    try { source = manager.buildSessionEntrySource(); }
+    try { source = buildEntrySource.call(manager); }
     catch { throw new CanonicalContextError("ERR_CONTEXT_HELPER_FAILED"); }
     source.validate();
     requireThat(source.revision?.revision === stamp.revision && source.revision.generation === stamp.generation
-      && source.leafId === leaf && Array.isArray(source.entries) && source.entries.length === count,
-    "ERR_CONTEXT_SOURCE_PROJECTION");
-    state.entrySource = source;
+      && source.leafId === leaf && (entryReader ? source.length === count && typeof source.getEntryHeader === "function"
+        : Array.isArray(source.entries) && source.entries.length === count), "ERR_CONTEXT_SOURCE_PROJECTION");
+    state.entrySource = source; state.entryReader = entryReader;
   }
   for (let i = start; i < count; i++) {
     if (state.entrySource) {
-      const header = sourceHeader(state.entrySource.entries[i], i, state);
+      const descriptor = state.entryReader ? state.entrySource.getEntryHeader(i) : state.entrySource.entries[i];
+      const header = sourceHeader(descriptor, i, state);
       requireThat(!state.byId.has(header.id), "ERR_CONTEXT_DUPLICATE_ENTRY_ID");
       state.headers.push(header); state.byId.set(header.id, header);
       if (BODY_HEADER_TYPES.has(header.type) || header.type === "custom" && HEADER_CUSTOM_TYPES.has(header.customType)) {

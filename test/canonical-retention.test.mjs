@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -19,7 +20,7 @@ const assistant = (parts = [call("native")]) => ({ role: "assistant", id: "assis
   api: "fixture", provider: "fixture", model: "fixture", stopReason: "toolUse", timestamp: 1,
   usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } } });
 function entry(id, parentId, message) { return { type: "message", id, parentId, timestamp: "2026-01-01T00:00:00Z", message }; }
-function fixture(rows, { entrySource = false } = {}) {
+function fixture(rows, { entrySource = false, entryReader = false } = {}) {
   let entries = structuredClone(rows), leaf = entries.at(-1)?.id ?? null, revision = 0, generation = 0;
   const reads = { ranges: [], ids: [] };
   const manager = { getRevision: () => ({ revision, generation }), getEntryCount: () => entries.length, getLeafId: () => leaf,
@@ -46,9 +47,73 @@ function fixture(rows, { entrySource = false } = {}) {
         read: i => { validate(); reads.sources.push(captured[i].id); return structuredClone(captured[i]); } };
     };
   }
+  if (entryReader) {
+    reads.headers = []; reads.keyed = [];
+    manager.buildSessionEntryReader = () => {
+      const length = entries.length, sourceGeneration = generation;
+      const validate = () => { if (sourceGeneration !== generation) throw new Error("reader expired"); };
+      const getEntryHeader = i => {
+        validate(); assert(Number.isSafeInteger(i) && i >= 0 && i < length);
+        reads.headers.push(i);
+        const row = entries[i];
+        return { id: row.id, type: row.type, parentId: row.parentId, role: row.message?.role, customType: row.customType,
+          key: `${generation}:${i}:${createHash("sha256").update(JSON.stringify(row)).digest("hex")}` };
+      };
+      return { revision: { revision, generation }, leafId: leaf, length, validate, getEntryHeader,
+        read(i, expectedKey) {
+          reads.keyed.push([i, expectedKey]); assert.equal(expectedKey, getEntryHeader(i).key);
+          return structuredClone(entries[i]);
+        } };
+    };
+    manager.redirect = row => { entries[entries.findIndex(value => value.id === row.id)] = structuredClone(row); };
+  }
   registerCanonicalSessionManager(manager); return manager;
 }
 const project = manager => projectCanonicalContext({ sessionManager: manager, mode: "native" });
+
+test("indexed readers win over complete sources, consume only suffix metadata and retain old read keys", () => {
+  const opaque = (id, parentId, text = "public opaque") => ({ type: "custom", id, parentId, customType: "unrelated", data: { text } });
+  const rows = Array.from({ length: 512 }, (_, i) => opaque(`e${i}`, i ? `e${i - 1}` : null));
+  const manager = fixture(rows, { entrySource: true, entryReader: true });
+  manager.buildSessionEntrySource = () => { throw new Error("old complete source must not be built"); };
+  assert.equal(sessionEntryHeaders(manager).length, rows.length);
+  assert.deepEqual(manager.reads.headers, rows.map((_, i) => i));
+  assert.deepEqual(manager.reads.keyed, []);
+  manager.reads.headers.length = 0;
+  for (let i = 512; i < 515; i++) manager.append(opaque(`e${i}`, `e${i - 1}`));
+  assert.equal(sessionEntryHeaders(manager).length, 515);
+  assert.deepEqual(manager.reads.headers, [512, 513, 514]);
+  const original = sessionEntriesMatching(manager, header => header.id === "e0")[0];
+  assert.deepEqual(original, rows[0]);
+  assert.equal(manager.reads.keyed[0].length, 2);
+  assert.equal(typeof manager.reads.keyed[0][1], "string");
+  manager.redirect(opaque("e0", null, "redirected under the same generation"));
+  manager.reads.keyed.length = 0;
+  assert.throws(() => sessionEntriesMatching(manager, header => header.id === "e0"), { code: "ERR_CONTEXT_SOURCE_PROJECTION" });
+  assert.deepEqual(manager.reads.keyed, [], "compare the saved key before payload reading");
+  assert.equal(original.data.text, "public opaque");
+});
+
+test("indexed reader stamp, length, payload identity and late failures cannot publish partial facts", () => {
+  const first = entry("first", null, user("prefix"));
+  for (const corrupt of [source => ({ ...source, length: source.length + 1 }),
+    source => ({ ...source, leafId: "wrong" }),
+    source => ({ ...source, revision: { ...source.revision, revision: source.revision.revision + 1 } }),
+    source => ({ ...source, revision: { ...source.revision, generation: source.revision.generation + 1 } }),
+    source => ({ ...source, read() { return { ...first, id: "forged" }; } }),
+    (source, manager) => ({ ...source, read(i, key) { const value = source.read(i, key); manager.reload([entry("successor", null, user("new"))]); return value; } })]) {
+    const manager = fixture([first], { entryReader: true });
+    const build = manager.buildSessionEntryReader;
+    manager.buildSessionEntryReader = () => corrupt(build(), manager);
+    assert.throws(() => sessionBranchHeaders(manager), /ERR_CONTEXT_SOURCE_PROJECTION|reader expired/);
+    manager.buildSessionEntryReader = build;
+    manager.reload([entry("recovered", null, user("valid successor"))]);
+    assert.equal(sessionBranchHeaders(manager).at(-1).id, "recovered");
+    manager.append(entry("suffix", "recovered", user("suffix")));
+    assert.equal(sessionBranchHeaders(manager).at(-1).id, "suffix");
+  }
+});
+
 
 test("entry-source metadata keeps unrelated opaque values unread through headers, birth and recovery", () => {
   let deep = { marker: "unconsumed opaque value" };
@@ -148,7 +213,8 @@ test("raw cursor history remains readable when SDK entry-source branch validatio
     writeFileSync(file, [{ type: "session", version: 3, id: "synthetic", cwd: directory }, ...rows].map(row => JSON.stringify(row)).join("\n") + "\n");
     const manager = candidate.SessionManager.open(file, directory, directory, { entryRetention: { maxCachedBytes: 1024 } });
     registerCanonicalSessionManager(manager);
-    assert.throws(() => sessionBranchHeaders(manager), { code: "ERR_CONTEXT_HELPER_FAILED" });
+    assert.throws(() => sessionBranchHeaders(manager), { code: typeof manager.buildSessionEntryReader === "function"
+      ? "ERR_CONTEXT_BRANCH_CYCLE" : "ERR_CONTEXT_HELPER_FAILED" });
     const worker = new SDKWorker({ session: { sessionManager: manager, subscribe: () => () => {} } });
     assert.deepEqual(await worker.handle({ type: "get_entries", since: "a" }), { entries: rows.slice(1), leafId: "b" });
   } finally { rmSync(directory, { recursive: true, force: true }); }
@@ -164,9 +230,13 @@ test("real SDK opaque bodies remain complete on explicit reads and retain commit
     const active = manager.appendMessage(user("active"));
     const file = manager.getSessionFile(); manager.setSessionFile(file);
     registerCanonicalSessionManager(manager);
-    const readIds = [], build = manager.buildSessionEntrySource.bind(manager);
-    manager.buildSessionEntrySource = () => {
-      const source = build(); return { ...source, read(i) { readIds.push(source.entries[i].id); return source.read(i); } };
+    const method = typeof manager.buildSessionEntryReader === "function" ? "buildSessionEntryReader" : "buildSessionEntrySource";
+    const readIds = [], build = manager[method].bind(manager);
+    manager[method] = () => {
+      const source = build(); return { ...source, read(i, ...keys) {
+        readIds.push(method === "buildSessionEntryReader" ? source.getEntryHeader(i).id : source.entries[i].id);
+        return source.read(i, ...keys);
+      } };
     };
     sessionBranchHeaders(manager); assert(!readIds.includes(opaque));
     const borrowed = manager.buildSessionEntrySource(), position = borrowed.entries.findIndex(row => row.id === opaque);
