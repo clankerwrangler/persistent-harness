@@ -1510,7 +1510,7 @@ export class HarnessStore {
       .run(now, sessionId, now).changes === 1;
   }
 
-  listSearchableSessions(callerId, { includeDeleted = false, includeSelf = false } = {}) {
+  listSearchableSessions(callerId, { includeDeleted = false, includeSelf = false, includeFastMode = true } = {}) {
     const caller = this.#sessionRow(callerId);
     if (!caller || caller.lifecycle === "deleted") throw new Error("caller session does not exist");
     const rows = this.#db.prepare("SELECT * FROM sessions WHERE family_id = ? AND session_file IS NOT NULL")
@@ -1532,7 +1532,7 @@ export class HarnessStore {
     };
     return rows.filter((row) => (includeDeleted || row.lifecycle !== "deleted")
       && (includeSelf || row.id !== caller.id))
-      .map((row) => ({ ...mapSession(row, this.getSessionFastModePreference(row.id)), name: historicalName(row), lineage: lineage(row) }))
+      .map((row) => ({ ...mapSession(row, includeFastMode ? this.getSessionFastModePreference(row.id) : undefined), name: historicalName(row), lineage: lineage(row) }))
       .sort((left, right) => right.updatedAt - left.updatedAt || left.sessionId.localeCompare(right.sessionId));
   }
 

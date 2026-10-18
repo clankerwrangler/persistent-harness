@@ -1193,7 +1193,7 @@ export class HarnessSupervisor {
   }
   #historyCandidates(callerId, params) {
     let sessions = this.store.listSearchableSessions(callerId, {
-      includeDeleted: params.includeDeleted, includeSelf: params.includeCurrent,
+      includeDeleted: params.includeDeleted, includeSelf: params.includeCurrent, includeFastMode: false,
     });
     if (params.kind && params.kind !== "any") sessions = sessions.filter((session) => session.kind === params.kind);
     if (params.sessionId) {
