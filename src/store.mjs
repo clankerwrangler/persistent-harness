@@ -955,9 +955,10 @@ export class HarnessStore {
     for (const row of [...priorityRows, ...newestRows]) if (!byId.has(row.id)) { byId.set(row.id, row); candidates.push(row); }
 
     const candidateJson = JSON.stringify(candidates.map((row) => row.id));
+    // Shared ancestors expand once per (id, hops), before final row deduplication.
     const contextRows = this.#db.prepare(`WITH RECURSIVE parent_chain(id, hops) AS (
         SELECT parent_session_id, 1 FROM sessions WHERE id IN (SELECT value FROM json_each(?)) AND parent_session_id IS NOT NULL
-        UNION ALL
+        UNION
         SELECT s.parent_session_id, p.hops + 1 FROM sessions s JOIN parent_chain p ON s.id = p.id
           WHERE s.parent_session_id IS NOT NULL AND p.hops < ?
       )
