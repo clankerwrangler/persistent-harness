@@ -5,6 +5,7 @@ import { sessionSidecarPaths } from "../src/session-paths.mjs";
 import { DatabaseSync } from "node:sqlite";
 import test from "node:test";
 import { deletionFixture, until } from "./fixtures/recursive-delete-fixture.mjs";
+import { fauxForkSessionSdk } from "./fixtures/faux-fork-session-sdk.mjs";
 
 const ids = rows => rows.map(row => row.sessionId).sort();
 for (const selection of ["root", "child"]) test(`recursive ${selection} deletion stops exactly its subtree and retains canonical files`, async t => {
@@ -113,8 +114,21 @@ test("close failure does not tombstone or lose ownership; a later retry succeeds
 });
 
 
-test("spawn preflight already in flight rechecks the parent before admitting a child", async t => {
+test("spawn preflight already in flight rechecks the parent before admitting a child", { timeout: 10_000 }, async t => {
   const f = await deletionFixture(t), root = await f.admit("Root"), actor = await f.actorClient(root);
+  const sdk = await fauxForkSessionSdk(t, f.dir), removed = new Set(), cleanupDone = Promise.withResolvers(), remove = fs.rm;
+  const sourceBefore = await readFile(root.sessionFile);
+  t.after(() => { fs.rm = remove; syncBuiltinESMExports(); });
+  fs.rm = async (file, ...args) => {
+    const result = await remove(file, ...args), candidate = sdk.calls.openedFiles.at(-1);
+    if (candidate) {
+      const paths = sessionSidecarPaths(candidate);
+      if ([candidate, paths.skillManifestPath, paths.capabilitiesPath, paths.skillGrantPath, paths.kernelStatePath].includes(file)) removed.add(file);
+      if (removed.size === 5) cleanupDone.resolve();
+    }
+    return result;
+  };
+  syncBuiltinESMExports();
   const gate = Promise.withResolvers(), entered = Promise.withResolvers(); t.after(() => gate.resolve());
   let admissionError;
   const store = f.supervisor.store, admit = store.createChild.bind(store);
@@ -132,6 +146,15 @@ test("spawn preflight already in flight rechecks the parent before admitting a c
   await until(() => admissionError); assert.match(admissionError.message, /session does not exist/);
   assert.deepEqual(f.supervisor.store.listChildren(root.sessionId), []);
   assert.equal(f.actors.size, 1);
+  await cleanupDone.promise;
+  assert.equal(sdk.calls.contexts, 1); assert.equal(sdk.calls.creates, 1); assert.equal(sdk.calls.openedFiles.length, 2);
+  assert.deepEqual(sdk.calls.names, ["too-late"]); assert.equal(sdk.calls.forks.length, 1);
+  assert.equal(sdk.calls.forks[0].details.sourceSessionId, root.sessionId);
+  assert.deepEqual(await readFile(root.sessionFile), sourceBefore);
+  assert.deepEqual(await fs.readdir(sdk.sessionDirectory), []);
+  assert.deepEqual(f.errors, []);
+  t.diagnostic(JSON.stringify({ sdkContextCalls: sdk.calls.contexts, sdkCreates: sdk.calls.creates,
+    sdkOpens: sdk.calls.openedFiles.length, admissionError: admissionError.message, removedCandidates: removed.size }));
 });
 
 

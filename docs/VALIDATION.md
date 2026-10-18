@@ -205,6 +205,12 @@ successive sends and stale native callback identities; neither model represents
 the entire UI or a live location service.
 
 The `RecursiveSessionDeletion-*.cfg` configurations cover root and direct-child deletion with and without a legacy deleted intermediate. They check subtree completeness, shutdown fencing, retained artifacts, and unrelated actors. `HarnessDependencies` covers explicit extension ordering, exact stock graph selection, and read-only, current-session projection. The models abstract external stop completion and projector internals; worker, socket, and canonical-history tests verify the implementation boundaries.
+`RecursiveSessionDeletion.Preflight.cfg` separately checks pure session-helper
+prerequisites, client-close versus host completion, the final parent admission
+fence, and denied-candidate cleanup. Its missing-SDK, early-observation, skipped-
+fence, and leaked-transient controls must fail. The isolated faux preflight
+fixture supplies only an empty-branch context builder and session-file API through
+the explicit SDK seam; it does not evaluate a stock SDK, CLI, provider, or worker.
 
 `CanonicalContextBudget` separates per-record archive string limits from aggregate archive structure and final-view limits. It covers signature-overlay concentration, the second detached helper copy, metadata added to the materialized view, and a single captured configuration value despite later process-environment changes. The abstraction models counts and immutable record tokens, not heap usage or JavaScript descriptor traversal. Canonical-context and stock-worker regressions check cumulative archive growth, oversized records and combined diagnostics, metadata limits, detached copies, and preserved precompaction recovery semantics. Isolated configured-budget checks cover default and invalid settings, exact range endpoints, large retained content/details, and the same selection across worker reads, recovery, compaction, and extension projection. The model abstracts configuration syntax; tests verify the decimal parser.
 
