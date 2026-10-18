@@ -2599,7 +2599,12 @@ export class HarnessSupervisor {
   }
   #boundedReplay(ring) {
     let selected = ring.slice(-128).map((item) => ({ seq: item.seq, event: item.event }));
-    while (selected.length > 1 && Buffer.byteLength(JSON.stringify(selected)) > 40 * 1024) selected.shift();
+    let bytes = selected.length > 1 ? Buffer.byteLength(JSON.stringify(selected)) : 0;
+    while (selected.length > 1 && bytes > 40 * 1024) {
+      // Public events are JSON-plain; removing a wrapper also removes one comma.
+      bytes -= Buffer.byteLength(JSON.stringify(selected[0])) + 1;
+      selected.shift();
+    }
     return selected;
   }
   #boundedEntries(data) { const entries = Array.isArray(data?.entries) ? data.entries : []; let selected = entries.slice(-256); while (selected.length && Buffer.byteLength(JSON.stringify(selected)) > 48 * 1024) selected = selected.slice(Math.ceil(selected.length / 4)); return { entries: selected, leafId: data?.leafId ?? null, truncated: selected.length < entries.length }; }

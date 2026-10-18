@@ -1858,4 +1858,33 @@ test("full and source-aware worker end events retain the same type-only live and
   assert.deepEqual(replay.events.filter(frame => frame.event.type === "agent_end").map(frame => frame.event),
     [{ type: "agent_end" }, { type: "agent_end" }]);
   assert.doesNotMatch(JSON.stringify(replay.events), /synthetic omitted public payload|messages/);
+
+  actor.emit("event", { type: "agent_start" });
+  const single = await client.request("subscribe_session", { selector: sessionId });
+  assert.deepEqual(single.events, [{ seq: replay.eventSeq + 1, event: { type: "agent_start" } }]);
+  for (let index = 0; index < 129; index++) actor.emit("event", {
+    type: "tool_execution_update", toolCallId: `replay-${index}`, toolName: "ipython",
+  });
+  const fitting = await client.request("subscribe_session", { selector: sessionId });
+  assert.deepEqual(fitting.events, Array.from({ length: 128 }, (_, index) => ({
+    seq: single.eventSeq + index + 2,
+    event: { type: "tool_execution_update", toolCallId: `replay-${index + 1}`, toolName: "ipython" },
+  })));
+  assert(Buffer.byteLength(JSON.stringify(fitting.events)) < 40 * 1024);
+
+  actor.emit("event", { type: "agent_start" });
+  const notices = Array.from({ length: 3 }, (_, index) => ({ type: "extension_ui_request", method: "notify",
+    id: `notice-${index}`, statusText: `${index}:"\\\n漢😀\ud800${"x".repeat(19_900)}` }));
+  for (const notice of notices) actor.emit("event", notice);
+  const accepted = await client.request("submit_input", { sessionId, message: "待機 😀\n\"", behavior: "auto" });
+  const expected = notices.slice(-2).map((notice, index) => ({ seq: fitting.eventSeq + index + 3, event: notice }));
+  expected.push({ seq: fitting.eventSeq + 5, event: { type: "input_state", message: accepted.message } });
+  const bounded = await client.request("subscribe_session", { selector: sessionId });
+  assert.deepEqual(bounded.events, expected, "reconnect retains the ordered fitting suffix from both append paths");
+  assert.equal(bounded.eventSeq, expected.at(-1).seq);
+  assert(Buffer.byteLength(JSON.stringify(bounded.events)) <= 40 * 1024);
+  assert(Buffer.byteLength(JSON.stringify([{ seq: fitting.eventSeq + 2, event: notices[0] }, ...expected])) > 40 * 1024);
+  const again = await client.request("subscribe_session", { selector: sessionId });
+  assert.deepEqual(again.events, bounded.events, "reconnect leaves the retained ring unchanged");
+  assert.deepEqual(Object.keys(again.events[0]), ["seq", "event"]);
 });
