@@ -1788,7 +1788,7 @@ export class HarnessSupervisor {
     validate();
     const desired = await this.#reconcileSkillGrant(sessionId, new Set(), check);
     validate();
-    let session = this.store.getSession(sessionId);
+    let session = this.store.getSessionActorState(sessionId);
     if (!session || session.lifecycle === "deleted") throw new Error("session does not exist");
     const resident = this.#actors.get(sessionId);
     if (resident?.worker.isRunning && session.lifecycle === "resident") {
@@ -1799,15 +1799,15 @@ export class HarnessSupervisor {
       }
       await this.#stopActor(sessionId, "passivated");
       validate();
-      session = this.store.getSession(sessionId);
+      session = this.store.getSessionActorState(sessionId);
     }
     this.#requestActorStart(sessionId, session.lifecycle !== "starting");
     const deadline = Date.now() + this.actorStartupTimeoutMs;
     while (Date.now() < deadline) {
       validate();
       const record = this.#actors.get(sessionId);
-      if (record?.worker.isRunning && this.store.getSession(sessionId)?.lifecycle === "resident") return record;
-      const currentSession = this.store.getSession(sessionId);
+      if (record?.worker.isRunning && this.store.getSessionActorState(sessionId)?.lifecycle === "resident") return record;
+      const currentSession = this.store.getSessionActorState(sessionId);
       if (currentSession?.lifecycle === "error") throw new Error(currentSession.lastError || "session actor failed to start");
       await new Promise((resolve) => setTimeout(resolve, 20));
     }
@@ -2288,7 +2288,7 @@ export class HarnessSupervisor {
     record.entryIndexPreparation = current;
     setImmediate(() => {
       if (this.#actors.get(sessionId) !== record || record.entryIndexPreparation !== current) return;
-      const session = this.#stoppingPromise ? null : this.store.getSession(sessionId);
+      const session = this.#stoppingPromise ? null : this.store.getSessionActorState(sessionId);
       if (!session || session.actorGeneration !== current.generation || !this.#isActorOwnIdle(sessionId, record, false, session)) {
         record.entryIndexPreparation = undefined;
         return;
@@ -2306,7 +2306,7 @@ export class HarnessSupervisor {
       });
     });
   }
-  #isActorOwnIdle(sessionId, record = this.#actors.get(sessionId), mutationOwned = false, session = this.store.getSession(sessionId)) {
+  #isActorOwnIdle(sessionId, record = this.#actors.get(sessionId), mutationOwned = false, session = this.store.getSessionActorState(sessionId)) {
     return Boolean(record && this.#actors.get(sessionId) === record && record.worker.isRunning && !record.expectedLifecycle
       && session?.lifecycle === "resident" && session.actorGeneration === record.generation && session.quietSince != null
       && !record.notificationWork.size && !this.#startingActors.has(sessionId) && !this.#actorReadyPromises.has(sessionId)
@@ -2315,7 +2315,7 @@ export class HarnessSupervisor {
   }
   #syncPassivationTimer(sessionId) {
     if (!this.#store || this.#stoppingPromise) return;
-    const record = this.#actors.get(sessionId), session = this.store.getSession(sessionId);
+    const record = this.#actors.get(sessionId), session = this.store.getSessionActorState(sessionId);
     if (this.#isActorOwnIdle(sessionId, record, false, session)) {
       // A wake can cancel a deferred attempt without consuming this idle interval.
       this.#scheduleEntryIndexPreparation(sessionId);
@@ -2339,7 +2339,7 @@ export class HarnessSupervisor {
       if (this.#passivationTimers.get(sessionId) !== timer) return;
       this.#passivationTimers.delete(sessionId);
       void this.#withSessionMutation(sessionId, async () => {
-        const current = this.store.getSession(sessionId);
+        const current = this.store.getSessionActorState(sessionId);
         if (current?.quietSince === session.quietSince && this.#isActorOwnIdle(sessionId, record, true, current)) {
           await this.#stopActor(sessionId, "passivated");
         }

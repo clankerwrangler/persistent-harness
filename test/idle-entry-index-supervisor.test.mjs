@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { DatabaseSync } from "node:sqlite";
 import { EventEmitter } from "node:events";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
@@ -260,4 +261,49 @@ test("own-idle family wake protects a delegating parent before expiry and revive
   assert.equal(child.actor.isRunning, true);
   await receiver.connection.request("ack_message", { messageId: after.messageId });
   assert.equal(f.supervisor.store.getMessage(after.messageId).state, "acknowledged");
+});
+
+
+test("entry-index deferred admission samples fresh local generation, quiet, deletion and absence", async t => {
+  const f = await fixture(t); await until(() => f.actor.preparations.length === 1);
+  const db = new DatabaseSync(f.supervisor.databasePath);
+  t.after(() => db.close());
+  const row = db.prepare("SELECT * FROM sessions WHERE id = ?").get(f.id);
+  const columns = Object.keys(row);
+  const restore = () => {
+    db.prepare("DELETE FROM sessions WHERE id = ?").run(f.id);
+    db.prepare(`INSERT INTO sessions (${columns.join(",")}) VALUES (${columns.map(() => "?").join(",")})`).run(...columns.map(key => row[key]));
+  };
+  for (const change of [
+    () => db.prepare("UPDATE sessions SET actor_generation = actor_generation + 1 WHERE id = ?").run(f.id),
+    () => db.prepare("UPDATE sessions SET activity = 'working', quiet_since = NULL WHERE id = ?").run(f.id),
+    () => db.prepare("UPDATE sessions SET lifecycle = 'deleted' WHERE id = ?").run(f.id),
+    () => db.prepare("DELETE FROM sessions WHERE id = ?").run(f.id),
+  ]) {
+    f.actor.activity("agent_start");
+    f.supervisor.store.setActorActivity(f.id, 1, false);
+    const count = f.actor.preparations.length;
+    f.actor.emit("event", { type: "compaction_end" });
+    change();
+    await tick(); await tick();
+    assert.equal(f.actor.preparations.length, count, "the deferred callback must reject changed local eligibility");
+    restore();
+    f.actor.emit("event", { type: "compaction_end" });
+    await until(() => f.actor.preparations.length === count + 1);
+  }
+});
+
+test("own-idle expiry callback rereads quiet time even without a rescheduling event", async t => {
+  const f = await fixture(t, { actorInactivityMs: 180 });
+  f.actor.emit("event", { type: "compaction_start" });
+  const db = new DatabaseSync(f.supervisor.databasePath); t.after(() => db.close());
+  db.prepare("UPDATE sessions SET quiet_since = ? WHERE id = ?").run(Date.now() - 165, f.id);
+  f.actor.emit("event", { type: "compaction_end" });
+  const fresh = Date.now();
+  db.prepare("UPDATE sessions SET quiet_since = ? WHERE id = ?").run(fresh, f.id);
+  await new Promise(resolve => setTimeout(resolve, 65));
+  assert.equal(f.actor.isRunning, true, "an old callback cannot retire a newer quiet interval");
+  assert.equal(f.supervisor.store.getSession(f.id).quietSince, fresh);
+  f.actor.emit("event", { type: "compaction_end" });
+  await until(() => f.supervisor.store.getSession(f.id).lifecycle === "passivated");
 });
