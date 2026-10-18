@@ -32,6 +32,8 @@ root = Path(__file__).parent
 control = os.fdopen(3, "r+b", buffering=0)
 def emit(frame):
     control.write((json.dumps(frame) + "\n").encode())
+emit({"type": "runtime_validated", "versions": {"python": "fixture", "ipython": "fixture", "dill": "fixture"}})
+assert json.loads(control.readline())["type"] == "runtime_continue"
 emit({"type": "ready", "restore": {"found": False}})
 checkpoint = None
 interrupted = False
