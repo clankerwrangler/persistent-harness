@@ -15,6 +15,12 @@ node bin/harness-supervisor.mjs shutdown
 
 `ensure` checks protocol responsiveness with the read-only `get_liveness` request, not a database audit. An older daemon's exact same-version `unknown_request` rejection for that request also proves responsiveness; no full-status fallback runs. Only a missing or refused socket permits startup. A timeout, incompatible protocol, or invalid response fails the command rather than starting another daemon. Use `status` for full retained-state diagnostics.
 
+The CLI loads the supervisor implementation only for `start`, and the registering
+client only for `memory`. Control helpers keep their single-request path. If
+`ensure` needs a new daemon, its separate `start` process still loads the normal
+supervisor. Importing the CLI's lock helper or rejecting invalid arguments does
+not evaluate those unused graphs.
+
 The wrappers installed under the agent's `bin/` directory load its optional `harness/launch-env.sh`. A service must receive the same Pi, Python, and catalog paths. Do not rely on a previous interactive shell's environment.
 
 Before restarting, identify what owns the supervisor lifetime. `harness-restart` and a detached local observer can survive a standalone supervisor exit, but not termination of their container. If `harness-supervisor start` is the container's main workload, use the host-owned service/container lifecycle and a continuation observer outside that container. A background job inside the container is not an independent recovery path.
