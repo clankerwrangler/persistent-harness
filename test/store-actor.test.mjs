@@ -49,6 +49,11 @@ test("one actor table owns root and child lifecycle, recovery, activity, and rou
   store.setActorActivity("child-a", 1, true, 5);
   assert.equal(store.getSession("root-a").activity, "delegating");
   assert.equal(store.getSession("root-a").workingDescendantCount, 1);
+  assert.equal(store.getSession("root-a").quietSince, 4);
+  assert.equal(store.findIdleResidentActor()?.sessionId, "root-a", "own-idle parent remains a capacity candidate");
+  store.setActorActivity("root-a", 1, false, 6);
+  assert.equal(store.getSession("root-a").quietSince, 4, "repeated settled updates retain own age");
+  assert.equal(store.findIdleResidentActor(null, { excludeIds: ["root-a"] }), undefined);
 
   const first = store.createMessage("root-a", {
     messageId: "durable-id", target: "child-a", deliveryMode: "auto", body: "hello",
@@ -94,13 +99,14 @@ test("one actor table owns root and child lifecycle, recovery, activity, and rou
 
   const queuedInput = store.createActorInput("root-a", { inputId: "input-1", message: "queued user work", behavior: "follow_up" }, 7);
   assert.equal(queuedInput.state, "queued");
+  assert.equal(store.findIdleResidentActor(), undefined, "durable own input excludes the otherwise idle parent");
   assert.deepEqual(store.createActorInput("root-a", { inputId: "input-1", message: "queued user work", behavior: "follow_up" }, 8), queuedInput);
   assert.throws(() => store.createActorInput("root-a", { inputId: "input-1", message: "different", behavior: "follow_up" }, 8), /reused/);
   store.markActorInputAccepted("input-1", "root-a", 1, 7);
   assert.equal(store.listPendingActorInputs("root-a")[0].acceptedGeneration, 1);
 
   const previous = store.reconcileAfterDaemonStart(8);
-  assert.deepEqual(previous.map((item) => item.sessionId), ["root-a", "child-a"]);
+  assert.deepEqual(previous.map((item) => item.sessionId).sort(), ["child-a", "root-a"]);
   assert.deepEqual(store.listQueuedActorIds(), ["root-a", "child-a"]);
   assert.equal(store.getSession("root-a").actorGeneration, 2);
   assert.equal(store.getSession("child-a").activity, "inactive");

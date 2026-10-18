@@ -776,9 +776,10 @@ export class HarnessStore {
     this.assertSessionAvailable(sessionId);
     const result = this.#db.prepare(`UPDATE sessions SET lifecycle = 'resident', actor_pid = ?,
       actor_identity_json = ?, session_file = coalesce(?, session_file), started_at = ?, stopped_at = NULL,
-      streaming = 0, activity = 'idle', quiet_since = ?, last_error = NULL, updated_at = ?
+      streaming = 0, activity = ?, quiet_since = ?, last_error = NULL, updated_at = ?
       WHERE id = ? AND actor_generation = ? AND lifecycle = 'starting'`)
-      .run(pid, processIdentity ? JSON.stringify(processIdentity) : null, sessionFile, now, now, now, sessionId, generation);
+      .run(pid, processIdentity ? JSON.stringify(processIdentity) : null, sessionFile, now,
+        this.#workingDescendantCount(sessionId) > 0 ? "delegating" : "idle", now, now, sessionId, generation);
     if (result.changes !== 1) throw new Error("actor generation is stale or not starting");
     this.#refreshAncestors(sessionId, now);
     return this.#mappedSession(sessionId);
@@ -838,7 +839,7 @@ export class HarnessStore {
     const activity = streaming ? "working" : descendants > 0 ? "delegating" : "idle";
     const changed = row.streaming !== Number(streaming) || row.activity !== activity;
     this.#db.prepare("UPDATE sessions SET streaming = ?, activity = ?, quiet_since = ?, updated_at = ? WHERE id = ?")
-      .run(streaming ? 1 : 0, activity, activity === "idle" ? (row.quiet_since ?? now) : null,
+      .run(streaming ? 1 : 0, activity, !streaming ? (row.quiet_since ?? now) : null,
         changed ? now : row.updated_at, sessionId);
     this.#refreshAncestors(sessionId, now);
     return this.#mappedSession(sessionId);
@@ -856,7 +857,8 @@ export class HarnessStore {
       if (row.lifecycle === "resident") {
         activity = row.streaming ? "working" : descendants > 0 ? "delegating" : "idle";
       }
-      const quietSince = activity === "idle" ? (row.quiet_since ?? now) : null;
+      // Family display does not own the resident worker's idle interval.
+      const quietSince = row.lifecycle === "resident" && !row.streaming ? (row.quiet_since ?? now) : null;
       this.#db.prepare("UPDATE sessions SET activity = ?, quiet_since = ? WHERE id = ?")
         .run(activity, quietSince, current);
       current = row.parent_session_id;
@@ -1072,10 +1074,15 @@ export class HarnessStore {
     } catch (error) { this.#db.exec("ROLLBACK"); throw error; }
   }
 
-  findIdleResidentActor(excludeId = null, { kind } = {}) {
-    const row = this.#db.prepare(`SELECT id FROM sessions WHERE lifecycle = 'resident' AND activity = 'idle'
-      AND id <> ? AND (? IS NULL OR kind = ?) ORDER BY coalesce(quiet_since, updated_at), created_at, id LIMIT 1`)
-      .get(excludeId ?? "", kind ?? null, kind ?? null);
+  findIdleResidentActor(excludeId = null, { kind, excludeIds = [] } = {}) {
+    const row = this.#db.prepare(`SELECT id FROM sessions WHERE lifecycle = 'resident' AND streaming = 0
+      AND quiet_since IS NOT NULL AND id <> ? AND (? IS NULL OR kind = ?)
+      AND id NOT IN (SELECT value FROM json_each(?))
+      AND NOT EXISTS (SELECT 1 FROM actor_inputs WHERE session_id = sessions.id)
+      AND NOT EXISTS (SELECT 1 FROM child_tasks WHERE child_id = sessions.id AND state IN ('queued', 'submitted'))
+      AND NOT EXISTS (SELECT 1 FROM messages WHERE target_id = sessions.id AND state IN ('queued', 'delivered'))
+      ORDER BY quiet_since, created_at, id LIMIT 1`)
+      .get(excludeId ?? "", kind ?? null, kind ?? null, JSON.stringify(excludeIds));
     return row ? this.#mappedSession(row.id) : undefined;
   }
 

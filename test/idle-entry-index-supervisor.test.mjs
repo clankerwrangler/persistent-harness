@@ -11,7 +11,7 @@ const tick = () => new Promise(resolve => setImmediate(resolve));
 async function until(predicate) {
   const end = Date.now() + 2500;
   while (Date.now() < end) { if (predicate()) return; await new Promise(resolve => setTimeout(resolve, 5)); }
-  assert.fail("expected actual idle entry-index dispatch did not complete");
+  assert.fail("expected supervisor lifecycle boundary did not complete");
 }
 class Actor extends EventEmitter {
   constructor(options, supervisor) { super(); this.session = options.session; this.supervisor = supervisor;
@@ -23,6 +23,7 @@ class Actor extends EventEmitter {
   request(type, params = {}) {
     if (type === "prepare_entry_index") { const gate = Promise.withResolvers(); this.preparations.push({ token: params.token, gate }); return gate.promise; }
     if (type === "cancel_entry_index") { this.cancellations.push(params.token); return Promise.resolve(true); }
+    if (type === "compact") { this.compactEntered = true; return this.compactHold ?? Promise.resolve({}); }
     if (type === "get_state") return Promise.resolve(this.state());
     if (type === "get_commands") return Promise.resolve({ commands: [{ name: "persistent-harness-input", source: "extension", sourceInfo: { path: this.commandPath } }] });
     if (type === "prompt") {
@@ -32,16 +33,16 @@ class Actor extends EventEmitter {
     }
     throw new Error(`unexpected fixture RPC ${type}`);
   }
-  async submit() { return { outcome: "handled" }; }
+  async submit() { this.submitEntered = true; await this.submitHold; return { outcome: "handled" }; }
   activity(type) { this.streaming = type === "agent_start"; this.emit("event", { type }); }
   async close() { if (!this.isRunning) return; this.isRunning = false; this.emit("exit", { code: 0, expected: true }); }
 }
-async function fixture(t) {
+async function fixture(t, options = {}) {
   const root = await mkdtemp(path.join(os.tmpdir(), "supervisor-entry-index-")), actors = [], errors = [];
   const skillsPath = path.join(root, "skills"); await mkdir(skillsPath);
   const supervisor = new HarnessSupervisor({ socketPath: path.join(root, "run/h.sock"), databasePath: path.join(root, "state/h.sqlite"),
     pidPath: path.join(root, "run/h.pid"), skillsPath, backgroundJobsDirectory: path.join(root, "jobs"), backgroundCompletionIntervalMs: 100,
-    runtimeProvisioner: async () => ({}), titleGenerator: null, actorInactivityMs: 0,
+    runtimeProvisioner: async () => ({}), titleGenerator: null, actorInactivityMs: 0, ...options,
     actorFactory: options => { const actor = new Actor(options, supervisor); actors.push(actor); return actor; },
     sessionHistoryIndex: { close() {} }, processIdentityFactory: async pid => ({ pid }), processTerminator: async () => ({}),
     logger: { error: value => errors.push(String(value)) } });
@@ -53,11 +54,11 @@ async function fixture(t) {
   await client.start({ registrationType: "register_client", clientInstanceId: "entry-index-fixture" });
   const id = (await client.request("create_root", { cwd: root, repositoryRoot: null, name: "Index fixture", provider: null, model: null, thinkingLevel: null })).admission.sessionId;
   await client.request("get_actor_state", { sessionId: id });
-  return { root, actors, supervisor, client, id, actor: actors[0], async connectActor() {
-    const launch = supervisor.store.getActorLaunch(id), connection = new HarnessClient({ socketPath: supervisor.socketPath, heartbeatMs: 0 });
+  return { root, actors, supervisor, client, id, actor: actors[0], async connectActor(sessionId = id) {
+    const launch = supervisor.store.getActorLaunch(sessionId), connection = new HarnessClient({ socketPath: supervisor.socketPath, heartbeatMs: 0 });
     const events = []; connection.on("event", frame => events.push({ frame, cancellations: [...actors.at(-1).cancellations] }));
-    connections.push(connection); const registered = await connection.start({ registrationType: "register_actor", sessionId: id,
-      sessionFile: launch.sessionFile, cwd: launch.cwd, repositoryRoot: launch.repositoryRoot, actorToken: launch.actorToken, actorGeneration: launch.actorGeneration }); assert.equal(registered?.session?.sessionId, id); return { connection, events };
+    connections.push(connection); const registered = await connection.start({ registrationType: "register_actor", sessionId,
+      sessionFile: launch.sessionFile, cwd: launch.cwd, repositoryRoot: launch.repositoryRoot, actorToken: launch.actorToken, actorGeneration: launch.actorGeneration }); assert.equal(registered?.session?.sessionId, sessionId); return { connection, events };
   } };
 }
 
@@ -69,6 +70,15 @@ test("entry-index actual idle dispatch survives the automatic settled wake and o
   f.actor.activity("agent_start"); f.actor.activity("agent_settled");
   await until(() => f.actor.preparations.length === 2);
   assert.notEqual(f.actor.preparations[0].token, f.actor.preparations[1].token);
+});
+
+test("entry-index own activity updates reset the attempt without relying on worker events", async t => {
+  const f = await fixture(t); await until(() => f.actor.preparations.length === 1);
+  const { connection } = await f.connectActor();
+  await connection.request("update_activity", { streaming: true });
+  await connection.request("update_activity", { streaming: false });
+  await until(() => f.actor.preparations.length === 2);
+  assert.equal(f.supervisor.store.getSession(f.id).activity, "idle");
 });
 
 test("entry-index predecessor completion cannot clear successor cancellation or delay admission and stop", async t => {
@@ -108,4 +118,146 @@ test("entry-index background completion wake cancels without waiting for prepara
   await writeFile(path.join(directory, "exit.json"), JSON.stringify({ exit_code: 0, signal: null, ended_at: new Date().toISOString() }));
   await until(() => f.supervisor.store.getActorInput(`background-completion-${jobId}`, f.id)?.state === "accepted");
   assert(f.actor.cancellations.includes(token)); assert.equal(f.actors.length, 1);
+});
+
+
+async function workingChild(f) {
+  f.actor.activity("agent_start");
+  const id = "working-child";
+  f.supervisor.store.createChild(f.id, { sessionId: id, sessionFile: path.join(f.root, "child.jsonl"), actorToken: "child-token",
+    policy: { name: id, prompt: "continue independently", depth: 1, cwd: f.root } });
+  await f.client.request("revive_session", { sessionId: id });
+  await until(() => f.actors.find(actor => actor.session.sessionId === id)?.isRunning);
+  const actor = f.actors.find(actor => actor.session.sessionId === id);
+  actor.activity("agent_start");
+  f.actor.activity("agent_settled");
+  assert.equal(f.supervisor.store.getSession(f.id).activity, "delegating");
+  return { id, actor };
+}
+
+test("own-idle delegating parent prepares and expires without stopping its working child", async t => {
+  const f = await fixture(t, { actorInactivityMs: 250 });
+  const initialPreparations = f.actor.preparations.length;
+  const child = await workingChild(f);
+  const quiet = f.supervisor.store.getSession(f.id).quietSince;
+  assert.equal(typeof quiet, "number", "family display must not erase own settled age");
+  await until(() => f.actor.preparations.length > initialPreparations);
+  const prep = f.actor.preparations.at(-1);
+  child.actor.activity("agent_settled"); child.actor.activity("agent_start");
+  assert.equal(f.supervisor.store.getSession(f.id).quietSince, quiet, "descendant transitions preserve own idle age");
+  await until(() => f.supervisor.store.getSession(f.id).lifecycle === "passivated");
+  assert(f.actor.cancellations.includes(prep.token), "retirement cancels optional preparation without joining it");
+  assert.equal(child.actor.isRunning, true);
+  assert.equal(f.supervisor.store.getSession(child.id).activity, "working");
+});
+
+test("own-idle capacity retires delegating parent while child continues and input revives it", async t => {
+  const f = await fixture(t, { maxResidentActors: 2 }); const child = await workingChild(f);
+  const other = (await f.client.request("create_root", { cwd: f.root, repositoryRoot: null, name: "Capacity entrant",
+    provider: null, model: null, thinkingLevel: null })).admission.sessionId;
+  await until(() => f.supervisor.store.getSession(other).lifecycle === "resident");
+  assert.equal(f.supervisor.store.getSession(f.id).lifecycle, "passivated");
+  assert.equal(child.actor.isRunning, true);
+  await f.client.request("submit_input", { sessionId: f.id, message: "wake after capacity retirement", behavior: "auto" });
+  await until(() => f.supervisor.store.getSession(f.id).actorGeneration === 2 && f.supervisor.store.getSession(f.id).lifecycle === "resident");
+  assert.equal(child.actor.isRunning, true);
+});
+
+
+for (const mode of ["expiry", "capacity"]) for (const wakeOnly of [false, true]) {
+  test(`own-idle ${mode} excludes ${wakeOnly ? "wake owner after durable handling" : "pending own input"}`, async t => {
+    const f = await fixture(t, { actorInactivityMs: mode === "expiry" ? 250 : 0, maxResidentActors: 2 });
+    const child = await workingChild(f); const gate = Promise.withResolvers(); f.actor.submitHold = gate.promise;
+    t.after(() => gate.resolve());
+    const receipt = await f.client.request("submit_input", { sessionId: f.id, message: "held own command", behavior: "auto" });
+    await until(() => f.actor.submitEntered);
+    if (wakeOnly) f.supervisor.store.markActorInputHandled(receipt.inputId, f.id);
+    let entrant;
+    if (mode === "capacity") entrant = (await f.client.request("create_root", { cwd: f.root, repositoryRoot: null, name: "Waiting entrant",
+      provider: null, model: null, thinkingLevel: null })).admission.sessionId;
+    await new Promise(resolve => setTimeout(resolve, 350));
+    assert.equal(f.supervisor.store.getSession(f.id).lifecycle, "resident");
+    if (entrant) assert.equal(f.supervisor.store.getSession(entrant).lifecycle, "starting");
+    assert.equal(child.actor.isRunning, true);
+    gate.resolve();
+    await until(() => f.supervisor.store.getSession(f.id).lifecycle === "passivated");
+    if (entrant) await until(() => f.supervisor.store.getSession(entrant).lifecycle === "resident");
+    assert.equal(f.supervisor.store.getActorInput(receipt.inputId, f.id).outcome, "handled");
+    assert.equal(child.actor.isRunning, true);
+  });
+}
+
+for (const kind of ["tool", "compaction"]) test(`own-idle expiry excludes unsettled ${kind} work and reconsiders on completion`, async t => {
+  const f = await fixture(t, { actorInactivityMs: 250 }); const child = await workingChild(f);
+  const frame = kind === "tool" ? { type: "tool_execution_start", toolCallId: "held-tool" } : { type: "compaction_start" };
+  f.actor.emit("event", frame);
+  await new Promise(resolve => setTimeout(resolve, 350));
+  assert.equal(f.supervisor.store.getSession(f.id).lifecycle, "resident");
+  assert.equal(f.supervisor.store.getSession(f.id).activity, "delegating");
+  f.actor.emit("event", { ...frame, type: kind === "tool" ? "tool_execution_end" : "compaction_end" });
+  await until(() => f.supervisor.store.getSession(f.id).lifecycle === "passivated");
+  assert.equal(child.actor.isRunning, true);
+});
+
+test("own-idle capacity waits for held control and already queued admission before retiring", async t => {
+  const f = await fixture(t, { maxResidentActors: 2 }); const child = await workingChild(f);
+  const control = Promise.withResolvers(), input = Promise.withResolvers();
+  f.actor.compactHold = control.promise; f.actor.submitHold = input.promise;
+  t.after(() => { control.resolve({}); input.resolve(); });
+  const compact = f.client.request("compact_session", { sessionId: f.id });
+  await until(() => f.actor.compactEntered);
+  const admission = f.client.request("submit_input", { sessionId: f.id, message: "queued behind own control", behavior: "auto" });
+  const entrant = (await f.client.request("create_root", { cwd: f.root, repositoryRoot: null, name: "Control entrant",
+    provider: null, model: null, thinkingLevel: null })).admission.sessionId;
+  await tick(); await tick();
+  assert.equal(f.supervisor.store.getSession(entrant).lifecycle, "starting");
+  assert.equal(f.actor.isRunning, true);
+  control.resolve({}); await compact; await admission;
+  await until(() => f.actor.submitEntered);
+  assert.equal(f.actor.isRunning, true, "queued admission owns its input wake before capacity can retire");
+  input.resolve();
+  await until(() => f.supervisor.store.getSession(entrant).lifecycle === "resident");
+  assert.equal(f.actor.isRunning, false); assert.equal(child.actor.isRunning, true);
+});
+
+test("own-idle expiry honors a fresh own interval after held control and input revives the retired parent", async t => {
+  const f = await fixture(t, { actorInactivityMs: 180 }); const child = await workingChild(f);
+  const gate = Promise.withResolvers(); f.actor.compactHold = gate.promise; t.after(() => gate.resolve({}));
+  const compact = f.client.request("compact_session", { sessionId: f.id }); await until(() => f.actor.compactEntered);
+  await new Promise(resolve => setTimeout(resolve, 220));
+  assert.equal(f.actor.isRunning, true);
+  f.actor.activity("agent_start"); f.actor.activity("agent_settled");
+  gate.resolve({}); await compact; await tick();
+  assert.equal(f.actor.isRunning, true, "expiry must use the fresh interval, not an old queued deadline");
+  await until(() => f.supervisor.store.getSession(f.id).lifecycle === "passivated");
+  await f.client.request("submit_input", { sessionId: f.id, message: "input after expiry", behavior: "auto" });
+  await until(() => f.supervisor.store.getSession(f.id).lifecycle === "resident" && f.supervisor.status().capacity.starting === 0
+    && f.actors.some(actor => actor.session.sessionId === f.id && actor.session.actorGeneration === 2 && actor.submitEntered));
+  assert.equal(child.actor.isRunning, true);
+});
+
+test("own-idle family wake protects a delegating parent before expiry and revives it after retirement", async t => {
+  const f = await fixture(t, { actorInactivityMs: 250 }); const child = await workingChild(f);
+  const sender = await f.connectActor(child.id); let receiver = await f.connectActor();
+  const send = async body => {
+    const { message } = await sender.connection.request("send_message", { target: f.id, body, deliveryMode: "auto" });
+    await sender.connection.request("record_agent_message_entry", { entryId: `entry-${message.messageId}`, messageId: message.messageId,
+      direction: "to", peerId: f.id, peerName: "parent", relationship: "parent", body, createdAt: new Date().toISOString() });
+    return message;
+  };
+  const before = await send("family wake before expiry");
+  await until(() => receiver.events.some(({ frame }) => frame.event === "message_available" && frame.data.message.messageId === before.messageId));
+  await new Promise(resolve => setTimeout(resolve, 300));
+  assert.equal(f.actor.isRunning, true, "unacknowledged family work prevents retirement");
+  await receiver.connection.request("ack_message", { messageId: before.messageId });
+  await until(() => f.supervisor.store.getSession(f.id).lifecycle === "passivated");
+  const after = await send("family wake after retirement");
+  await until(() => f.supervisor.store.getSession(f.id).lifecycle === "resident"
+    && f.actors.some(actor => actor.session.sessionId === f.id && actor.session.actorGeneration === 2 && actor.isRunning));
+  receiver = await f.connectActor();
+  await until(() => receiver.events.some(({ frame }) => frame.event === "message_available" && frame.data.message.messageId === after.messageId));
+  assert.equal(f.supervisor.store.getSession(f.id).activity, "delegating");
+  assert.equal(child.actor.isRunning, true);
+  await receiver.connection.request("ack_message", { messageId: after.messageId });
+  assert.equal(f.supervisor.store.getMessage(after.messageId).state, "acknowledged");
 });

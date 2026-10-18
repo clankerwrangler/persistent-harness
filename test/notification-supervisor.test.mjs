@@ -40,6 +40,24 @@ test("recursive family settlement ignores retained inactive children, waits for 
   assert.notEqual((await list())[0].id, first.id);
 });
 
+test("own-idle parent retirement preserves family settlement until its working child settles", async t => {
+  const f = await fixture(t, { actorInactivityMs: 200 });
+  const root = await f.actor(); root.busy();
+  const child = await f.actor(root.session.sessionId); child.busy(); root.idle();
+  await eventually(() => f.supervisor.store.getSession(root.session.sessionId).lifecycle === "passivated");
+  assert.equal(child.isRunning, true);
+  assert.equal(f.supervisor.store.getSession(child.session.sessionId).activity, "working");
+  assert.equal((await f.client.request("list_notifications")).notifications.length, 0);
+  child.idle();
+  const notifications = await eventually(async () => {
+    const list = (await f.client.request("list_notifications")).notifications;
+    return list.length && list;
+  });
+  assert.equal(notifications.length, 1); assert.equal(notifications[0].kind, "idle");
+  assert.equal(notifications[0].rootId, root.session.sessionId);
+  assert.equal(f.supervisor.store.getSession(root.session.sessionId).lifecycle, "passivated");
+});
+
 test("live tool execution is not idle; dialogs reach durable feed without SSE and expire/cancel without revival", async t => {
   const f = await fixture(t), root = await f.actor();
   root.busy(); root.emit("event", { type: "tool_execution_start", toolCallId: "live-tool", toolName: "ipython", args: {} }); root.idle();

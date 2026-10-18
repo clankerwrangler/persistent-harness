@@ -12,6 +12,17 @@ Reuse stock Pi capabilities through public APIs and supported extension points b
 - `PythonKernel` owns the real interpreter, FIFO execution, and namespace checkpoint tail. A result can be delivered before its background save completes; the next Python operation and graceful shutdown still drain that tail.
 - Pi owns canonical JSONL session identities and public SDK data formats. The harness appends standard messages and versioned metadata through the one manager.
 
+Actor residency follows the worker's own settled interval, not its family display.
+A resident parent can show `delegating` while its `quietSince` timestamp remains
+stable across descendant activity. With no own pending input, task, family message,
+tool/compaction work, readiness wake, or session mutation, that worker is eligible
+for the existing inactivity timeout and capacity eviction. Retirement rechecks the
+actor generation and idle interval under the existing mutation owner. Completion
+of blocked work reconsiders retirement and optional index preparation. A working
+child remains independent; later input or a family message uses normal revival,
+canonical history, and kernel snapshot recovery. Family activity and notification
+settlement still include descendants.
+
 The supervisor lazily owns one disposable Node compile-cache directory shared by
 its actors. The actor enables it before importing the SDK worker; tools and the
 supervisor do not enable it through this path. Node owns code/source/version
@@ -89,10 +100,11 @@ uses a stable SHA-256 key of its normalized absolute path under the private
 before opening the same manager, without creating the cache directory. Default,
 in-memory, and implicit new/recent sessions do not opt into this preparation.
 
-The supervisor defers one request at the first actual idle dispatch of each idle
-interval, outside session mutation. Readiness wakes cancel a deferred candidate
-without consuming the interval; their existing completion boundary can reconsider
-it after removing the wake owner. Actor record, generation, token, activity, and
+The supervisor defers one request at the first actual own-idle dispatch of each
+settled interval, including a parent displaying `delegating`, outside session
+mutation. Readiness wakes cancel a deferred candidate without consuming the
+interval; their existing completion boundary can reconsider
+it after removing the wake owner. Actor record, generation, token, own-idle, and
 pending-work checks fence dispatch and late completion. Human, family, scheduled,
 and background wakes cancel preparation; worker prompts, run start, and close do
 the same. Directory creation and the existing manager's bounded metadata writer
