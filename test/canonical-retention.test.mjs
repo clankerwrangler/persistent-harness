@@ -607,3 +607,62 @@ test("single-ingest aliases preserve explicit provider fields, orphan results, a
     assert(!actual.diagnostics.some(item => item.code === "UNADMITTED_CALL_OMITTED" && item.toolCallId === failedCall.id));
   }
 });
+
+
+test("native recovery uses current selected facts without a discarded model source", t => {
+  if (typeof candidate.SessionManager.prototype.enableBoundedEntryRetention !== "function") return t.skip("requires the bounded SDK seam");
+  const directory = mkdtempSync(path.join(os.tmpdir(), "canonical-recovery-scope-"));
+  try {
+    const manager = candidate.SessionManager.create(directory, directory, { entryRetention: { maxCachedBytes: 0 } });
+    const first = manager.appendMessage(assistant([call("native"), call("answered"), call("ordinary", false)]));
+    manager.appendMessage({ role: "toolResult", toolCallId: "answered", toolName: "ipython", content: [], isError: true, timestamp: 1 });
+    const kept = manager.appendMessage(user("kept")); manager.appendCompaction("summary", kept, 1);
+    registerCanonicalSessionManager(manager); sessionBranchHeaders(manager);
+    let sources = 0;
+    const build = manager.buildSessionSource.bind(manager);
+    manager.buildSessionSource = () => { sources++; throw new Error("model projection unavailable"); };
+    const before = readFileSync(manager.getSessionFile());
+    const plans = planUnknownRecovery({ sessionManager: manager, mode: "native", timestamp: 7 });
+    assert.deepEqual(plans.map(message => [message.toolCallId, message.toolName, message.timestamp]), [["native", "ipython", 7]]);
+    assert.equal(plans[0].isError, true); assert.equal(plans[0].details.nativeAsyncRecovery, "interrupted-unknown");
+    assert.match(plans[0].content[0].text, /outcome is unknown.*not re-executed/);
+    assert.equal(sources, 0); assert.deepEqual(readFileSync(manager.getSessionFile()), before);
+    // Projection-only failures are intentionally deferred, never accepted as model context.
+    assert.throws(() => projectCanonicalSource({ sessionManager: manager, mode: "native" }), { code: "ERR_CONTEXT_HELPER_FAILED" });
+    assert.throws(() => planUnknownRecovery({ sessionManager: manager, mode: "ordinary", timestamp: 7 }), { code: "ERR_CONTEXT_HELPER_FAILED" });
+    assert.equal(sources, 2);
+    manager.buildSessionSource = build;
+    manager.branch(first);
+    manager.appendContextEdit(first, { content: [{ ...call("native"), name: "changed" }] });
+    assert.deepEqual(planUnknownRecovery({ sessionManager: manager, mode: "native", timestamp: 7 }).map(message => message.toolCallId), ["native", "answered"]);
+    assert.throws(() => projectCanonicalSource({ sessionManager: manager, mode: "native" }), { code: "ERR_CONTEXT_CALL_PROJECTION" });
+    manager.appendMessage(assistant([call("native")]));
+    assert.throws(() => planUnknownRecovery({ sessionManager: manager, mode: "native", timestamp: 7 }), { code: "ERR_CONTEXT_DUPLICATE_CALL_ID" });
+  } finally { rmSync(directory, { recursive: true, force: true }); }
+});
+
+test("native recovery neither populates nor clears profiles before fresh projection use", t => {
+  if (typeof candidate.SessionManager.prototype.enableBoundedEntryRetention !== "function") return t.skip("requires the bounded SDK seam");
+  const directory = mkdtempSync(path.join(os.tmpdir(), "canonical-recovery-profile-"));
+  try {
+    const manager = candidate.SessionManager.create(directory, directory, { entryRetention: { maxCachedBytes: 0 } });
+    const target = manager.appendMessage(user("original")); manager.appendContextEdit(target, { content: "first edit" });
+    const estimated = [];
+    registerCanonicalSessionManager(manager, { estimateContextTokens: messages => {
+      estimated.push(messages[0].content); return core.estimateContextTokens(messages);
+    } });
+    const project = () => projectCanonicalSource({ sessionManager: manager, mode: "native" }).source;
+    project().estimateContextTokens(); estimated.length = 0;
+    const build = manager.buildSessionSource.bind(manager); let sources = 0;
+    manager.buildSessionSource = () => { sources++; return build(); };
+    const recover = () => planUnknownRecovery({ sessionManager: manager, mode: "native", timestamp: 1 });
+    for (let i = 0; i < 3; i++) assert.deepEqual(recover(), []);
+    assert.equal(sources, 0); assert.deepEqual(estimated, []);
+    project().estimateContextTokens(); assert.deepEqual(estimated, [], "valid cached profile survives recovery");
+    manager.appendContextEdit(target, { content: "second edit with different size" });
+    sources = 0; assert.deepEqual(recover(), []); assert.equal(sources, 0); assert.deepEqual(estimated, []);
+    const source = project();
+    assert.deepEqual(source.estimateContextTokens(), core.estimateContextTokens(source.readAll()));
+    assert.deepEqual(estimated, ["second edit with different size"], "changed producer cannot use the old profile");
+  } finally { rmSync(directory, { recursive: true, force: true }); }
+});

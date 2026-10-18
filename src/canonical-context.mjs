@@ -1315,7 +1315,18 @@ export function sessionCallIssuer(manager, id) {
 export function planUnknownRecovery({ timestamp, ...input } = {}) {
   requireThat(Number.isSafeInteger(timestamp) && timestamp >= 0 && timestamp <= 8_640_000_000_000_000,
     "ERR_RECOVERY_TIMESTAMP");
-  const { outstanding } = projectCanonicalSource(input);
+  let outstanding;
+  const manager = input.sessionManager;
+  if (input.mode === "native" && snapshotManagers.has(manager) && typeof manager.buildSessionSource === "function") {
+    // Recovery records unknown outcomes from canonical facts, not model-view
+    // validity. Genuine projection keeps its strict checks and profile cleanup.
+    getCanonicalContextStringCodeUnits();
+    const { calls, results } = managedState(manager).facts;
+    outstanding = [];
+    for (const [toolCallId, record] of calls) {
+      if (record.call.async === true && !results.has(toolCallId)) outstanding.push({ toolCallId, toolName: record.call.name });
+    }
+  } else ({ outstanding } = projectCanonicalSource(input));
   return outstanding.map(({ toolCallId, toolName }) => ({
     role: "toolResult", toolCallId, toolName,
     content: [{ type: "text", text: "Tool execution was interrupted; its outcome is unknown. The original call was not re-executed." }],
