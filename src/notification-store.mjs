@@ -138,8 +138,8 @@ export class NotificationStore {
     const episode = this.#db.prepare("SELECT quiet_since FROM notification_families WHERE root_id=?").get(family.rootId);
     return episode?.quiet_since != null && now - episode.quiet_since >= this.idleMs;
   }
-  observe(sessionId, { owner = null, backgroundCount = 0, liveActors = [], now = Date.now() } = {}) {
-    const family = this.family(sessionId);
+  // Supplied projections belong to the current uninterrupted synchronous observation.
+  observe(sessionId, { owner = null, backgroundCount = 0, liveActors = [], now = Date.now() } = {}, family = this.family(sessionId)) {
     if (!family) { this.cancelSession(sessionId, now); return null; }
     return this.#transaction(() => {
       let episode = this.#db.prepare("SELECT * FROM notification_families WHERE root_id=?").get(family.rootId);

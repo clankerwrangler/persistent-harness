@@ -38,6 +38,16 @@ test("recursive family settlement ignores retained inactive children, waits for 
   root.busy(); assert.equal((await list())[0].state, "superseded"); root.idle();
   await eventually(async () => (await list()).length === 2);
   assert.notEqual((await list())[0].id, first.id);
+  root.busy();
+  const startingId = "starting-notification-child";
+  f.supervisor.store.createChild(root.session.sessionId, { sessionId: startingId,
+    sessionFile: `${f.dir}/${startingId}.jsonl`, actorToken: "faux-token",
+    policy: { name: "Starting handoff", prompt: "fixture", cwd: f.dir, repositoryRoot: f.dir, depth: 1, capabilities: [], skillCatalog: [] } });
+  root.idle(); await delay(130);
+  assert.equal((await list()).length, 2, "a starting descendant clears the family quiet interval");
+  f.supervisor.store.markActorLifecycle(startingId, 1, "stopped");
+  root.idle();
+  await eventually(async () => (await list()).length === 3);
 });
 
 test("own-idle parent retirement preserves family settlement until its working child settles", async t => {
@@ -78,4 +88,9 @@ test("live tool execution is not idle; dialogs reach durable feed without SSE an
   assert.equal((await f.client.request("get_notification", { id: cancel.id })).notification.state, "cancelled");
   root.emit("event", { type: "tool_execution_end", toolCallId: "live-tool", toolName: "ipython", result: { content: [] } });
   await eventually(async () => (await f.client.request("list_notifications")).notifications.some(n => n.kind === "idle"));
+  root.busy(); root.emit("event", { type: "compaction_start" }); root.idle();
+  await delay(130);
+  assert.equal((await f.client.request("list_notifications")).notifications.filter(n => n.kind === "idle").length, 1, "compaction must not create another idle notice");
+  root.emit("event", { type: "compaction_end" });
+  await eventually(async () => (await f.client.request("list_notifications")).notifications.filter(n => n.kind === "idle").length === 2);
 });

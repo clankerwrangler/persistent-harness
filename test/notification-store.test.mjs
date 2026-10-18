@@ -55,6 +55,60 @@ test("family episode survives store restart and detached jobs do not extend idle
   const restarted = new NotificationStore(file, { idleMs: 100 }); t.after(() => restarted.close());
   const item = restarted.observe("root", { backgroundCount: 2, now: 1200 }); assert.equal(item.kind, "idle"); assert.match(item.body, /2 background jobs are still running/);
   assert.equal(store.observe("root", { now: 1500 }), null); assert.equal(store.list({}, 1500).notifications.length, 1);
+  const writer = new HarnessStore(file); t.after(() => writer.close());
+  const readFamily = store.family.bind(store); let reads = 0;
+  t.mock.method(store, "family", id => { reads++; return readFamily(id); });
+  writer.setSessionName("root", "Renamed root");
+  store.observe("root", { liveActors: ["root"], now: 1600 });
+  assert.equal(reads, 1, "ordinary callers still read once");
+  const supplied = store.family("root");
+  const saved = { ...supplied, members: supplied.members.map(row => Object.assign(Object.create(Object.getPrototypeOf(row)), row)) };
+  supplied.members.forEach(Object.freeze); Object.freeze(supplied.members); Object.freeze(supplied);
+  reads = 0;
+  store.observe("root", { now: 1700 }, supplied);
+  assert.equal(reads, 0, "a supplied projection is not read again");
+  assert.deepEqual(supplied, saved);
+  writer.createChild("root", { sessionId: "starting-child", sessionFile: null, actorToken: "faux-token",
+    policy: { name: "Starting", depth: 1, prompt: "fixture" } });
+  reads = 0;
+  assert.equal(store.observe("root", { now: 1800 }), null, "the next default read sees a newly starting child");
+  assert.equal(reads, 1);
+  writer.markActorLifecycle("starting-child", 1, "stopped"); writer.setSessionName("root", "Next title");
+  reads = 0;
+  assert.equal(store.observe("root", { now: 1900 }, undefined), null);
+  assert.equal(reads, 1, "explicit undefined also reads current state");
+  const next = store.observe("root", { now: 2000, backgroundCount: 2 });
+  assert.equal(next.title, "Next title"); assert.match(next.body, /2 background jobs are still running/);
+  assert.equal(next.createdAt, 2000); assert.equal(next.expiresAt, 302000);
+  const order = [], now = Date.now;
+  store.family = id => { order.push("family"); return readFamily(id); };
+  Date.now = () => { order.push("now"); return 2100; };
+  try { assert.equal(store.observe("root"), null); } finally { Date.now = now; }
+  assert.deepEqual(order, ["now", "family"], "default time is sampled before default family resolution");
+});
+
+test("explicit null cancels without fallback and family resolution retains deleted-descendant semantics", async t => {
+  const { harness, store } = await fixture(t);
+  for (const [id, parent, depth] of [["child", "root", 1], ["grandchild", "child", 2]]) {
+    harness.createChild(parent, { sessionId: id, sessionFile: null, actorToken: "faux-token",
+      policy: { name: id, depth, prompt: "fixture" } });
+    harness.markActorLifecycle(id, 1, "stopped");
+  }
+  store.observe("grandchild", { liveActors: ["root"], now: 1000 });
+  harness.deleteSession("grandchild");
+  const family = store.family("grandchild");
+  assert.equal(family.rootId, "root"); assert.deepEqual(family.members.map(s => s.id).sort(), ["child", "root"]);
+  assert.equal(store.observe("grandchild", { now: 1010 }), null);
+  const item = store.request("root", request, 1020), readFamily = store.family;
+  store.family = () => assert.fail("explicit null must not fall back to a family read");
+  try { assert.equal(store.observe("root", { now: 1030 }, null), null); }
+  finally { store.family = readFamily; }
+  assert.equal(store.get(item.id, 1030).state, "cancelled");
+  assert.equal(harness.getSession("root").lifecycle, "stopped", "null is authoritative even with an extant root");
+  const deleted = store.request("root", { ...request, key: "deleted-root" }, 1040);
+  harness.deleteSession("root");
+  assert.equal(store.observe("root", { now: 1050 }), null); assert.equal(store.get(deleted.id, 1050).state, "cancelled");
+  assert.equal(store.observe("missing", { now: 1060 }), null);
 });
 
 test("future notification format rejects before adding tables and leaves core guards intact", async t => {
