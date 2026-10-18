@@ -78,9 +78,10 @@ export class LiveConversation {
   #replace(row, text) { this.#bytes -= row.bytes; row.chunks = []; row.bytes = 0; row.truncated = false; this.#append(row, text); }
   #append(row, text) {
     if (typeof text !== "string" || !text || row.truncated) return;
-    const bytes = Buffer.from(text, "utf8");
+    const byteLength = Buffer.byteLength(text, "utf8");
     const available = MAX_SNAPSHOT_BYTES - this.#bytes;
-    if (bytes.length <= available) { row.chunks.push(text); row.bytes += bytes.length; this.#bytes += bytes.length; return; }
+    if (byteLength <= available) { row.chunks.push(text); row.bytes += byteLength; this.#bytes += byteLength; return; }
+    const bytes = Buffer.from(text, "utf8");
     let length = Math.max(0, available); let prefix = "";
     while (length > 0) {
       try { prefix = new TextDecoder("utf-8", { fatal: true }).decode(bytes.subarray(0, length)); break; }
@@ -89,12 +90,11 @@ export class LiveConversation {
     row.chunks.push(prefix); row.bytes += length; this.#bytes += length; row.truncated = true;
   }
   #trim() {
-    let bytes = [...this.#rows.values()].reduce((sum, row) => sum + row.bytes, 0);
     for (const [id, row] of this.#rows) {
-      if (bytes <= MAX_SNAPSHOT_BYTES && this.#rows.size <= 512) break;
+      if (this.#bytes <= MAX_SNAPSHOT_BYTES && this.#rows.size <= 512) break;
       if (row.status !== "complete" && this.#rows.size <= 512) continue;
       if (row.status !== "complete") this.#truncated = true;
-      bytes -= row.bytes; this.#bytes -= row.bytes; this.#rows.delete(id);
+      this.#bytes -= row.bytes; this.#rows.delete(id);
     }
   }
 }
