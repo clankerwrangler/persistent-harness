@@ -124,7 +124,7 @@ class SkillProxy:
         return f"<Skill {self.id!r} ({backing}); use {self.alias}? for SKILL.md>"
 
 
-def bootstrap_skills(manifest: dict[str, Any], namespace: dict[str, Any]) -> dict[str, SkillProxy]:
+def bootstrap_skills(manifest: dict[str, Any], namespace: dict[str, Any], *, on_import_error=None) -> dict[str, SkillProxy]:
     proxies = {}
     for skill in manifest.get("skills", []):
         python = skill.get("python")
@@ -133,7 +133,13 @@ def bootstrap_skills(manifest: dict[str, Any], namespace: dict[str, Any]) -> dic
             src_path = python["srcPath"]
             if src_path not in sys.path:
                 sys.path.insert(0, src_path)
-            module = importlib.import_module(python["importName"])
+            import_name = python["importName"]
+            try:
+                module = importlib.import_module(import_name)
+            except Exception as error:
+                if on_import_error is not None:
+                    on_import_error(error)
+                raise
             module.__doc__ = skill["instructions"]
             module.__harness_instructions_path__ = skill["skillPath"]
         proxy = SkillProxy(skill, module)

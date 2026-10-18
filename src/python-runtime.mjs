@@ -3,6 +3,7 @@ import { spawn } from "node:child_process";
 import { access, chmod, mkdir, readFile, readdir, rename, rm, stat, unlink, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { PythonRuntimeRejection } from "./python-runtime-errors.mjs";
 
 const RUNTIME_SUPPORT_DIR = path.join(path.dirname(path.dirname(fileURLToPath(import.meta.url))), "python-runtime");
 const UV_VERSION = "0.12.3";
@@ -144,7 +145,51 @@ export class PythonRuntimeManager {
     return this.#ensurePromise;
   }
 
-  async #findCompatibleCompleted(skills, dependencies) {
+  async launch({ createKernel, ...options }) {
+    let retained;
+    const retire = async () => {
+      const failed = retained;
+      retained = undefined;
+      await failed?.close({ snapshot: false });
+    };
+    try {
+      return await this.#ensureOnce({
+        ...options,
+        isRuntimeRejection: (error) => error instanceof PythonRuntimeRejection,
+        validate: async (candidate, publish = async () => {}) => {
+          retained = await createKernel({ ...candidate, expectedVersions: candidate.managed
+            ? { python: PYTHON_VERSION, ipython: IPYTHON_VERSION, dill: DILL_VERSION } : undefined });
+          try {
+            const ready = await retained.start({ onRuntimeValidated: async (versions) => {
+              if (candidate.managed) {
+                try { assertManagedVersions(versions); }
+                catch (error) { throw new PythonRuntimeRejection(error.message, { cause: error }); }
+              }
+              await publish(versions);
+            } });
+            return { ...candidate, versions: ready.versions, kernel: retained, ready };
+          } catch (error) {
+            // Retirement must finish before the selection loop can try a successor.
+            await retire();
+            throw error;
+          }
+        },
+      });
+    } catch (error) {
+      // Also owns failures after validation, including install-lock release.
+      await retire();
+      throw error;
+    }
+  }
+
+  async #validateStandalone(candidate, skills, publish = async () => {}) {
+    const versions = await validatePython(candidate.pythonPath, skills);
+    if (candidate.managed) assertManagedVersions(versions);
+    await publish(versions);
+    return { ...candidate, versions };
+  }
+
+  async #findCompatibleCompleted(dependencies, validate, isRuntimeRejection) {
     const environmentsDir = path.join(this.runtimeDir, "environments");
     let entries;
     try { entries = await readdir(environmentsDir, { withFileTypes: true }); } catch (error) {
@@ -154,23 +199,28 @@ export class PythonRuntimeManager {
     for (const entry of entries.sort((left, right) => left.name.localeCompare(right.name))) {
       if (!entry.isDirectory()) continue;
       const environmentDir = path.join(environmentsDir, entry.name);
+      let record;
       try {
-        const record = JSON.parse(await readFile(path.join(environmentDir, "runtime.json"), "utf8"));
+        record = JSON.parse(await readFile(path.join(environmentDir, "runtime.json"), "utf8"));
         if (record?.version !== 1 || JSON.stringify(record.environmentSpec?.dependencies ?? []) !== JSON.stringify(dependencies)) continue;
         assertManagedVersions(record.versions ?? {});
-        const pythonPath = path.join(environmentDir, "bin", "python");
-        const versions = await validatePython(pythonPath, skills);
-        assertManagedVersions(versions);
-        return { pythonPath, versions, managed: true, environmentId: record.environmentId ?? entry.name, compatible: true };
-      } catch {}
+      } catch { continue; }
+      try {
+        return await validate({ pythonPath: path.join(environmentDir, "bin", "python"),
+          managed: true, environmentId: record.environmentId ?? entry.name, compatible: true });
+      } catch (error) {
+        if (!isRuntimeRejection(error)) throw error;
+      }
     }
     return undefined;
   }
 
-  async #ensureOnce({ skills, consent, onProgress }) {
+  async #ensureOnce({ skills, consent, onProgress = () => {},
+    validate = (candidate, publish) => this.#validateStandalone(candidate, skills, publish),
+    isRuntimeRejection = () => true,
+  }) {
     if (this.pythonOverride) {
-      const versions = await validatePython(this.pythonOverride, skills);
-      return { pythonPath: this.pythonOverride, versions, managed: false, environmentId: "override" };
+      return validate({ pythonPath: this.pythonOverride, managed: false, environmentId: "override" });
     }
     if (process.platform !== "linux" || process.arch !== "x64") {
       throw new Error("managed Python currently supports Linux x64 only; set PI_HARNESS_PYTHON to a compatible interpreter");
@@ -191,16 +241,15 @@ export class PythonRuntimeManager {
     const useCompleted = async () => {
       if (!await exists(completePath)) return undefined;
       try {
-        const versions = await validatePython(pythonPath, skills);
-        assertManagedVersions(versions);
-        return { pythonPath, versions, managed: true, environmentId };
-      } catch {
+        return await validate({ pythonPath, managed: true, environmentId });
+      } catch (error) {
+        if (!isRuntimeRejection(error)) throw error;
         return undefined;
       }
     };
     const completed = await useCompleted();
     if (completed) return completed;
-    const compatible = await this.#findCompatibleCompleted(skills, dependencies);
+    const compatible = await this.#findCompatibleCompleted(dependencies, validate, isRuntimeRejection);
     if (compatible) return compatible;
 
     await mkdir(this.runtimeDir, { recursive: true, mode: 0o700 });
@@ -208,7 +257,7 @@ export class PythonRuntimeManager {
     try {
       const completedAfterLock = await useCompleted();
       if (completedAfterLock) return completedAfterLock;
-      const compatibleAfterLock = await this.#findCompatibleCompleted(skills, dependencies);
+      const compatibleAfterLock = await this.#findCompatibleCompleted(dependencies, validate, isRuntimeRejection);
       if (compatibleAfterLock) return compatibleAfterLock;
       const allowed = process.env.PI_HARNESS_AUTO_INSTALL === "1" || await consent({
         pythonVersion: PYTHON_VERSION,
@@ -224,13 +273,14 @@ export class PythonRuntimeManager {
         pythonPath,
         completePath,
         onProgress,
+        validate,
       });
     } finally {
       await releaseLock();
     }
   }
 
-  async #buildManaged({ skills, dependencies, environmentId, environmentDir, environmentSpec, pythonPath, completePath, onProgress }) {
+  async #buildManaged({ skills, dependencies, environmentId, environmentDir, environmentSpec, pythonPath, completePath, onProgress, validate }) {
     const uvPath = await this.#ensureUv(onProgress);
     const pythonInstallDir = path.join(this.runtimeDir, "python");
     const cacheDir = path.join(this.runtimeDir, "cache");
@@ -258,13 +308,12 @@ export class PythonRuntimeManager {
     const sitePackages = (await run(pythonPath, ["-c", "import site; print(site.getsitepackages()[0])"])).stdout.trim();
     const skillSources = skills.flatMap((skill) => skill.python ? [skill.python.srcPath] : []);
     await writeFile(path.join(sitePackages, "persistent-harness-skills.pth"), `${skillSources.join("\n")}\n`, { mode: 0o600 });
-    const versions = await validatePython(pythonPath, skills);
-    assertManagedVersions(versions);
-    const record = { version: 1, environmentId, environmentSpec, versions };
-    const temporary = `${completePath}.${process.pid}.tmp`;
-    await writeFile(temporary, `${JSON.stringify(record, null, 2)}\n`, { mode: 0o600 });
-    await rename(temporary, completePath);
-    return { pythonPath, versions, managed: true, environmentId };
+    return validate({ pythonPath, managed: true, environmentId }, async (versions) => {
+      const record = { version: 1, environmentId, environmentSpec, versions };
+      const temporary = `${completePath}.${process.pid}.tmp`;
+      await writeFile(temporary, `${JSON.stringify(record, null, 2)}\n`, { mode: 0o600 });
+      await rename(temporary, completePath);
+    });
   }
 
   async #ensureUv(onProgress) {

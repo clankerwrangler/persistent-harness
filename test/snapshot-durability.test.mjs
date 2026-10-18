@@ -28,7 +28,7 @@ from pathlib import Path
 source, root = map(Path, sys.argv[1:])
 tree = ast.parse(source.read_text("utf-8"))
 nodes = [
-    node for node in tree.body
+    node for node in [child for parent in tree.body for child in (parent.body if isinstance(parent, ast.Try) else [parent])]
     if isinstance(node, (ast.Import, ast.ImportFrom, ast.FunctionDef, ast.ClassDef))
     or isinstance(node, ast.Assign)
     and all(isinstance(target, ast.Name) and target.id.isupper() for target in node.targets)

@@ -466,7 +466,7 @@ sys.path.insert(0, str(kernel_path.parent))
 tree = ast.parse(kernel_path.read_text("utf-8"), filename=str(kernel_path))
 constant_names = {"SNAPSHOT_VERSION", "PER_VARIABLE_LIMIT", "TOTAL_SNAPSHOT_LIMIT", "MANIFEST_LIMIT"}
 nodes = []
-for node in tree.body:
+for node in [child for parent in tree.body for child in (parent.body if isinstance(parent, ast.Try) else [parent])]:
     if isinstance(node, (ast.Import, ast.FunctionDef, ast.ClassDef)):
         nodes.append(node)
     elif isinstance(node, ast.ImportFrom) and node.module not in {"IPython.core.interactiveshell", "_persistent_harness"}:
@@ -604,7 +604,7 @@ sys.path.insert(0, str(kernel_path.parent))
 tree = ast.parse(kernel_path.read_text("utf-8"), filename=str(kernel_path))
 constant_names = {"SNAPSHOT_VERSION", "PER_VARIABLE_LIMIT", "TOTAL_SNAPSHOT_LIMIT", "MANIFEST_LIMIT"}
 nodes = []
-for node in tree.body:
+for node in [child for parent in tree.body for child in (parent.body if isinstance(parent, ast.Try) else [parent])]:
     if isinstance(node, ast.ImportFrom) and node.module == "__future__":
         nodes.append(node)
     elif isinstance(node, ast.Import) and all(alias.name != "dill" for alias in node.names):

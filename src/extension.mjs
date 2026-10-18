@@ -691,7 +691,7 @@ ${catalog.diagnostics.map((item) => item.error).join("\n")}`);
       currentManifest = manifest;
       const sidecars = await persistSessionMetadata(ctx, manifest);
       const stateDir = sidecars.kernelStatePath;
-      const runtime = await runtimeManager.ensure({
+      const { kernel: created, ready } = await runtimeManager.launch({
         skills: manifest.skills,
         consent: async ({ pythonVersion, packages }) => {
           if (!ctx.hasUI) return false;
@@ -704,38 +704,43 @@ ${catalog.diagnostics.map((item) => item.error).join("\n")}`);
         onProgress: (message) => {
           if (message) ctx.ui.setStatus(STATUS_KEY, `python: ${truncatePlain(message, 60)}`);
         },
-      });
-      const created = new PythonKernel({
-        pythonPath: runtime.pythonPath,
-        kernelScript: KERNEL_SCRIPT,
-        runtimeSupportDir: PYTHON_RUNTIME_SUPPORT,
-        cwd: ctx.cwd,
-        stateDir,
-        manifest,
-        shutdownTimeoutMs: Number(process.env.PI_HARNESS_KERNEL_SHUTDOWN_TIMEOUT_MS ?? 1500),
-        killTimeoutMs: Number(process.env.PI_HARNESS_KERNEL_KILL_TIMEOUT_MS ?? 1000),
-        interruptTimeoutMs: Number(process.env.PI_HARNESS_KERNEL_INTERRUPT_TIMEOUT_MS ?? 2000),
-        hostHandlers: createHostHandlers({
+        createKernel: (runtime) => new PythonKernel({
+          pythonPath: runtime.pythonPath,
+          expectedVersions: runtime.expectedVersions,
+          kernelScript: KERNEL_SCRIPT,
+          runtimeSupportDir: PYTHON_RUNTIME_SUPPORT,
           cwd: ctx.cwd,
-          getClient: () => client,
-          getContext: () => activeContext,
-          getManifest: () => currentManifest,
-          getKernel: () => kernel,
-          getKernelRestore: () => lastRestoreReport,
-          recordAgentMessage: persistOutgoingAgentMessage,
-          recordChildCreation: persistChildCreation,
-          restartKernel: scheduleKernelRestart,
+          stateDir,
+          manifest,
+          shutdownTimeoutMs: Number(process.env.PI_HARNESS_KERNEL_SHUTDOWN_TIMEOUT_MS ?? 1500),
+          killTimeoutMs: Number(process.env.PI_HARNESS_KERNEL_KILL_TIMEOUT_MS ?? 1000),
+          interruptTimeoutMs: Number(process.env.PI_HARNESS_KERNEL_INTERRUPT_TIMEOUT_MS ?? 2000),
+          hostHandlers: createHostHandlers({
+            cwd: ctx.cwd,
+            getClient: () => client,
+            getContext: () => activeContext,
+            getManifest: () => currentManifest,
+            getKernel: () => kernel,
+            getKernelRestore: () => lastRestoreReport,
+            recordAgentMessage: persistOutgoingAgentMessage,
+            recordChildCreation: persistChildCreation,
+            restartKernel: scheduleKernelRestart,
+          }),
         }),
       });
-      const ready = await created.start();
-      kernel = created;
-      lastRestoreReport = ready.restore ?? null;
-      const shortId = client?.connectedSession?.shortId;
-      ctx.ui.setStatus(STATUS_KEY, shortId ? `harness ${shortId}` : "harness connected");
-      if (ready.restore?.found && ready.restore.skipped?.length) {
-        ctx.ui.notify(`Python restored with ${ready.restore.skipped.length} skipped value(s)`, "warning");
+      try {
+        lastRestoreReport = ready.restore ?? null;
+        const shortId = client?.connectedSession?.shortId;
+        ctx.ui.setStatus(STATUS_KEY, shortId ? `harness ${shortId}` : "harness connected");
+        if (ready.restore?.found && ready.restore.skipped?.length) {
+          ctx.ui.notify(`Python restored with ${ready.restore.skipped.length} skipped value(s)`, "warning");
+        }
+        kernel = created;
+        return created;
+      } catch (error) {
+        await created.close({ snapshot: false });
+        throw error;
       }
-      return created;
     })().finally(() => {
       kernelPromise = undefined;
     });

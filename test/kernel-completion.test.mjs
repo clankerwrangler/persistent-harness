@@ -23,6 +23,11 @@ def keep_writing():
         with (root / "writes").open("a") as f:
             f.write("x")
         time.sleep(0.001)
+if mode == "unvalidated":
+    emit({"type": "ready"})
+    keep_writing()
+emit({"type": "runtime_validated", "versions": {"python": "fixture", "ipython": "fixture", "dill": "fixture"}})
+assert json.loads(control.makefile("rb").readline())["type"] == "runtime_continue"
 emit({"type": "ready", "restore": {"found": False}})
 if mode == "control":
     control.shutdown(socket.SHUT_RD)
@@ -71,4 +76,8 @@ test("close escalation keeps process ownership until SIGKILL exit", { timeout: 5
   const { kernel, pid } = await fixture(t, "close");
   await kernel.close({ snapshot: false });
   assertExited(pid);
+});
+
+test("ready without this process's runtime validation cannot expose a kernel", async (t) => {
+  await assert.rejects(fixture(t, "unvalidated"), /ready before runtime validation/);
 });

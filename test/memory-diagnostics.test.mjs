@@ -54,6 +54,8 @@ def emit(frame): control.write((json.dumps(frame)+"\n").encode())
 def mark(name): (root/name).write_text("ready")
 def wait(name):
     while not (root/name).exists(): time.sleep(.005)
+emit({"type":"runtime_validated","versions":{"python":"fixture","ipython":"fixture","dill":"fixture"}})
+assert json.loads(control.readline())["type"]=="runtime_continue"
 emit({"type":"ready"})
 for line in control:
     c=json.loads(line); kind,identity=c["type"],c["id"]

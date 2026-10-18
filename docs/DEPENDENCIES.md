@@ -48,6 +48,19 @@ verification. See [Canonical history](ARCHITECTURE.md#canonical-history) and the
 
 `node bin/provision-skills.mjs --yes` provisions checksum-pinned uv 0.12.3, CPython 3.12.12, IPython 9.10.0, and dill 0.3.8 on Linux x64. Managed environments are selected by dependencies and skill manifests. A compatible completed environment can be reused after a source-only skill change; dependency changes require provisioning.
 
+Kernel launch validates imports and all three versions in the process that runs
+cells, before snapshot recovery or deserialization. Each replacement validates
+again. Managed launches require the exact pins; an explicit interpreter reports
+its observed versions without pinning them. Standalone provisioning and
+changed-catalog admission retain their disposable import checks. A catalog
+fingerprint or an earlier provision result does not validate a new process.
+
+An import, version, or executable rejection can select another compatible
+completed environment or enter the approved provisioning path. Configuration,
+control, and restore failures do not trigger runtime repair. A newly built
+runtime publishes its completion record after import/version validation, even
+if later namespace restoration fails.
+
 For an existing interpreter:
 
 ```sh

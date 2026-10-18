@@ -18,17 +18,6 @@ import traceback
 import types
 from pathlib import Path
 
-import dill
-from IPython.core import page as ipython_page
-from IPython.core.interactiveshell import InteractiveShell
-from IPython.core.displayhook import DisplayHook
-from IPython.core.formatters import BaseFormatter, DisplayFormatter
-from IPython.core.displaypub import DisplayPublisher
-from _mime_history import MimeHistory
-from _memory_diagnostics import collect_history_memory
-
-from _persistent_harness import SkillProxy, bootstrap_skills, configure_control, _execution_id
-
 PROTOCOL_VERSION = 1
 SNAPSHOT_VERSION = 1
 PER_VARIABLE_LIMIT = 4 * 1024 * 1024
@@ -40,10 +29,8 @@ parser.add_argument("--config", required=True)
 args = parser.parse_args()
 config = json.loads(Path(args.config).read_text("utf-8"))
 control = os.fdopen(3, "r+b", buffering=0)
-configure_control(control)
 active_output_id = None
 max_output_frame_bytes = config.get("maxOutputFrameBytes", 1024 * 1024)
-mime_history = MimeHistory()
 
 
 def emit(frame):
@@ -55,6 +42,31 @@ def emit(frame):
         payload = (json.dumps(notice) + "\n").encode("utf-8")
     control.write(payload)
     control.flush()
+
+
+def reject_runtime(error):
+    emit({"type": "startup_error", "phase": "runtime",
+          "error": f"{type(error).__name__}: {error}"})
+    raise SystemExit(1)
+
+
+try:
+    import dill
+    import IPython
+    from IPython.core import page as ipython_page
+    from IPython.core.interactiveshell import InteractiveShell
+    from IPython.core.displayhook import DisplayHook
+    from IPython.core.formatters import BaseFormatter, DisplayFormatter
+    from IPython.core.displaypub import DisplayPublisher
+except Exception as error:
+    reject_runtime(error)
+
+from _mime_history import MimeHistory
+from _memory_diagnostics import collect_history_memory
+from _persistent_harness import SkillProxy, bootstrap_skills, configure_control, _execution_id
+
+configure_control(control)
+mime_history = MimeHistory()
 
 
 def receive():
@@ -987,7 +999,19 @@ shell.var_expand = _literal_var_expand
 shell.system = _disabled_shell_escape
 shell.getoutput = _disabled_shell_escape
 manifest = config["manifest"]
-proxies = bootstrap_skills(manifest, shell.user_ns)
+proxies = bootstrap_skills(manifest, shell.user_ns, on_import_error=reject_runtime)
+try:
+    runtime_versions = {"python": sys.version.split()[0], "ipython": IPython.__version__, "dill": dill.__version__}
+    expected_versions = config.get("expectedVersions")
+    if expected_versions is not None and runtime_versions != expected_versions:
+        raise RuntimeError(f"managed runtime version mismatch: {runtime_versions}")
+except Exception as error:
+    reject_runtime(error)
+# The manager can publish an environment completion record without another process.
+# No snapshot recovery or deserialization can precede this process's proof.
+emit({"type": "runtime_validated", "versions": runtime_versions})
+if receive().get("type") != "runtime_continue":
+    raise RuntimeError("expected runtime startup continuation")
 protected_names = set(shell.user_ns) | set(proxies)
 snapshot_recovery_report = recover_previous_snapshot(config["snapshotPath"])
 recovery_validation = snapshot_recovery_report.pop("_validation", None)
@@ -1002,7 +1026,8 @@ namespace_checkpoint = restore_report.get("namespaceCheckpoint")
 emit({
     "type": "ready",
     "version": PROTOCOL_VERSION,
-    "python": sys.version.split()[0],
+    "python": runtime_versions["python"],
+    "versions": runtime_versions,
     "skills": sorted(proxies),
     "restore": restore_report,
     "snapshotCleanup": snapshot_cleanup_report,

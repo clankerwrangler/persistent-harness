@@ -1,12 +1,37 @@
 import { randomUUID } from "node:crypto";
 import { spawn } from "node:child_process";
-import { mkdir, rm, writeFile } from "node:fs/promises";
+import { access, mkdir, rm, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
+import { constants } from "node:fs";
 import { JsonLineDecoder, encodeFrame } from "./framing.mjs";
 import { dispatchExtensionTool } from "./extension-tool-host.mjs";
 import { historyMemoryDiagnostics } from "./memory-diagnostics.mjs";
+import { PythonRuntimeRejection } from "./python-runtime-errors.mjs";
 
 const KERNEL_FRAME_BYTES = 1024 * 1024;
+
+async function classifySpawnFailure(error, pythonPath, cwd) {
+  // A missing PID also covers host configuration and capacity errors. Repair
+  // only an explicitly located interpreter whose failure can be established.
+  if (!["ENOENT", "ENOTDIR", "EACCES", "ENOEXEC"].includes(error.code)
+    || !path.isAbsolute(pythonPath)) return error;
+  try {
+    if (cwd != null) {
+      if (!(await stat(cwd)).isDirectory()) return error;
+      await access(cwd, constants.X_OK);
+    }
+  } catch { return error; }
+  try {
+    if (!(await stat(pythonPath)).isFile()) return new PythonRuntimeRejection(error.message, { cause: error });
+    await access(pythonPath, constants.X_OK);
+  } catch (cause) {
+    if (["ENOENT", "ENOTDIR", "EACCES"].includes(cause.code)) {
+      return new PythonRuntimeRejection(error.message, { cause: error });
+    }
+    return error;
+  }
+  return error.code === "ENOEXEC" ? new PythonRuntimeRejection(error.message, { cause: error }) : error;
+}
 
 class OutputCollector {
   constructor({ maxBytes, onUpdate }) {
@@ -135,9 +160,14 @@ export class PythonKernel {
   #closed = false;
   #ready = false;
   #queuedOperations = 0;
+  #onRuntimeValidated;
+  #runtimeValidated = false;
+  #runtimeVersions;
+  #runtimeValidationPromise;
 
   constructor({
     pythonPath,
+    expectedVersions,
     kernelScript,
     runtimeSupportDir,
     cwd,
@@ -150,6 +180,7 @@ export class PythonKernel {
     interruptTimeoutMs = 2000,
   }) {
     this.pythonPath = pythonPath;
+    this.expectedVersions = expectedVersions;
     this.kernelScript = kernelScript;
     this.runtimeSupportDir = runtimeSupportDir;
     this.cwd = cwd;
@@ -182,21 +213,39 @@ export class PythonKernel {
     };
   }
 
-  async start() {
+  start({ onRuntimeValidated = async () => {} } = {}) {
     if (this.#readyPromise) return this.#readyPromise;
-    if (this.#closed) throw new Error("kernel is closed");
+    if (this.#closed) return Promise.reject(new Error("kernel is closed"));
+    const starting = this.#startOnce(onRuntimeValidated);
+    this.#readyPromise = starting;
+    starting.catch(() => {
+      if (this.#readyPromise === starting && !this.#process) this.#readyPromise = undefined;
+    });
+    return starting;
+  }
+
+  async #startOnce(onRuntimeValidated) {
+    this.#runtimeValidated = false;
+    this.#runtimeValidationPromise = undefined;
+    this.#runtimeVersions = undefined;
+    this.#onRuntimeValidated = onRuntimeValidated;
+    if (this.cwd != null) {
+      if (!(await stat(this.cwd)).isDirectory()) throw new Error("kernel cwd is not a directory");
+      await access(this.cwd, constants.X_OK);
+    }
     await mkdir(this.stateDir, { recursive: true, mode: 0o700 });
     await writeFile(this.configPath, `${JSON.stringify({
       version: 1,
       manifest: this.manifest,
       snapshotPath: this.snapshotPath,
       maxOutputFrameBytes: KERNEL_FRAME_BYTES,
+      expectedVersions: this.expectedVersions,
     }, null, 2)}\n`, { mode: 0o600 });
     const pythonPaths = [
       this.runtimeSupportDir,
       ...this.manifest.skills.flatMap((skill) => skill.python ? [skill.python.srcPath] : []),
     ];
-    this.#readyPromise = new Promise((resolve, reject) => {
+    const readyPromise = new Promise((resolve, reject) => {
       this.#resolveReady = resolve;
       this.#rejectReady = reject;
     });
@@ -219,7 +268,16 @@ export class PythonKernel {
     child.stderr.on("error", () => {});
     this.#control.on("error", (error) => { if (this.#process === child) this.#terminateOnControlError(error); });
     this.#control.on("data", (chunk) => { if (this.#process === child) this.#onControl(chunk); });
-    child.once("error", (error) => { if (this.#process === child) this.#failAll(error); });
+    child.once("error", async (error) => {
+      if (this.#process !== child) return;
+      if (!child.pid) {
+        const failure = await classifySpawnFailure(error, this.pythonPath, this.cwd);
+        if (this.#process !== child) return;
+        this.#process = undefined;
+        this.#control = undefined;
+        this.#failAll(failure);
+      } else this.#terminateOnControlError(error);
+    });
     child.once("exit", (code, signal) => {
       if (this.#process !== child) return;
       const error = this.#controlError ?? new Error(`Python kernel exited code=${code} signal=${signal}`);
@@ -227,10 +285,14 @@ export class PythonKernel {
       this.#failAll(error);
       this.#process = undefined;
       this.#control = undefined;
-      this.#readyPromise = undefined;
+      if (this.#ready) this.#readyPromise = undefined;
       this.#ready = false;
     });
-    return this.#readyPromise;
+    return readyPromise.catch(async (error) => {
+      // Completion publication must settle even if the child exits during it.
+      await this.#runtimeValidationPromise?.catch(() => {});
+      throw error;
+    });
   }
 
   #onControl(chunk) {
@@ -242,9 +304,45 @@ export class PythonKernel {
       return;
     }
     for (const frame of frames) {
+      if (frame.type === "startup_error") {
+        const error = frame.phase === "runtime"
+          ? new PythonRuntimeRejection(frame.error ?? "Python runtime rejected")
+          : new Error(frame.error ?? "Python startup failed");
+        this.#terminateOnControlError(error);
+        return;
+      }
+      if (frame.type === "runtime_validated") {
+        if (this.#runtimeVersions) {
+          this.#terminateOnControlError(new Error("duplicate Python runtime validation"));
+          return;
+        }
+        const versions = frame.versions;
+        if (!["python", "ipython", "dill"].every((key) => typeof versions?.[key] === "string" && versions[key])) {
+          this.#terminateOnControlError(new Error("invalid Python runtime versions"));
+          return;
+        }
+        this.#runtimeVersions = versions;
+        const child = this.#process;
+        this.#runtimeValidationPromise = Promise.resolve().then(async () => {
+          if (this.expectedVersions && Object.entries(this.expectedVersions).some(([key, value]) => versions[key] !== value)) {
+            throw new PythonRuntimeRejection(`managed runtime version mismatch: ${JSON.stringify(versions)}`);
+          }
+          const onValidated = this.#onRuntimeValidated;
+          this.#onRuntimeValidated = undefined;
+          await onValidated(versions);
+          if (this.#process !== child || this.#controlError) return;
+          this.#runtimeValidated = true;
+          this.#writeControl({ type: "runtime_continue" });
+        }).catch((error) => { if (this.#process === child) this.#terminateOnControlError(error); });
+        continue;
+      }
       if (frame.type === "ready") {
+        if (!this.#runtimeValidated) {
+          this.#terminateOnControlError(new Error("Python ready before runtime validation"));
+          return;
+        }
         this.#ready = true;
-        this.#resolveReady?.(frame);
+        this.#resolveReady?.({ ...frame, versions: this.#runtimeVersions });
         continue;
       }
       if (frame.type === "host_request") {
