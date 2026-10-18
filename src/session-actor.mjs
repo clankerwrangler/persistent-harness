@@ -53,7 +53,7 @@ export class PiSessionActor extends EventEmitter {
   #terminal = false;
   #inputTail = Promise.resolve();
 
-  constructor({ command = "pi", args, cwd, env, requestTimeoutMs = 30_000,
+  constructor({ command = "pi", args, cwd, env, requestTimeoutMs = 30_000, startupTimeoutMs = requestTimeoutMs,
     promptPreflightTimeoutMs = DEFAULT_PROMPT_PREFLIGHT_TIMEOUT_MS, shutdownTimeoutMs = 3000 }) {
     super();
     this.command = command;
@@ -61,6 +61,7 @@ export class PiSessionActor extends EventEmitter {
     this.cwd = cwd;
     this.env = env;
     this.requestTimeoutMs = requestTimeoutMs;
+    this.startupTimeoutMs = startupTimeoutMs;
     this.promptPreflightTimeoutMs = promptPreflightTimeoutMs;
     this.shutdownTimeoutMs = shutdownTimeoutMs;
   }
@@ -114,8 +115,17 @@ export class PiSessionActor extends EventEmitter {
       child.once("spawn", resolve);
       child.once("error", reject);
     });
-    const state = await this.request("get_state", {}, this.requestTimeoutMs);
-    await this.request("set_steering_mode", { mode: "all", persist: false });
+    // One post-spawn budget covers bootstrap state AND the steering acknowledgement.
+    const deadline = performance.now() + this.startupTimeoutMs;
+    const remaining = (type) => {
+      if (this.#closing || this.#terminal) throw new Error("Pi session actor startup was stopped");
+      const timeoutMs = deadline - performance.now();
+      if (timeoutMs <= 0) throw new Error(`Pi RPC ${type} timed out`);
+      return timeoutMs;
+    };
+    const state = await this.request("get_state", {}, remaining("get_state"));
+    await this.request("set_steering_mode", { mode: "all", persist: false }, remaining("set_steering_mode"));
+    remaining("set_steering_mode"); // A late response is not readiness if timer delivery was delayed.
     return { ...state, steeringMode: "all" };
   }
 

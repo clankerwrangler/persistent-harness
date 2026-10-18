@@ -15,6 +15,7 @@ import { KERNEL_RELOAD_COMMAND, retryBranchMessage } from "../src/session-action
 import { defaultRootName } from "../src/root-title.mjs";
 import { actorInputCustomPayload, ACTOR_INPUT_COMMAND } from "../src/protocol.mjs";
 import { createRootTitleGenerator } from "../src/root-title-generator.mjs";
+import { PiSessionActor } from "../src/session-actor.mjs";
 import { HarnessSupervisor } from "../src/supervisor.mjs";
 
 const PNG_1X1 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=";
@@ -628,7 +629,7 @@ for (const withExtras of [false, true]) test(withExtras
   let launched;
   const supervisor = new HarnessSupervisor({
     socketPath, databasePath: path.join(root, "state", "harness.sqlite"), pidPath: path.join(root, "run", "supervisor.pid"),
-    skillsPath, ...(withExtras ? { actorExtensionPaths: [secondExtension, extraExtension, secondExtension, harnessExtension] } : {}), actorInactivityMs: 0, runtimeProvisioner: async () => ({}),
+    skillsPath, ...(withExtras ? { actorStartupTimeoutMs: 45_000, actorExtensionPaths: [secondExtension, extraExtension, secondExtension, harnessExtension] } : {}), actorInactivityMs: 0, runtimeProvisioner: async () => ({}),
     actorFactory: (options) => { launched = options; return new FakePiActor(options); },
     processIdentityFactory: async (pid) => ({ version: 1, pid, processGroup: pid, startTime: "fake", ownerToken: "fake" }),
     processTerminator: async () => ({ terminated: true }),
@@ -643,6 +644,9 @@ for (const withExtras of [false, true]) test(withExtras
   await eventually(() => launched);
   const extensionPaths = launched.args.flatMap((value, index, args) => args[index - 1] === "--extension" ? [value] : []);
   assert.deepEqual(extensionPaths, [harnessExtension, ...(withExtras ? [secondExtension, extraExtension] : [])]);
+  assert.equal(launched.startupTimeoutMs, withExtras ? 45_000 : 120_000);
+  assert.equal(Object.hasOwn(launched, "requestTimeoutMs"), false, "startup configuration must not replace ordinary RPC deadlines");
+  assert.equal(new PiSessionActor(launched).requestTimeoutMs, 30_000);
 });
 
 class InferencePiActor extends FakePiActor {

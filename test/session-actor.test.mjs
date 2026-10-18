@@ -42,6 +42,103 @@ test("prompt preflight can outlive the actor startup and control timeout", { tim
   assert.deepEqual(await actor.prompt("wait for preflight"), { accepted: true });
 });
 
+// Exercise the real worker RPC boot barrier, not a second mock transport.
+function startupFixture(t, fixture, options = {}) {
+  const rpcFixture = `
+    import { setTimeout as delay } from "node:timers/promises";
+    import { runSDKWorkerRpc } from ${JSON.stringify(new URL("../src/sdk-worker.mjs", import.meta.url).href)};
+    const fixture = ${JSON.stringify(fixture)};
+    await runSDKWorkerRpc({ bootstrap: async ({ publish }) => {
+      publish({ type: "fixture_bootstrap_entered" });
+      if (fixture.hang) await new Promise(() => {});
+      await delay(fixture.bootstrapMs ?? 0);
+      if (fixture.fail) throw new Error("synthetic bootstrap failure");
+      let states = 0;
+      return {
+        coordinator: { waitForIdle: async () => {} }, close: async () => {},
+        handle: async (command) => {
+          if (command.type === "get_state") {
+            if (states++ > 0) await delay(fixture.warmMs ?? 0);
+            return { sessionId: "startup", sessionFile: null, model: null, thinkingLevel: "off" };
+          }
+          if (command.type === "set_steering_mode") {
+            await delay(fixture.steeringMs ?? 0);
+            publish({ type: "fixture_steering_ack" });
+            return;
+          }
+          throw new Error("fixture refuses non-control operation");
+        },
+      };
+    } });
+  `;
+  const actor = new PiSessionActor({
+    command: process.execPath, args: ["--input-type=module", "--eval", rpcFixture], cwd: os.tmpdir(), env: process.env,
+    requestTimeoutMs: 150, startupTimeoutMs: 1500, shutdownTimeoutMs: 100, ...options,
+  });
+  t.after(() => actor.close());
+  return actor;
+}
+
+test("cold startup and steering can exceed warm RPC timeouts without extending warm health", { timeout: 5000 }, async (t) => {
+  const actor = startupFixture(t, { bootstrapMs: 400, steeringMs: 250, warmMs: 400 });
+  let steeringAcknowledged = false;
+  actor.on("event", (frame) => { if (frame.type === "fixture_steering_ack") steeringAcknowledged = true; });
+  const state = await actor.start();
+  assert.equal(state.sessionId, "startup");
+  assert.equal(state.steeringMode, "all");
+  assert.equal(steeringAcknowledged, true);
+  await assert.rejects(actor.request("get_state"), /Pi RPC get_state timed out/);
+});
+
+test("state and steering share one finite startup deadline", { timeout: 5000 }, async (t) => {
+  const actor = startupFixture(t, { bootstrapMs: 400, steeringMs: 400 }, { startupTimeoutMs: 650 });
+  await assert.rejects(actor.start(), /Pi RPC set_steering_mode timed out/);
+  await actor.close();
+  assert.equal(actor.isRunning, false);
+});
+
+test("late steering acknowledgement cannot promote readiness after delayed timer delivery", { timeout: 5000 }, async (t) => {
+  const actor = startupFixture(t, {}, { startupTimeoutMs: 600 });
+  const request = actor.request.bind(actor);
+  actor.request = async (...args) => {
+    const data = await request(...args);
+    if (args[0] === "set_steering_mode") {
+      const end = performance.now() + 650;
+      while (performance.now() < end) {} // Delay the parent after ack, with the RPC timer already cleared.
+    }
+    return data;
+  };
+  await assert.rejects(actor.start(), /Pi RPC set_steering_mode timed out/);
+});
+
+test("direct callers without a startup option inherit their request timeout as the handshake budget", async (t) => {
+  const actor = startupFixture(t, { bootstrapMs: 400 }, { requestTimeoutMs: 200, startupTimeoutMs: undefined });
+  assert.equal(actor.startupTimeoutMs, 200);
+  await assert.rejects(actor.start(), /Pi RPC get_state timed out/);
+});
+
+test("hung bootstrap fails finitely and close drains the owned worker", { timeout: 5000 }, async (t) => {
+  const actor = startupFixture(t, { hang: true }, { startupTimeoutMs: 250 });
+  await assert.rejects(actor.start(), /Pi RPC get_state timed out/);
+  await actor.close();
+  assert.equal(actor.isRunning, false);
+});
+
+test("close during bootstrap rejects pending startup without late readiness", { timeout: 5000 }, async (t) => {
+  const actor = startupFixture(t, { hang: true }, { startupTimeoutMs: 4000 });
+  const entered = new Promise((resolve) => actor.on("event", (frame) => { if (frame.type === "fixture_bootstrap_entered") resolve(); }));
+  const rejected = assert.rejects(actor.start(), /Pi session actor exited|startup was stopped/);
+  await entered;
+  await actor.close();
+  await rejected;
+  assert.equal(actor.isRunning, false);
+});
+
+test("bootstrap failures remain explicit under the cold startup budget", async (t) => {
+  const actor = startupFixture(t, { fail: true });
+  await assert.rejects(actor.start(), /synthetic bootstrap failure/);
+});
+
 async function shutdownFixture(t, { hang = false } = {}) {
   const root = await mkdtemp(path.join(os.tmpdir(), "pi-actor-shutdown-"));
   t.after(() => rm(root, { recursive: true, force: true }));

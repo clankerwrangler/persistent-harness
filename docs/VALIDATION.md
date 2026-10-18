@@ -165,11 +165,20 @@ latency, or billing guarantees.
 
 `InputAdmission` checks durable admission/publication, independent acknowledgment/readiness,
 coalesced wake ownership, overlapping sends, failure visibility, and drained
-shutdown/restart. It abstracts skill reconciliation, SQLite atomicity, transport,
+shutdown/restart. It also checks one finite post-spawn state/steering
+handshake deadline, a separate warm RPC deadline, and termination under fair timer
+steps. The `CoupleStartup`, `ResetSteering`, and `ExtendWarm` configurations must
+violate their corresponding deadline invariants. Queue waiting is distinct from
+the handshake clock; ticks abstract time, not archive size or actual latency. It abstracts skill reconciliation, SQLite atomicity, transport,
 and worker consumption; it does not prove exactly-once execution. Supervisor
 regressions hold startup and close, reject registration/factory/start/submit,
 retry the same receipt after reconnect or failure, verify the correlated accepted
-error and its clearing on retry, and verify stop/delete/restart.
+error and its clearing on retry, and verify stop/delete/restart. Session-actor
+checks use the real worker RPC boot barrier with a synthetic bootstrap to verify
+cold and steering work beyond the warm deadline, unchanged warm timeout, one
+shared startup budget, late acknowledgement rejection, legacy direct callers,
+finite hung-start failure, explicit bootstrap errors, and close during startup.
+They do not open private sessions or establish live startup success.
 
 `StockWorkerSetup` checks cleanup ownership before asynchronous setup, the
 cancellation fence before worker startup, and cleanup after the owned copy drains.

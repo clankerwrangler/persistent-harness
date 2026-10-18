@@ -405,7 +405,7 @@ export class HarnessSupervisor {
     transcriptReader = null,
     processIdentityFactory = captureOwnedProcessIdentity,
     processTerminator = terminateOwnedProcess,
-    actorStartupTimeoutMs = Number(process.env.PI_HARNESS_ACTOR_STARTUP_TIMEOUT_MS ?? 30_000),
+    actorStartupTimeoutMs = Number(process.env.PI_HARNESS_ACTOR_STARTUP_TIMEOUT_MS ?? 120_000),
     actorPromptPreflightTimeoutMs = Number(process.env.PI_HARNESS_ACTOR_PROMPT_PREFLIGHT_TIMEOUT_MS ?? DEFAULT_PROMPT_PREFLIGHT_TIMEOUT_MS),
     actorShutdownTimeoutMs = Number(process.env.PI_HARNESS_ACTOR_SHUTDOWN_TIMEOUT_MS ?? 3000),
     logger = console,
@@ -1791,7 +1791,7 @@ export class HarnessSupervisor {
     }
     const compileCache = await (this.#actorCompileCache ??= createActorCompileCache());
     const session = this.store.getActorLaunch(sessionId); if (!session || session.lifecycle !== "starting" || this.store.isSessionDeleting(sessionId)) return;
-    const worker = this.actorFactory({ command: process.execPath, args: [STOCK_ACTOR_WORKER, ...this.#actorArgs(session)], cwd: session.cwd, env: { ...this.#actorEnv(session, compileCache), PI_HARNESS_PI_COMMAND: this.piCommand }, requestTimeoutMs: this.actorStartupTimeoutMs, promptPreflightTimeoutMs: this.actorPromptPreflightTimeoutMs,
+    const worker = this.actorFactory({ command: process.execPath, args: [STOCK_ACTOR_WORKER, ...this.#actorArgs(session)], cwd: session.cwd, env: { ...this.#actorEnv(session, compileCache), PI_HARNESS_PI_COMMAND: this.piCommand }, startupTimeoutMs: this.actorStartupTimeoutMs, promptPreflightTimeoutMs: this.actorPromptPreflightTimeoutMs,
       shutdownTimeoutMs: this.actorShutdownTimeoutMs, session });
     const record = { worker, generation: session.actorGeneration, rootOutputSession: Object.freeze({ sessionId: session.sessionId, kind: session.kind, depth: session.depth }), expectedLifecycle: null, exitError: null, eventSeq: 0, eventRing: [], eventRingBytes: 0, progressSummary: undefined, progressTurnId: null,
       skillGrantFingerprint: skillGrant.fingerprint, skillGrantSkills: skillGrant.skills, skillRefreshPending: false,
