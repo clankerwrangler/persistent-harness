@@ -255,6 +255,18 @@ order, pinned inodes, missing segments, UTF-8 boundaries, large records, short
 reads, concurrent truncation, descriptor cleanup, and suffix-only I/O. A log read
 remains a best-effort observation of two segments, not an atomic rotation snapshot.
 
+`CanonicalOpaqueIngestion` checks global metadata and selected native-fact gates,
+atomic publication, source expiry, and validation when an opaque value is
+explicitly consumed. Startup, ordinary inference, and bookkeeping do not read
+unrelated custom-entry bodies. Its `BadEagerOpaque`, `BadMetadata`, `BadValue`,
+and `BadFence` controls must fail their corresponding invariants. The model
+abstracts SDK byte framing and content fingerprints; public entry-source tests
+check duplicate/parent metadata, deferred malformed values, selected signatures,
+committed-read digests, and independent full-value captures. A real source-mode
+SDK/coordinator fixture checks cold resume, the first ordinary request, recovery,
+and bookkeeping with public-read counters. Default/array managers and explicit
+history, tree, edit, and branch operations retain complete values.
+
 `CanonicalContextRetention` complements `CanonicalContext` and
 `CanonicalContextBudget`: revision/generation ownership, leaf changes,
 compaction-pruned native/alias/signature facts, and working-payload scope.
