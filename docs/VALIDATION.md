@@ -282,11 +282,18 @@ replay. Legacy pending/completed receipts keep their original identity/digest.
 `SettledWakeOrdering` checks both mutation orderings: a wake registered before Stop
 is joined, and a later settled callback cannot reenter readiness after Stop.
 Registration leaves the mutation queue before readiness waits. Automatic empty
-exited-child intent is revalidated at the actual start boundary after asynchronous
-skill reconciliation; a fresh pending input still wakes it. Both stop_session and
-the family stop_child route cancel and join earlier readiness ownership. The existing
-`supervisor-settled-stop.test.mjs` cases also verify that a real stopped writer
-cannot append and that only explicit later activation revives it.
+exited-child intent is revalidated after asynchronous skill reconciliation; a
+fresh pending input still wakes it. Its `Activation.cfg` separately covers every
+standalone/queued readiness owner, stable retry cancellation, older launch and
+grant publication drain, failure cleanup, later activation, resident refresh,
+and independent input admission. The five activation controls must fail their
+intended invariants. Stop and subtree deletion fence and join these owners;
+internal skill-refresh passivation does not join its own readiness. Public faux
+fixtures hold runtime readiness, grant rename, and post-validation startup across
+retirement, including ancestor sidecars, close failure, and fresh input without
+replay. The existing real-writer case separately checks no append after Stop and
+explicit later revival. The model abstracts filesystem publication, worker close,
+and SQLite; it does not measure memory or establish a live occurrence.
 
 `ActorInputReconciliation` models startup without a historical actor receipt
 sweep, retained supervisor reconciliation, receipt loss across actor generations,

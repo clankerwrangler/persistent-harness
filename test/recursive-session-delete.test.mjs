@@ -1,5 +1,7 @@
 import assert from "node:assert/strict";
-import { readFile } from "node:fs/promises";
+import fs, { readFile, writeFile } from "node:fs/promises";
+import { syncBuiltinESMExports } from "node:module";
+import { sessionSidecarPaths } from "../src/session-paths.mjs";
 import { DatabaseSync } from "node:sqlite";
 import test from "node:test";
 import { deletionFixture, until } from "./fixtures/recursive-delete-fixture.mjs";
@@ -146,4 +148,128 @@ test("startup close failure keeps the live worker tracked until deletion can be 
   await f.client.request("delete_session", { sessionId: root.sessionId });
   assert.equal(worker.isRunning, false, "retry must still own and close the original live worker");
   assert.equal(f.supervisor.store.getSession(child.sessionId).lifecycle, "deleted");
+});
+
+
+for (const [operation, selected] of [["delete_session", "root"], ["delete_session", "child"], ["stop_session", "root"], ["stop_session", "child"], ["stop_session", "ancestor"]]) test(`${operation} drains an in-flight ${selected} readiness grant publication`, async t => {
+  const gate = Promise.withResolvers(), entered = Promise.withResolvers(), rename = fs.rename, originalRead = fs.readFile;
+  t.after(() => { gate.resolve(); fs.rename = rename; fs.readFile = originalRead; syncBuiltinESMExports(); });
+  const f = await deletionFixture(t), root = await f.admit("Root"), child = await f.admit("Child", root);
+  const session = selected === "child" ? child : root;
+  const readTargets = selected === "ancestor" ? [child, await f.admit("Second child", root)] : [session];
+  const grantPath = sessionSidecarPaths(root.sessionFile).skillGrantPath;
+  const publications = []; let held = false, grantReads = 0;
+  fs.readFile = async (file, ...args) => { if (file === grantPath) grantReads += 1; return originalRead(file, ...args); };
+  fs.rename = async (source, target) => {
+    if (target === grantPath && !held) {
+      held = true; entered.resolve(); await gate.promise;
+      publications.push(f.supervisor.store.getSession(session.sessionId).lifecycle);
+    }
+    return rename(source, target);
+  };
+  syncBuiltinESMExports(); await writeFile(grantPath, "{}\n");
+  const ready = Promise.all(readTargets.map(target => f.client.request("get_actor_entries", { sessionId: target.sessionId }).catch(error => error.message)));
+  await entered.promise; await f.client.request("heartbeat");
+  let acknowledged = false;
+  const deletion = f.client.request(operation, { sessionId: session.sessionId }).then(result => { acknowledged = true; return result; });
+  await until(() => !f.actors.get(session.sessionId).isRunning);
+  await f.client.request("heartbeat"); await f.client.request("list_sessions");
+  const acknowledgedWhileHeld = acknowledged;
+  gate.resolve(); await Promise.all([ready, deletion]);
+  t.diagnostic(JSON.stringify({ selected, acknowledgedWhileHeld, publications }));
+  assert.equal(acknowledgedWhileHeld, false);
+  assert.equal(publications.length, 1); assert.notEqual(publications[0], "deleted");
+  assert.equal(grantReads, 1, "a cancelled ancestor-grant waiter cannot acquire fresh authority");
+  if (selected === "ancestor") {
+    for (const outcome of await ready) assert.match(outcome, /stopped|retiring/);
+    for (const target of readTargets) assert(f.actors.get(target.sessionId).isRunning, "parent Stop keeps its children running");
+  }
+  assert.equal(f.supervisor.store.getSession(session.sessionId).lifecycle, operation === "delete_session" ? "deleted" : "stopped");
+  assert.equal(f.actors.get(session.sessionId).isRunning, false);
+  assert.deepEqual(JSON.parse(await readFile(grantPath, "utf8")), { version: 1, skills: [], capabilities: [] });
+  assert.equal(f.supervisor.store.isSessionDeleting(session.sessionId), false);
+});
+
+
+test("Stop joins an older launch held after startup validation", async t => {
+  const gate = Promise.withResolvers(), entered = Promise.withResolvers(); t.after(() => gate.resolve());
+  const f = await deletionFixture(t), session = await f.admit("Starting root", null, { start: false });
+  f.identityGate = async () => { entered.resolve(); await gate.promise; };
+  await f.client.request("revive_session", { sessionId: session.sessionId }); await entered.promise;
+  let acknowledged = false;
+  const stop = f.client.request("stop_session", { sessionId: session.sessionId }).then(reply => { acknowledged = true; return reply; });
+  await until(() => !f.actors.get(session.sessionId).isRunning);
+  await f.client.request("heartbeat"); assert.equal(acknowledged, false);
+  const generation = f.supervisor.store.getSession(session.sessionId).actorGeneration;
+  gate.resolve(); await stop;
+  await f.client.request("subscribe_session", { selector: session.sessionId, passive: true });
+  assert.equal(f.supervisor.store.getSession(session.sessionId).lifecycle, "stopped");
+  assert.equal(f.supervisor.store.getSession(session.sessionId).actorGeneration, generation);
+  assert.deepEqual(f.actors.get(session.sessionId).submits, []); assert.deepEqual(f.errors, []);
+  f.identityGate = null;
+  await f.client.request("get_actor_state", { sessionId: session.sessionId });
+  assert(f.supervisor.store.getSession(session.sessionId).actorGeneration > generation);
+});
+
+test("failed Stop retains its writer and releases retirement for retry and later activation", async t => {
+  const f = await deletionFixture(t), session = await f.admit("Close failure"), worker = f.actors.get(session.sessionId);
+  worker.failClose = true;
+  await assert.rejects(f.client.request("stop_session", { sessionId: session.sessionId }), /synthetic close failure/);
+  assert(worker.isRunning);
+  await f.client.request("get_actor_state", { sessionId: session.sessionId });
+  assert.equal(f.actors.get(session.sessionId), worker);
+  worker.failClose = false; await f.client.request("stop_session", { sessionId: session.sessionId });
+  assert.equal(worker.isRunning, false);
+  await f.client.request("get_actor_entries", { sessionId: session.sessionId });
+  assert.notEqual(f.actors.get(session.sessionId), worker); assert(f.actors.get(session.sessionId).isRunning);
+});
+
+
+test("stored changed grant finishes both sidecars when Stop cancels its held read", async t => {
+  const gate = Promise.withResolvers(), entered = Promise.withResolvers(), originalRead = fs.readFile, originalRename = fs.rename;
+  t.after(() => { gate.resolve(); fs.readFile = originalRead; fs.rename = originalRename; syncBuiltinESMExports(); });
+  const f = await deletionFixture(t), session = await f.admit("Changed grant");
+  const sidecars = sessionSidecarPaths(session.sessionFile), publications = []; let held = false;
+  fs.readFile = async (file, ...args) => {
+    const value = await originalRead(file, ...args);
+    if (file === sidecars.skillGrantPath && !held) { held = true; entered.resolve(); await gate.promise; }
+    return value;
+  };
+  fs.rename = async (source, target) => {
+    if ([sidecars.skillGrantPath, sidecars.capabilitiesPath].includes(target)) publications.push(target);
+    return originalRename(source, target);
+  };
+  syncBuiltinESMExports(); await fs.mkdir(`${f.dir}/skills/changed`);
+  await writeFile(`${f.dir}/skills/changed/SKILL.md`, "---\nname: changed\ndescription: Private changed-grant fixture.\n---\nUse only in this fixture.\n");
+  const ready = f.client.request("get_actor_state", { sessionId: session.sessionId }).catch(error => error.message);
+  await entered.promise;
+  assert.equal(f.supervisor.store.getSessionSkillGrant(session.sessionId).skills[0].id, "changed");
+  let acknowledged = false;
+  const stop = f.client.request("stop_session", { sessionId: session.sessionId }).then(reply => { acknowledged = true; return reply; });
+  await until(() => !f.actors.get(session.sessionId).isRunning); await f.client.request("heartbeat");
+  const acknowledgedWhileHeld = acknowledged;
+  gate.resolve(); await Promise.all([ready, stop]);
+  assert.equal(acknowledgedWhileHeld, false);
+  assert.deepEqual(publications, [sidecars.skillGrantPath, sidecars.capabilitiesPath]);
+  const grant = JSON.parse(await readFile(sidecars.skillGrantPath, "utf8"));
+  assert.equal(grant.skills[0].id, "changed");
+  assert.deepEqual(JSON.parse(await readFile(sidecars.capabilitiesPath, "utf8")), { version: 1, capabilities: grant.capabilities });
+  await f.client.request("get_actor_state", { sessionId: session.sessionId });
+  assert.deepEqual(publications, [sidecars.skillGrantPath, sidecars.capabilitiesPath], "unchanged grants do not republish sidecars");
+});
+
+test("ordinary capacity and inactivity passivation still allow fresh activation", async t => {
+  const f = await deletionFixture(t), first = await f.admit("First"), firstWorker = f.actors.get(first.sessionId);
+  f.supervisor.maxResidentActors = 1;
+  const second = await f.admit("Second");
+  assert.equal(firstWorker.isRunning, false); assert.equal(f.supervisor.store.getSession(first.sessionId).lifecycle, "passivated");
+  const secondWorker = f.actors.get(second.sessionId);
+  await f.client.request("get_actor_state", { sessionId: first.sessionId });
+  assert.equal(secondWorker.isRunning, false);
+  f.supervisor.actorInactivityMs = 20;
+  await f.client.request("get_actor_state", { sessionId: first.sessionId });
+  await until(() => f.supervisor.store.getSession(first.sessionId).lifecycle === "passivated");
+  f.supervisor.actorInactivityMs = 0;
+  await f.client.request("get_actor_state", { sessionId: first.sessionId });
+  assert(f.actors.get(first.sessionId).isRunning); assert.deepEqual(f.errors, []);
 });
