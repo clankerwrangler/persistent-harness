@@ -83,6 +83,36 @@ retention and normal-turn hydration, not total resident RAM independently of
 history. Explicit full-history results belong to their callers, not a permanent
 cache. Extensions that request full archives can still materialize them.
 
+When the selected SDK also exposes `prepareEntryIndex`, an explicit `--session`
+uses a stable SHA-256 key of its normalized absolute path under the private
+`<agentDir>/harness/entry-index-cache/` directory. Bootstrap supplies that path
+before opening the same manager, without creating the cache directory. Default,
+in-memory, and implicit new/recent sessions do not opt into this preparation.
+
+The supervisor defers one request at the first actual idle dispatch of each idle
+interval, outside session mutation. Readiness wakes cancel a deferred candidate
+without consuming the interval; their existing completion boundary can reconsider
+it after removing the wake owner. Actor record, generation, token, activity, and
+pending-work checks fence dispatch and late completion. Human, family, scheduled,
+and background wakes cancel preparation; worker prompts, run start, and close do
+the same. Directory creation and the existing manager's bounded metadata writer
+run only after worker idle/busy/queue checks. No new manager or service lease is
+created. Admission, ordinary close, and the existing three-second shutdown grace
+do not join preparation. Extension-requested shutdown excludes only optional
+preparation promises from its drain; all requests retain admission and active-ID
+accounting, and normal requests still drain.
+
+The derived file can survive actor generations. The SDK owns private-path,
+original-byte, header, digest, and generation validation, the 32 MiB per-file bound,
+and native fallback. Its checksum detects accidental corruption; same-user private
+metadata is trusted host state, not an imported project cache. Once rename is
+queued, a late cancellation or canonical append can still publish a complete
+immutable prefix. A true result is publication, not freshness; the harness does
+not use it as admission or recovery proof. Shutdown-hook appends remain an ordinary
+suffix. Preparation adds idle metadata serialization and I/O; warm open still
+reads and hashes the full prefix but avoids decoding indexed historical bodies.
+No retained-memory or total-disk bound is implied.
+
 With the supported source-mode SDK, the dormant service session initializes with
 `createAgentSession({contextMode: "source"})` and rebinds its Agent source after
 canonical changes. Ordinary model, thinking, tool, prompt and status reads do not

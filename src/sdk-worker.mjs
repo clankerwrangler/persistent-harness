@@ -2,8 +2,8 @@ import { nodeMemoryDiagnostics } from "./memory-diagnostics.mjs";
 import { projectAvailableModels, validateInferenceEffort } from "./inference-options.mjs";
 import { conversationBirth } from "./conversation-birth.mjs";
 import { normalizeInputLocation } from "./input-location.mjs";
-import { randomUUID } from "node:crypto";
-import { realpath } from "node:fs/promises";
+import { createHash, randomUUID } from "node:crypto";
+import { mkdir, realpath } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -175,11 +175,33 @@ function discoveredPaths(paths) {
 
 export class SDKWorker {
   #closed;
-  constructor({ session, coordinator, runner, resources, sdk, models, projectContext, broker, publish, lifecycle }) {
-    Object.assign(this, { session, coordinator, runner, resources, sdk, models, projectContext, broker, publish, lifecycle });
+  #entryIndexPreparation;
+  constructor({ session, coordinator, runner, resources, sdk, models, projectContext, broker, publish, lifecycle, entryIndexCachePath }) {
+    Object.assign(this, { session, coordinator, runner, resources, sdk, models, projectContext, broker, publish, lifecycle, entryIndexCachePath });
     this.unsubscribeService = session.subscribe((event) => {
       if (["session_info_changed", "thinking_level_changed"].includes(event.type)) publish(event);
     });
+  }
+  cancelEntryIndex(token) {
+    const current = this.#entryIndexPreparation;
+    if (!current || (token !== undefined && current.token !== token)) return false;
+    current.controller.abort();
+    return true;
+  }
+  async prepareEntryIndex(token) {
+    const manager = this.session.sessionManager;
+    const eligible = () => !this.#closed && !this.coordinator.isBusy && this.session.isIdle
+      && !this.coordinator.pendingMessageCount && !this.session.pendingMessageCount;
+    if (this.#entryIndexPreparation || !this.entryIndexCachePath || typeof manager.prepareEntryIndex !== "function" || !eligible()) return false;
+    const current = { token, controller: new AbortController() };
+    this.#entryIndexPreparation = current;
+    try {
+      await mkdir(path.dirname(this.entryIndexCachePath), { recursive: true, mode: 0o700 });
+      if (current.controller.signal.aborted || !eligible()) return false;
+      // A late sealed-prefix publication is allowed; only the SDK validates reuse.
+      return await manager.prepareEntryIndex({ signal: current.controller.signal });
+    } catch { return false; }
+    finally { if (this.#entryIndexPreparation === current) this.#entryIndexPreparation = undefined; }
   }
   getMessages() {
     const manager = this.session.sessionManager;
@@ -216,10 +238,13 @@ export class SDKWorker {
     const manager = session.sessionManager;
     const persist = command.persist === undefined ? false : boolean(command.persist, "persist");
     switch (command.type) {
+      case "prepare_entry_index": return this.prepareEntryIndex(string(command.token, "token"));
+      case "cancel_entry_index": return this.cancelEntryIndex(string(command.token, "token"));
       case "get_state": return coordinator.getState();
       case "get_memory_diagnostics": return { version: 1, node: nodeMemoryDiagnostics(),
         python: await this.lifecycle.memoryDiagnostics?.() ?? { state: "unavailable-not-running" } };
       case "prompt": case "steer": case "follow_up": {
+        this.cancelEntryIndex();
         string(command.message, "message");
         if (command.messageId != null) string(command.messageId, "messageId");
         const images = command.images ?? [];
@@ -235,7 +260,7 @@ export class SDKWorker {
           source: "rpc", ...(command.location === undefined ? {} : { location: normalizeInputLocation(command.location) }), expandPromptTemplates: command.expandPromptTemplates === undefined ? true : boolean(command.expandPromptTemplates, "expandPromptTemplates"),
         });
       }
-      case "abort": this.broker.cancelAll(); await coordinator.abort(); return undefined;
+      case "abort": this.cancelEntryIndex(); this.broker.cancelAll(); await coordinator.abort(); return undefined;
       case "compact":
         if (command.customInstructions !== undefined) string(command.customInstructions, "customInstructions");
         return coordinator.compact(command.customInstructions);
@@ -309,7 +334,7 @@ export class SDKWorker {
       });
       case "set_auto_compaction": return this.mutate(async () => session.setAutoCompactionEnabled(boolean(command.enabled, "enabled")));
       case "set_auto_retry": return this.mutate(async () => session.setAutoRetryEnabled(boolean(command.enabled, "enabled")));
-      case "abort_retry": await coordinator.abort(); return undefined;
+      case "abort_retry": this.cancelEntryIndex(); await coordinator.abort(); return undefined;
       case "set_session_name": case "rename": return this.mutate(async () => {
         session.setSessionName(string(command.name, "name"));
         await runner.emit({ type: "session_info_changed", name: session.sessionName });
@@ -331,6 +356,7 @@ export class SDKWorker {
     }
   }
   close() {
+    this.cancelEntryIndex();
     if (!this.#closed) {
       this.broker.close();
       this.#closed = (async () => {
@@ -413,16 +439,23 @@ export async function bootstrapSDKWorker({ argv = [], cwd = process.cwd(), env =
     modelsStorePath: path.join(agentDir, "models-store.json"), allowModelNetwork: false, signal: AbortSignal.timeout(15000) });
   const sessionDir = options.sessionDir ?? env.PI_CODING_AGENT_SESSION_DIR ?? settings.getSessionDir();
   const bounded = typeof sdk.SessionManager.prototype?.enableBoundedEntryRetention === "function" && !options.noSession;
-  const retention = bounded ? { entryRetention: { maxCachedBytes: 1024 * 1024 } } : undefined;
+  const explicitSession = options.session && !options.noSession ? path.resolve(cwd, options.session) : undefined;
+  const entryIndexCachePath = bounded && explicitSession && typeof sdk.SessionManager.prototype.prepareEntryIndex === "function"
+    ? path.join(agentDir, "harness", "entry-index-cache", `${createHash("sha256").update(explicitSession).digest("hex")}.index`) : undefined;
+  const retention = bounded ? { entryRetention: { maxCachedBytes: 1024 * 1024,
+    ...(entryIndexCachePath ? { indexCachePath: entryIndexCachePath } : {}) } } : undefined;
   const contextMode = bounded && typeof sdk.ExtensionRunner.prototype.emitContextSource === "function" ? "source" : "array";
   const manager = options.noSession ? sdk.SessionManager.inMemory(cwd)
-    : options.session ? sdk.SessionManager.open(path.resolve(cwd, options.session), sessionDir, cwd, retention)
+    : options.session ? sdk.SessionManager.open(explicitSession, sessionDir, cwd, retention)
     : options.continue ? sdk.SessionManager.continueRecent(cwd, sessionDir, retention) : sdk.SessionManager.create(cwd, sessionDir, retention);
   if (bounded) registerCanonicalSessionManager(manager, { estimateContextTokens: core.estimateContextTokens });
   const runner = new sdk.ExtensionRunner(active.extensions, active.runtime, cwd, manager, new sdk.ModelRegistry(models));
   const startupErrors = [];
   let ready = false, worker, session;
-  const emit = (event) => { const frame = toWorkerRpcEvent(event); if (frame) publish(frame); };
+  const emit = (event) => {
+    if (event.type === "agent_start") worker?.cancelEntryIndex();
+    const frame = toWorkerRpcEvent(event); if (frame) publish(frame);
+  };
   runner.onError((error) => { if (!ready) startupErrors.push(error); emit({ type: "extension_error", ...error }); });
   runner.setUIContext(broker.ui, "rpc");
   try {
@@ -464,7 +497,7 @@ export async function bootstrapSDKWorker({ argv = [], cwd = process.cwd(), env =
       runner, resources, promptCapture, publish: emit, basePromptOptions, onTiming,
       automaticCompactionAllowed: createAutomaticCompactionPermission(eventBus),
       isProjectTrusted: () => settings.isProjectTrusted() });
-    worker = new SDKWorker({ session, coordinator, runner, resources, sdk, models, projectContext, broker, publish: emit, lifecycle });
+    worker = new SDKWorker({ session, coordinator, runner, resources, sdk, models, projectContext, broker, publish: emit, lifecycle, entryIndexCachePath });
     await coordinator.start();
     if (options.name !== undefined) session.setSessionName(options.name);
     await runner.emit({ type: "session_start", reason: "startup" });
@@ -489,7 +522,7 @@ export async function runSDKWorkerRpc({ input = process.stdin, output = process.
   const decoder = new PiRpcLineDecoder();
   const pending = new Set();
   const activeIds = new Set();
-  let closing = false, shutdownRequested = false, drainingShutdown = false, fatalError, worker, finish, boot;
+  let closing = false, shutdownRequested = false, drainingShutdown = false, preparationRequests = 0, fatalError, worker, finish, boot;
   const done = new Promise((resolve) => { finish = resolve; });
   const publish = (frame) => {
     const line = `${JSON.stringify(frame)}\n`;
@@ -501,14 +534,19 @@ export async function runSDKWorkerRpc({ input = process.stdin, output = process.
     output.write(line);
   };
   const broker = new RpcDialogBroker(publish, { onChange: () => { void drainShutdown(); } });
-  const lifecycle = { requestShutdown: () => { shutdownRequested = true; queueMicrotask(() => { void drainShutdown(); }); } };
+  const lifecycle = { requestShutdown: () => {
+    shutdownRequested = true;
+    worker?.cancelEntryIndex?.();
+    queueMicrotask(() => { void drainShutdown(); });
+  } };
+  const hasBlockingRequests = () => pending.size > preparationRequests;
   async function drainShutdown() {
-    if (!shutdownRequested || closing || drainingShutdown || pending.size || broker.pendingCount) return;
+    if (!shutdownRequested || closing || drainingShutdown || hasBlockingRequests() || broker.pendingCount) return;
     drainingShutdown = true;
     try {
       const owner = await boot;
       await owner.coordinator.waitForIdle();
-      if (!pending.size && !broker.pendingCount) await close();
+      if (!hasBlockingRequests() && !broker.pendingCount) await close();
     } catch (error) { await close(error); }
     finally { drainingShutdown = false; }
   }
@@ -546,6 +584,9 @@ export async function runSDKWorkerRpc({ input = process.stdin, output = process.
         void close(new Error("Invalid or duplicate active actor RPC request id")); return;
       }
       if (command?.id != null) activeIds.add(command.id);
+      // Optional work keeps admission/ID accounting but cannot hold shutdown.
+      const preparation = command?.type === "prepare_entry_index";
+      if (preparation) preparationRequests += 1;
       const task = (async () => {
         try {
           const owner = await boot;
@@ -556,7 +597,7 @@ export async function runSDKWorkerRpc({ input = process.stdin, output = process.
         } catch (error) { if (!closing) respondError(command, error); }
       })();
       pending.add(task);
-      task.finally(() => { pending.delete(task); activeIds.delete(command?.id); void drainShutdown(); }).catch(onError);
+      task.finally(() => { pending.delete(task); if (preparation) preparationRequests -= 1; activeIds.delete(command?.id); void drainShutdown(); }).catch(onError);
     }
   }
   input.on("data", receive); input.on("end", onEnd); input.on("error", onError); output.on("error", onError);

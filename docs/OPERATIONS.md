@@ -63,6 +63,7 @@ effort; other Python threads can mutate history independently.
 - `harness/harness.sqlite`: durable supervision, inputs, schedules, and telemetry.
 - `harness/supervisor.pid`: supervised process ownership metadata.
 - `harness/kernel-runtime/`: managed interpreter and dependency environments.
+- `harness/entry-index-cache/`: optional private derived entry indexes for supported SDKs and explicit sessions; canonical transcripts remain authoritative.
 - Pi's cwd-scoped `sessions/` tree: canonical JSONL transcripts.
 
 Session sidecars derive from the exact canonical filename: `.skill-manifest.json`, `.skill-grant.json`, `.capabilities.json`, and `.kernel-state/`. Do not move a transcript independently of its associated state. Derived indexes do not replace the canonical transcript.

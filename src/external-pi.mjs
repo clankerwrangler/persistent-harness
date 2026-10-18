@@ -74,7 +74,7 @@ async function dependency(owner, name, graphRoot) {
   if (!owner.manifest.dependencies?.[name]) throw new Error(`Pi package does not declare ${name}`);
   let directory = owner.directory;
   while (inside(graphRoot, directory)) {
-    const candidate = path.join(directory, "node_modules", name);
+    const candidate = path.join(directory === graphRoot ? directory : path.join(directory, "node_modules"), name);
     try {
       const resolved = await realpath(candidate);
       if (!inside(graphRoot, resolved)) throw new Error("Pi dependency escapes the selected package graph");

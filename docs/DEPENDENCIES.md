@@ -17,6 +17,11 @@ Pi requires Node 22.19 or later; this harness requires Node 24 or later.
 
 Use one matching installed graph, not an SDK from another Pi installation. Use absolute file paths for both variables. The harness's session helper expects an SDK file, not a package directory or file URL.
 
+Dependency lookup includes packages directly under the selected outer
+`node_modules` directory as well as nested dependencies inside that graph.
+Resolved real paths cannot escape it. Declared dependencies, exact versions,
+public exports, and one shared `pi-ai` instance remain required.
+
 The optional explicit bundled SDK is an upstream-shipped alternate root artifact, not an npm export-map subpath. It exposes the same public named SDK APIs in this version. The resolver pins its entry SHA-256 to `df1f4c36758e3d339d42c6caebb2fca1d9f415de658d56b7b1fa6a9a808f0aa5`. This entry check is not a whole-install integrity guarantee. `dist/index.js` is also supported; set both command and SDK to their adjacent `dist/cli.js` and `dist/index.js` paths for that graph. A command-only or package-directory resolver chooses the normal public main entry, not the bundle implicitly.
 
 Unmodified Pi remains supported through the stateless projection path. The worker
