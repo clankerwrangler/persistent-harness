@@ -199,6 +199,16 @@ The `RecursiveSessionDeletion-*.cfg` configurations cover root and direct-child 
 
 `KernelCompletion` checks that failed execution cannot become terminal until the controlled process exits, while successful execution can complete before namespace saving. It abstracts signal delivery and transport errors. `kernel-completion.test.mjs` checks decoder corruption, control-channel failure, queued-call no-replay, and forced close against real Python process exit.
 
+`KernelStreamAccounting` compares normalized per-stream capture with maintained
+slice-byte counts, independent limits, discarded-byte totals, progress and callback
+errors, text/MIME order, and fresh collectors. Its bounded configuration checks two
+operations with integer, fractional, negative, NaN and infinite limits. Accounting
+matches encoded retained text while a stream remains open; closed streams no
+longer consult that count. `Shared`, `AssumedEnd`, `SkipNormalization` and `Rescan`
+controls must fail their intended invariants. The model abstracts rich budgets
+and concrete runtime encoding; `kernel-rich-output.test.mjs` checks the public
+PythonKernel boundary, including fitting surrogate halves and invalid native bytes.
+
 `SnapshotSaveScope` separates non-certifying prior blob candidates from current-byte reuse verification. It covers unused old state, post-lookup source substitution, rewrite fallback, and unchanged full restore validation. The snapshot regression checks actual bounded reads, malformed old metadata, symlink/corrupt candidates, and recovery. The model does not claim protection against mutation of a hardlinked inode after verification.
 
 `LivenessScope` separates protocol responsiveness from explicit status audits. It covers current and legacy protocol evidence, rechecking under the startup lock, no launch on timeout or invalid protocol, and unchanged heartbeat registration. It also separates helper-local dependency evaluation from the legitimate start child's service graph and memory's client graph. Its `EagerSupervisor`, `EagerClient`, and `MissingStartImport` controls must fail. CLI tests exercise these boundaries against isolated supervisors and bounded private protocol peers. Module fixtures observe genuine ESM evaluation per process, including import-only and argument-error paths; their source-byte counts are not RSS or latency measurements.
