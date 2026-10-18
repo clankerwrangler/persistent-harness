@@ -61,6 +61,22 @@ The one-shot catalog request waits for refresh with a 15-second abort deadline. 
 
 ## Configuration notes
 
+`PI_HARNESS_ACTOR_STARTUP_TIMEOUT_MS` defaults to `120000` (accepted range
+`100`–`300000`). Each spawned worker has one finite startup deadline shared by
+initial `get_state` (including SDK open and extension startup) and the
+`set_steering_mode` acknowledgement. It is not renewed between those requests.
+Ordinary actor RPCs retain their `30000` ms deadline; prompt preflight retains
+`330000` ms, and ordinary `HarnessClient` requests retain `3000` ms.
+
+The supervisor's existing readiness observer uses the same configured duration
+starting when it requests a queued start, so its wait includes start-capacity
+queueing. That observer clock is separate from the worker's post-spawn handshake
+clock; expiration does not cancel a durably accepted input or reset either clock.
+A failed handshake still closes/drains its owned worker before releasing the
+start slot. Readiness does not certify input consumption or recovery completion.
+Direct `PiSessionActor` callers that omit `startupTimeoutMs` inherit their
+`requestTimeoutMs` as the **total handshake budget**, not a fresh budget per step.
+
 Prompts use the generic roles `user` and `assistant`. Keep deployment identities and personal instructions in external Pi configuration.
 
 Presentation directives default to `harness.presentation.v1`. `PI_HARNESS_PRESENTATION_NAMESPACE` selects a deployment-specific namespace (lowercase letter followed by up to 31 lowercase letters, digits, or hyphens). Set it to the existing marker's prefix before upgrading an installation with a different marker. Use the same value in the supervisor and any client importing its presentation helpers, and keep the model's directive instructions consistent. This preserves existing transcript markers and client schemas without embedding an identity in the repository.
