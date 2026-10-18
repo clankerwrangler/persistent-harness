@@ -5,7 +5,7 @@ import path from "node:path";
 import test from "node:test";
 import { pathToFileURL } from "node:url";
 import { ORDINARY_NON_ADMISSION_CUSTOM_TYPE, createOrdinaryNonAdmissionWitness, projectCanonicalContext, projectCanonicalSource, refreshCanonicalSessionContext, planUnknownRecovery, registerCanonicalSessionManager, sessionContextInput,
-  sessionEntryHeaders, sessionBranchHeaders, sessionCallIssuer, sessionNamespaceHistory } from "../src/canonical-context.mjs";
+  sessionEntryHeaders, sessionEntriesMatching, sessionBranchHeaders, sessionCallIssuer, sessionNamespaceHistory } from "../src/canonical-context.mjs";
 import { extensionInternals } from "../src/extension.mjs";
 import { SDKWorker } from "../src/sdk-worker.mjs";
 
@@ -19,7 +19,7 @@ const assistant = (parts = [call("native")]) => ({ role: "assistant", id: "assis
   api: "fixture", provider: "fixture", model: "fixture", stopReason: "toolUse", timestamp: 1,
   usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } } });
 function entry(id, parentId, message) { return { type: "message", id, parentId, timestamp: "2026-01-01T00:00:00Z", message }; }
-function fixture(rows) {
+function fixture(rows, { entrySource = false } = {}) {
   let entries = structuredClone(rows), leaf = entries.at(-1)?.id ?? null, revision = 0, generation = 0;
   const reads = { ranges: [], ids: [] };
   const manager = { getRevision: () => ({ revision, generation }), getEntryCount: () => entries.length, getLeafId: () => leaf,
@@ -35,9 +35,159 @@ function fixture(rows) {
     branch(id) { leaf = id; revision++; },
     reload(rows) { entries = structuredClone(rows); leaf = rows.at(-1)?.id ?? null; generation++; revision++; },
     resetReads() { reads.ranges.length = 0; reads.ids.length = 0; }, reads };
+  if (entrySource) {
+    reads.sources = [];
+    manager.buildSessionEntrySource = () => {
+      const captured = entries.slice(), sourceGeneration = generation;
+      const validate = () => { if (sourceGeneration !== generation) throw new Error("source expired"); };
+      return { revision: { revision, generation }, leafId: leaf, validate,
+        entries: captured.map((row, i) => ({ id: row.id, type: row.type, parentId: row.parentId,
+          role: row.message?.role, customType: row.customType, key: `${generation}:${i}:${row.id}` })),
+        read: i => { validate(); reads.sources.push(captured[i].id); return structuredClone(captured[i]); } };
+    };
+  }
   registerCanonicalSessionManager(manager); return manager;
 }
 const project = manager => projectCanonicalContext({ sessionManager: manager, mode: "native" });
+
+test("entry-source metadata keeps unrelated opaque values unread through headers, birth and recovery", () => {
+  let deep = { marker: "unconsumed opaque value" };
+  for (let i = 0; i < 100; i++) deep = { nested: deep };
+  const rows = [entry("call", null, assistant()),
+    { id: "clm", parentId: "call", type: "custom", customType: "live-context-state", data: deep },
+    { id: "other", parentId: "clm", type: "custom", customType: "other-extension", data: { value: "complete" } },
+    { id: "progress", parentId: "other", type: "custom", customType: "persistent-harness.progress-v1",
+      data: { harnessBirth: { version: 1, sequence: 7, createdAt: "2026-01-01T00:00:00.000Z" } } },
+    entry("active", "progress", user("active"))];
+  const manager = fixture(rows, { entrySource: true });
+  assert.equal(sessionEntryHeaders(manager).length, rows.length);
+  assert.deepEqual(manager.reads.ranges, []);
+  assert.deepEqual(manager.reads.sources, ["call", "progress", "active"]);
+  assert.equal(Math.max(...sessionBranchHeaders(manager).map(header => header.birthSequence)), 7);
+  assert.equal(planUnknownRecovery({ sessionManager: manager, mode: "native", timestamp: 1 })[0].toolCallId, "native");
+  assert(!manager.reads.sources.some(id => ["clm", "other"].includes(id)));
+  const owned = sessionEntriesMatching(manager, header => header.id === "other");
+  assert.deepEqual(owned, [rows[2]]);
+  owned[0].data.value = "independent mutable capture";
+  assert.equal(sessionEntriesMatching(manager, header => header.id === "other")[0].data.value, "complete");
+  assert.throws(() => sessionEntriesMatching(manager, header => header.id === "clm"), { code: "ERR_CONTEXT_DATA_LIMIT" });
+  assert.equal(sessionBranchHeaders(manager).at(-1).id, "active", "failed explicit validation does not erase selected facts");
+});
+
+test("opaque metadata still enforces duplicate IDs, parent shape, branch integrity and source publication fences", () => {
+  const opaque = { id: "opaque", parentId: null, type: "custom", customType: "live-context-state", data: { opaque: true } };
+  const duplicate = fixture([opaque, { ...opaque }], { entrySource: true });
+  assert.throws(() => sessionEntryHeaders(duplicate), { code: "ERR_CONTEXT_DUPLICATE_ENTRY_ID" });
+  assert.deepEqual(duplicate.reads.sources, []);
+  for (const [row, code] of [[{ ...opaque, parentId: {} }, "ERR_CONTEXT_ENTRY"],
+    [{ ...opaque, parentId: "absent" }, "ERR_CONTEXT_BRANCH_MISSING"],
+    [{ ...opaque, parentId: "opaque" }, "ERR_CONTEXT_BRANCH_CYCLE"]]) {
+    assert.throws(() => sessionBranchHeaders(fixture([row], { entrySource: true })), { code });
+  }
+  const manager = fixture([opaque, entry("active", "opaque", user("active"))], { entrySource: true });
+  const original = manager.buildSessionEntrySource;
+  manager.buildSessionEntrySource = () => {
+    const source = original();
+    return { ...source, read(i) { const value = source.read(i); manager.reload([entry("replacement", null, user("new"))]); return value; } };
+  };
+  assert.throws(() => sessionBranchHeaders(manager), /source expired/);
+  manager.buildSessionEntrySource = original;
+  assert.equal(sessionBranchHeaders(manager).at(-1).id, "replacement", "failed ingestion cannot publish a partial prior generation");
+  manager.append({ ...opaque, id: "suffix", parentId: "replacement" });
+  assert.equal(sessionBranchHeaders(manager).at(-1).id, "suffix");
+  assert(!manager.reads.sources.includes("suffix"), "opaque suffix stays metadata-only");
+  manager.branch("replacement"); assert.equal(sessionBranchHeaders(manager).at(-1).id, "replacement");
+});
+
+
+
+
+
+
+test("entry-source header consumers retain input, usage, family and child receipt selectors", () => {
+  const custom = (id, customType, data) => ({ id, parentId: null, type: "custom", customType, data });
+  const rows = [custom("usage", "persistent-harness-usage", { entryId: "assistant-entry" }),
+    custom("family", "persistent-harness.agent-message-v1", { messageId: "family-message", direction: "to" }),
+    custom("child", "persistent-harness.child-creation-v1", { childId: "child-session" }),
+    { id: "input", parentId: null, type: "custom_message", customType: "persistent-harness-input", content: "input",
+      details: { inputId: "input-receipt" } },
+    { id: "incoming", parentId: null, type: "custom_message", customType: "persistent-harness-incoming-message", content: "message",
+      details: { messageId: "incoming-message" } }];
+  const manager = fixture(rows, { entrySource: true });
+  const headers = new Map(sessionEntryHeaders(manager).map(header => [header.id, header]));
+  assert.equal(headers.get("usage").entryId, "assistant-entry");
+  assert.equal(headers.get("family").messageId, "family-message"); assert.equal(headers.get("family").direction, "to");
+  assert.equal(headers.get("child").childId, "child-session");
+  assert.equal(headers.get("input").inputId, "input-receipt");
+  assert.equal(headers.get("incoming").messageId, "incoming-message");
+  assert.deepEqual(manager.reads.sources, rows.map(row => row.id));
+});
+
+test("inactive selected-only custom proofs stay unread until their branch is validated", () => {
+  const rows = [entry("active", null, user("valid")),
+    { id: "bad-signature", parentId: "active", type: "custom", customType: "persistent-harness:assistant-thinking-signature:v1",
+      data: { version: 2, opaque: "inactive amendment" } }];
+  const manager = fixture(rows, { entrySource: true }); manager.branch("active");
+  assert.equal(sessionBranchHeaders(manager).at(-1).id, "active");
+  assert(!manager.reads.sources.includes("bad-signature"));
+  manager.branch("bad-signature");
+  assert.throws(() => sessionBranchHeaders(manager), { code: "ERR_SIGNATURE_VERSION" });
+  assert(manager.reads.sources.includes("bad-signature"));
+  manager.branch("active"); assert.equal(sessionBranchHeaders(manager).at(-1).id, "active");
+});
+
+
+
+test("raw cursor history remains readable when SDK entry-source branch validation rejects a cycle", async t => {
+  if (typeof candidate.SessionManager.prototype.buildSessionEntrySource !== "function") return t.skip("requires public entry-source SDK");
+  const directory = mkdtempSync(path.join(os.tmpdir(), "canonical-cycle-cursor-"));
+  try {
+    const file = path.join(directory, "synthetic.jsonl");
+    const rows = [{ id: "a", parentId: "b", type: "custom", customType: "unrelated", data: { value: "a" } },
+      { id: "b", parentId: "a", type: "custom", customType: "unrelated", data: { value: "b" } }];
+    writeFileSync(file, [{ type: "session", version: 3, id: "synthetic", cwd: directory }, ...rows].map(row => JSON.stringify(row)).join("\n") + "\n");
+    const manager = candidate.SessionManager.open(file, directory, directory, { entryRetention: { maxCachedBytes: 1024 } });
+    registerCanonicalSessionManager(manager);
+    assert.throws(() => sessionBranchHeaders(manager), { code: "ERR_CONTEXT_HELPER_FAILED" });
+    const worker = new SDKWorker({ session: { sessionManager: manager, subscribe: () => () => {} } });
+    assert.deepEqual(await worker.handle({ type: "get_entries", since: "a" }), { entries: rows.slice(1), leafId: "b" });
+  } finally { rmSync(directory, { recursive: true, force: true }); }
+});
+
+test("real SDK opaque bodies remain complete on explicit reads and retain committed digest fences", t => {
+  if (typeof candidate.SessionManager.prototype.buildSessionEntrySource !== "function") return t.skip("requires public entry-source SDK");
+  const directory = mkdtempSync(path.join(os.tmpdir(), "canonical-opaque-source-"));
+  try {
+    const manager = candidate.SessionManager.create(directory, directory, { entryRetention: { maxCachedBytes: 1024 } });
+    manager.appendMessage(assistant([]));
+    const opaque = manager.appendCustomEntry("other-extension", { marker: "OPAQUE_ONE", payload: "old body".repeat(32768) });
+    const active = manager.appendMessage(user("active"));
+    const file = manager.getSessionFile(); manager.setSessionFile(file);
+    registerCanonicalSessionManager(manager);
+    const readIds = [], build = manager.buildSessionEntrySource.bind(manager);
+    manager.buildSessionEntrySource = () => {
+      const source = build(); return { ...source, read(i) { readIds.push(source.entries[i].id); return source.read(i); } };
+    };
+    sessionBranchHeaders(manager); assert(!readIds.includes(opaque));
+    const borrowed = manager.buildSessionEntrySource(), position = borrowed.entries.findIndex(row => row.id === opaque);
+    const tail = manager.appendMessage(user("appended after source capture"));
+    manager.branch(active);
+    assert.equal(borrowed.read(position).data.marker, "OPAQUE_ONE", "borrowed original-value source survives append and leaf movement");
+    manager.branch(tail);
+    const captured = sessionEntriesMatching(manager, header => header.id === opaque)[0];
+    assert.equal(captured.data.marker, "OPAQUE_ONE"); assert(readIds.includes(opaque));
+    captured.data.marker = "private captured mutation";
+    assert.equal(manager.getEntry(opaque).data.marker, "OPAQUE_ONE");
+    const raw = readFileSync(file, "utf8");
+    writeFileSync(file, raw.replace("OPAQUE_ONE", "OPAQUE_TWO"));
+    assert.throws(() => sessionEntriesMatching(manager, header => header.id === opaque), /changed outside the append-only session manager/);
+    manager.setSessionFile(file);
+    assert.equal(sessionBranchHeaders(manager).at(-1).id, tail);
+    assert.throws(() => borrowed.read(position), /source expired/);
+    assert.equal(sessionEntriesMatching(manager, header => header.id === opaque)[0].data.marker, "OPAQUE_TWO");
+    assert.equal(captured.data.marker, "private captured mutation", "generation changes do not revoke full-value captures");
+  } finally { rmSync(directory, { recursive: true, force: true }); }
+});
 
 test("registered snapshot owner reuses facts, hydrates only active payloads, and preserves full cold safety facts", () => {
   const rows = [entry("call", null, assistant()), entry("cold", "call", user("cold payload marker ".repeat(2048))),

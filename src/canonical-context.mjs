@@ -650,7 +650,7 @@ export function sessionContextInput(manager, buildSessionProjection, mode) {
 }
 
 function newArchiveState() {
-  return { headers: [], byId: new Map(), profiles: new Map(), nodes: 1, stamp: null, generation: null, factCount: 0, leaf: null, selected: [], facts: null };
+  return { headers: [], byId: new Map(), profiles: new Map(), nodes: 1, stamp: null, generation: null, factCount: 0, leaf: null, selected: [], facts: null, entrySource: null };
 }
 
 // Exact plain-data value identity: object key order is irrelevant, presence and array holes are not.
@@ -789,12 +789,55 @@ function addAliasFacts(facts, selected) {
   }
 }
 
+// Header consumers: extension input/usage/message/child receipts, coordinator
+// birth/call identities, and namespace recovery. Other custom values do not
+// participate in those selectors. Selected signature/non-admission records are
+// read by addSelectedFacts before affected execution.
+const HEADER_CUSTOM_TYPES = new Set(["persistent-harness.progress-v1", "persistent-harness-usage",
+  "persistent-harness.agent-message-v1", "persistent-harness.child-creation-v1"]);
+const BODY_HEADER_TYPES = new Set(["message", "custom_message", "compaction", "context_edit", "branch_summary"]);
+
+function sourceHeader(descriptor, position, state) {
+  const metadataStart = state.nodes;
+  const budget = { nodes: metadataStart, depth: 1, codeUnits: String(position).length };
+  const entry = copyData(descriptor, { budget });
+  requireThat(isRecord(entry) && identifier(entry.id) && identifier(entry.type)
+    && (entry.parentId === null || identifier(entry.parentId)), "ERR_CONTEXT_ENTRY");
+  requireThat(typeof entry.key === "string" && entry.key.length > 0, "ERR_CONTEXT_SOURCE_PROJECTION");
+  state.nodes = budget.nodes;
+  return { id: entry.id, type: entry.type, parentId: entry.parentId, position,
+    sourceKey: entry.key, customType: typeof entry.customType === "string" ? entry.customType : undefined,
+    role: typeof entry.role === "string" ? entry.role : undefined, metadataNodes: budget.nodes - metadataStart,
+    units: 0, contributionRoles: [], birthSequence: 0 };
+}
+
 function readManagedEntry(manager, state, id) {
   const header = state.byId.get(id);
   requireThat(header !== undefined, "ERR_CONTEXT_BRANCH_MISSING");
-  const entry = manager.getEntry(id);
+  if (header.sourceKey === undefined) {
+    const entry = manager.getEntry(id);
+    requireThat(entry?.id === id && entry.type === header.type && entry.parentId === header.parentId
+      && valueDigest(entry) === header.sourceDigest, "ERR_CONTEXT_SOURCE_PROJECTION");
+    return entry;
+  }
+  const source = state.entrySource;
+  source.validate();
+  requireThat(source.entries[header.position]?.key === header.sourceKey, "ERR_CONTEXT_SOURCE_PROJECTION");
+  const firstRead = header.sourceDigest === undefined;
+  // Replace descriptor accounting with consumed-record accounting, rather than
+  // charging both inventories against the archive structure budget.
+  const budget = { nodes: firstRead ? state.nodes - header.metadataNodes : 0, depth: 1, codeUnits: String(header.position).length };
+  const entry = copyData(source.read(header.position), { budget });
   requireThat(entry?.id === id && entry.type === header.type && entry.parentId === header.parentId
-    && valueDigest(entry) === header.sourceDigest, "ERR_CONTEXT_SOURCE_PROJECTION");
+    && (typeof entry.customType === "string" ? entry.customType : undefined) === header.customType
+    && (typeof entry.message?.role === "string" ? entry.message.role : undefined) === header.role,
+    "ERR_CONTEXT_SOURCE_PROJECTION");
+  if (firstRead) {
+    Object.assign(header, archiveHeader(entry, header.position, budget.codeUnits));
+    delete header.metadataNodes;
+    state.nodes = budget.nodes;
+  } else requireThat(valueDigest(entry) === header.sourceDigest, "ERR_CONTEXT_SOURCE_PROJECTION");
+  source.validate();
   return entry;
 }
 
@@ -881,17 +924,44 @@ function managedState(manager, factsRequired = true) {
   // Never publish partially validated facts after an append/reload failure.
   owner.state = null;
   const start = state.headers.length;
-  for (let i = start; i < count; i++) {
-    const range = manager.getEntriesRange(i, 1);
-    requireThat(range.length === 1, "ERR_CONTEXT_MANAGER");
-    const budget = { nodes: state.nodes, depth: 1, codeUnits: String(i).length };
-    const entry = copyData(range[0], { budget });
-    const header = archiveHeader(entry, i, budget.codeUnits);
-    if (entry.type === "message") ingestMessageFacts(entry, header, owner.estimateContextTokens);
-    requireThat(!state.byId.has(header.id), "ERR_CONTEXT_DUPLICATE_ENTRY_ID");
-    state.headers.push(header); state.byId.set(header.id, header); state.nodes = budget.nodes;
+  if (typeof manager.buildSessionEntrySource === "function" && (!state.entrySource || start < count)) {
+    let source;
+    try { source = manager.buildSessionEntrySource(); }
+    catch { throw new CanonicalContextError("ERR_CONTEXT_HELPER_FAILED"); }
+    source.validate();
+    requireThat(source.revision?.revision === stamp.revision && source.revision.generation === stamp.generation
+      && source.leafId === leaf && Array.isArray(source.entries) && source.entries.length === count,
+    "ERR_CONTEXT_SOURCE_PROJECTION");
+    state.entrySource = source;
   }
-  if (!factsRequired) { owner.state = state; return state; }
+  for (let i = start; i < count; i++) {
+    if (state.entrySource) {
+      const header = sourceHeader(state.entrySource.entries[i], i, state);
+      requireThat(!state.byId.has(header.id), "ERR_CONTEXT_DUPLICATE_ENTRY_ID");
+      state.headers.push(header); state.byId.set(header.id, header);
+      if (BODY_HEADER_TYPES.has(header.type) || header.type === "custom" && HEADER_CUSTOM_TYPES.has(header.customType)) {
+        const entry = readManagedEntry(manager, state, header.id);
+        if (entry.type === "message") ingestMessageFacts(entry, header, owner.estimateContextTokens);
+      }
+    } else {
+      // Legacy registered owners without an entry source retain their captured-value path.
+      const range = manager.getEntriesRange(i, 1);
+      requireThat(range.length === 1, "ERR_CONTEXT_MANAGER");
+      const budget = { nodes: state.nodes, depth: 1, codeUnits: String(i).length };
+      const entry = copyData(range[0], { budget });
+      const header = archiveHeader(entry, i, budget.codeUnits);
+      if (entry.type === "message") ingestMessageFacts(entry, header, owner.estimateContextTokens);
+      requireThat(!state.byId.has(header.id), "ERR_CONTEXT_DUPLICATE_ENTRY_ID");
+      state.headers.push(header); state.byId.set(header.id, header); state.nodes = budget.nodes;
+    }
+  }
+  const validate = () => {
+    state.entrySource?.validate();
+    const current = manager.getRevision();
+    requireThat(current.revision === stamp.revision && current.generation === stamp.generation
+      && manager.getEntryCount() === count && manager.getLeafId() === leaf, "ERR_CONTEXT_SOURCE_PROJECTION");
+  };
+  if (!factsRequired) { validate(); owner.state = state; return state; }
   const suffix = state.headers.slice(state.factCount);
   const extendsBranch = state === old && state.facts && old.stamp?.generation === stamp.generation
     && stamp.revision - old.stamp.revision === count - state.factCount
@@ -908,6 +978,7 @@ function managedState(manager, factsRequired = true) {
   const facts = extendsBranch ? state.facts : { calls: new Map(), results: new Map(), aliases: new Map(),
     observedAliases: new Map(), nonAdmissions: new Set(), signatures: new Map(), signatureBlocks: new Map(), signatureDiagnostics: [], positions: new Map() };
   for (let i = selectedStart; i < selected.length; i++) addSelectedFacts(manager, state, facts, selected[i], i, owner.estimateContextTokens);
+  validate();
   state.selected = selected; state.facts = facts; state.stamp = { ...stamp }; state.factCount = count; state.leaf = leaf;
   owner.state = state;
   return state;
@@ -1193,7 +1264,8 @@ export function sessionEntryHeaders(manager) {
 }
 export function sessionEntriesMatching(manager, predicate) {
   if (!snapshotManagers.has(manager)) return manager.getEntries().filter((entry, i) => predicate(archiveHeader(entry, i, 0, false)));
-  return sessionEntryHeaders(manager).filter(predicate).map(header => manager.getEntry(header.id));
+  const state = managedState(manager, false);
+  return state.headers.filter(predicate).map(header => readManagedEntry(manager, state, header.id));
 }
 export function sessionBranchHeaders(manager) {
   if (snapshotManagers.has(manager)) return managedState(manager).selected;

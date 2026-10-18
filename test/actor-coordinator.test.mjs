@@ -13,7 +13,7 @@ const { sdk, api, core } = await loadExternalPi();
 const deferred = () => Promise.withResolvers();
 const wait = async (promise, message) => Promise.race([promise, new Promise((_, reject) => { const timer = setTimeout(() => reject(new Error(message)), 5000); timer.unref(); })]);
 const usage = () => ({ input: 1, output: 1, cacheRead: 0, cacheWrite: 0, totalTokens: 2, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } });
-async function fixture(t, { persistent = false, prepareRequest, script, retry, compaction, compactionDriver, hooks, promptExtensions = [], captureFirst = false, basePromptOptions, automaticCompactionAllowed, model: suppliedModel } = {}) {
+async function fixture(t, { persistent = false, contextMode = "array", prepareManager, prepareRequest, script, retry, compaction, compactionDriver, hooks, promptExtensions = [], captureFirst = false, basePromptOptions, automaticCompactionAllowed, model: suppliedModel } = {}) {
   const root = await mkdtemp(path.join(os.tmpdir(), "sc-"));
   const model = suppliedModel ?? { id: "fixture", name: "Fixture", provider: "coordinator-test", api: "coordinator-test-api", reasoning: false,
     input: ["text"], cost: usage().cost, contextWindow: 32000, maxTokens: 1000 };
@@ -61,14 +61,68 @@ async function fixture(t, { persistent = false, prepareRequest, script, retry, c
   const manager = persistent
     ? sdk.SessionManager.create(root, path.join(root, "sessions"), { entryRetention: { maxCachedBytes: 1024 } })
     : sdk.SessionManager.inMemory(root);
-  const { session } = await sdk.createAgentSession({ cwd: root, agentDir: path.join(root, "agent"), model: models.getModel(model.provider, model.id), modelRuntime: models, settingsManager: settings, sessionManager: manager, resourceLoader: empty, tools: [] });
+  await prepareManager?.(manager);
+  const { session } = await sdk.createAgentSession({ cwd: root, agentDir: path.join(root, "agent"), model: models.getModel(model.provider, model.id), modelRuntime: models, settingsManager: settings, sessionManager: manager, contextMode, resourceLoader: empty, tools: [] });
   const loaded = active.getExtensions(); const runner = new sdk.ExtensionRunner(loaded.extensions, loaded.runtime, root, manager, new sdk.ModelRegistry(models));
-  coor = new ActorCoordinator({ session, runner, sdk, api, core, models, resources: active, promptCapture, lifecycle: { prepareRequest }, publish: event => events.push(event),
+  coor = new ActorCoordinator({ session, runner, sdk, api, core, models, contextMode, resources: active, promptCapture, lifecycle: { prepareRequest }, publish: event => events.push(event),
     basePromptOptions: basePromptOptions ?? { contextFiles: [], cwd: root }, isProjectTrusted: () => false, compactionDriver, automaticCompactionAllowed });
   await coor.start(); await runner.emit({ type: "session_start", reason: "startup" });
   t.after(async () => { held.resolve(); await coor.close(); await rm(root, { recursive: true, force: true }); });
   return { coor, requests, requestModels, events, manager, held, toolStarted, capture, runs: () => runs };
 }
+
+test("ordinary cold resume, first inference and bookkeeping leave old opaque custom bodies unread", async t => {
+  if (typeof sdk.SessionManager.prototype.buildSessionEntrySource !== "function") return t.skip("requires public entry-source SDK");
+  const opaqueIds = new Set(), reads = [];
+  const f = await fixture(t, { persistent: true, contextMode: "source", retry: { enabled: false },
+    script: () => [{ type: "text", text: "GENUINE_FIRST_RESUMED_RESPONSE" }],
+    prepareManager(manager) {
+      manager.appendMessage({ role: "assistant", content: [{ type: "text", text: "historical response" }],
+        api: "coordinator-test-api", provider: "coordinator-test", model: "fixture", stopReason: "stop", usage: usage(), timestamp: 1 });
+      let deep = { value: "old CLM payload".repeat(32768) };
+      for (let i = 0; i < 100; i++) deep = { nested: deep };
+      opaqueIds.add(manager.appendCustomEntry("live-context-state", deep));
+      opaqueIds.add(manager.appendCustomEntry("unrelated-extension", { opaque: "other historical body".repeat(32768) }));
+      manager.appendCustomEntry("persistent-harness.progress-v1", {
+        harnessBirth: { version: 1, sequence: 9, createdAt: "2026-01-01T00:00:00.000Z" } });
+      const kept = manager.appendMessage({ role: "user", content: "kept synthetic context", timestamp: 2 });
+      manager.appendCompaction("synthetic summary", kept, 1);
+      manager.setSessionFile(manager.getSessionFile());
+      const build = manager.buildSessionEntrySource.bind(manager);
+      manager.buildSessionEntrySource = () => {
+        const source = build();
+        return { ...source, read(i) { reads.push(source.entries[i].id); return source.read(i); } };
+      };
+      for (const method of ["getEntry", "getEntriesRange", "getEntries", "getBranch"]) {
+        const read = manager[method].bind(manager);
+        manager[method] = (...args) => {
+          const result = read(...args);
+          for (const row of Array.isArray(result) ? result : [result]) if (row) reads.push(row.id);
+          return result;
+        };
+      }
+      registerCanonicalSessionManager(manager, { estimateContextTokens: core.estimateContextTokens });
+    } });
+  f.coor.projectContext = projectCanonicalContext;
+  assert.equal(f.coor.birthClock.sequence, 9);
+  const startupOpaqueReads = reads.filter(id => opaqueIds.has(id)).length;
+  assert.equal(startupOpaqueReads, 0, "startup cannot hydrate opaque history");
+  await f.coor.submit("new explicit synthetic request", "auto", [], "first-resumed-request");
+  await wait(f.coor.waitForIdle(), "first resumed inference did not settle");
+  await f.coor.lifecycle.appendHistoryEntry("persistent-harness-usage", { entryId: "usage-bookkeeping" });
+  await f.coor.lifecycle.appendHistoryEntry("unrelated-bookkeeping", { body: "not model context" });
+  assert.equal(f.requests.length, 1); assert.equal(f.runs(), 0); assert.equal(f.coor.failure, null);
+  assert.equal(f.requests[0].messages.at(-1).id, "first-resumed-request");
+  const implicitOpaqueReads = reads.filter(id => opaqueIds.has(id)).length;
+  assert.equal(implicitOpaqueReads, 0, "first inference/recovery/usage/bookkeeping cannot defer an opaque full pass");
+  const id = [...opaqueIds][1], captured = f.manager.getEntry(id);
+  assert(reads.includes(id), "explicit full-value lookup reads its requested body");
+  captured.data.opaque = "independent captured value";
+  assert.notEqual(f.manager.getEntry(id).data.opaque, captured.data.opaque);
+  f.manager.setSessionFile(f.manager.getSessionFile());
+  assert.equal(captured.data.opaque, "independent captured value", "reload cannot revoke an already captured value");
+  t.diagnostic(JSON.stringify({ startupOpaqueReads, implicitOpaqueReads, explicitOpaqueReads: reads.filter(id => opaqueIds.has(id)).length }));
+});
 
 test("ordinary input keeps real result barrier and compatible canonical events", async t => {
   const f = await fixture(t); assert.equal((await f.coor.submit("start", "auto", [], "durable-input")).outcome, "accepted");
