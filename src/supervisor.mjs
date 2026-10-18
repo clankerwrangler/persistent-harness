@@ -1392,6 +1392,7 @@ export class HarnessSupervisor {
         : intent === "result" ? `This run promises a meaningful result or reminder. Its exact-run final response is delivered; you may instead bind concise notification text with cron(action="report", run_id="${run.runId}", disposition="deliver", body="the result").`
         : intent === "silent" ? "This run is silent: no routine completion notification is intended." : null;
       const message = deliveryContext ? `${original}\n\n[Scheduled delivery context: run ${run.runId}; intent ${intent}]\n${deliveryContext}\nThis delivery context does not grant any additional authority.` : original;
+      this.#cancelEntryIndexPreparation(target.sessionId);
       this.#cronStore.markRunRunning(run.runId, { executionModeUsed, sessionId: target.sessionId, fallbackReason, inputId });
       this.store.createActorInput(target.sessionId, { inputId, message, behavior: "auto", source: "cron",
         origin: { jobId: job.jobId, runId: run.runId }, pendingLimit: this.pendingMessageLimit });
@@ -1417,6 +1418,7 @@ export class HarnessSupervisor {
     const input = await this.#withSessionMutation(job.sessionId, async () => {
       const session = this.store.getSession(job.sessionId);
       if (!session || session.lifecycle === "deleted") return null;
+      this.#cancelEntryIndexPreparation(job.sessionId);
       const inputId = `background-completion-${job.id}`;
       const previous = this.store.getActorInput(inputId, job.sessionId, { includeDigest: true });
       const input = this.store.createActorInput(job.sessionId, {
@@ -1899,6 +1901,7 @@ export class HarnessSupervisor {
   }
 
   #queueActorInputWake(sessionId, automaticRecord = null) {
+    this.#cancelEntryIndexPreparation(sessionId);
     // Persist startup intent before acknowledging; startup and skill reconciliation
     // remain owned by the existing actor scheduler, not the HTTP/RPC connection.
     this.#requestActorStart(sessionId, true);
@@ -1945,7 +1948,10 @@ export class HarnessSupervisor {
       } finally {
         // Retire synchronously with the final dirty check: no coalesced send can
         // land between the loop ending and removal of its owner.
-        if (this.#actorInputWakes.get(sessionId) === wake) this.#actorInputWakes.delete(sessionId);
+        if (this.#actorInputWakes.get(sessionId) === wake) {
+          this.#actorInputWakes.delete(sessionId);
+          this.#scheduleEntryIndexPreparation(sessionId);
+        }
       }
     }).catch((error) => this.logger.error?.(`actor input wake cleanup failed for ${sessionId}: ${error.message}`));
   }
@@ -1961,6 +1967,7 @@ export class HarnessSupervisor {
     const operation = record.inputDeliveryTail.then(async () => {
       if (this.#actors.get(sessionId) !== record) return;
       if (!this.store.hasPendingActorInputs(sessionId)) return;
+      this.#cancelEntryIndexPreparation(sessionId, record);
       const session = this.store.getSession(sessionId);
       if (!session?.sessionFile) throw new Error("session does not have a canonical Pi transcript");
       let transcript = await this.transcriptReader.read({ sessionFile: session.sessionFile, sessionId });
@@ -2065,6 +2072,8 @@ export class HarnessSupervisor {
   #onActorEvent(sessionId, record, frame) {
     if (this.#actors.get(sessionId) !== record) return;
     if (frame?.type === "agent_start") {
+      this.#cancelEntryIndexPreparation(sessionId, record);
+      record.entryIndexIdleAttempted = false;
       record.eventRing = []; record.eventRingBytes = 0;
       record.progressSummary = undefined;
       resetAssistantTurn(record);
@@ -2141,6 +2150,7 @@ export class HarnessSupervisor {
     if (["agent_start", "agent_settled"].includes(frame?.type)) this.#broadcastNavigator(frame.type);
   }
   #onActorExit(sessionId, record, details) {
+    this.#cancelEntryIndexPreparation(sessionId, record);
     if (this.#actors.get(sessionId) !== record) return; this.#actors.delete(sessionId); this.#clearPassivation(sessionId);
     this.#clearExtensionUiRequests(sessionId, record.generation);
     this.#rootOutput.failSession(sessionId, record.generation, record.expectedLifecycle ?? "actor_exit");
@@ -2157,6 +2167,7 @@ export class HarnessSupervisor {
     await wake?.done;
   }
   async #stopActor(sessionId, lifecycle = "passivated", error = null) {
+    this.#cancelEntryIndexPreparation(sessionId);
     this.#clearPassivation(sessionId); this.#startQueue = this.#startQueue.filter((id) => id !== sessionId); const record = this.#actors.get(sessionId);
     if (record) {
       record.expectedLifecycle = lifecycle;
@@ -2172,9 +2183,55 @@ export class HarnessSupervisor {
     }
     this.#broadcastNavigator(lifecycle === "error" ? "actor_error" : "actor_stopped");
   }
-  #syncPassivationTimers() { for (const sessionId of this.#actors.keys()) { const session = this.store.getSession(sessionId); if (session?.lifecycle === "resident" && session.activity === "idle") { if (!this.#passivationTimers.has(sessionId)) this.#schedulePassivation(sessionId); } else this.#clearPassivation(sessionId); } }
+  #cancelEntryIndexPreparation(sessionId, record = this.#actors.get(sessionId)) {
+    const current = record?.entryIndexPreparation;
+    if (!current) return;
+    record.entryIndexPreparation = undefined;
+    if (current.dispatched && record.worker.isRunning) {
+      try { void record.worker.request("cancel_entry_index", { token: current.token }).catch(() => {}); } catch {}
+    }
+  }
+  #scheduleEntryIndexPreparation(sessionId) {
+    const record = this.#actors.get(sessionId);
+    if (!record || this.#stoppingPromise || record.expectedLifecycle || record.entryIndexIdleAttempted || record.entryIndexPreparation) return;
+    const current = { token: randomUUID(), generation: record.generation, dispatched: false };
+    record.entryIndexPreparation = current;
+    setImmediate(() => {
+      if (this.#actors.get(sessionId) !== record || record.entryIndexPreparation !== current) return;
+      const session = this.#stoppingPromise ? null : this.store.getSession(sessionId);
+      if (!session || session.lifecycle !== "resident" || session.activity !== "idle" || session.actorGeneration !== current.generation
+        || record.expectedLifecycle || !record.worker.isRunning || this.store.isSessionDeleting(sessionId)
+        || this.#actorInputWakes.has(sessionId) || this.store.hasPendingSessionWork(sessionId)) {
+        record.entryIndexPreparation = undefined;
+        return;
+      }
+      current.dispatched = true;
+      record.entryIndexIdleAttempted = true;
+      let operation;
+      try { operation = record.worker.request("prepare_entry_index", { token: current.token }); }
+      catch { this.#cancelEntryIndexPreparation(sessionId, record); return; }
+      void Promise.resolve(operation).catch(() => {
+        if (record.entryIndexPreparation === current) this.#cancelEntryIndexPreparation(sessionId, record);
+      }).finally(() => {
+        // Publication is not freshness. A retired response cannot clear a successor.
+        if (record.entryIndexPreparation === current) record.entryIndexPreparation = undefined;
+      });
+    });
+  }
+  #syncPassivationTimers() {
+    for (const [sessionId, record] of this.#actors) {
+      const session = this.store.getSession(sessionId);
+      if (session?.lifecycle === "resident" && session.activity === "idle") {
+        if (!this.#passivationTimers.has(sessionId)) this.#schedulePassivation(sessionId);
+      } else {
+        this.#clearPassivation(sessionId);
+        this.#cancelEntryIndexPreparation(sessionId, record);
+        record.entryIndexIdleAttempted = false;
+      }
+    }
+  }
   #clearPassivation(sessionId) { const timer = this.#passivationTimers.get(sessionId); if (timer) clearTimeout(timer); this.#passivationTimers.delete(sessionId); }
-  #schedulePassivation(sessionId) { this.#clearPassivation(sessionId); if (this.actorInactivityMs === 0) return; const timer = setTimeout(() => { void this.#withSessionMutation(sessionId, async () => { const session = this.store.getSession(sessionId); if (session?.lifecycle === "resident" && session.activity === "idle") await this.#stopActor(sessionId, "passivated"); }).catch((error) => this.logger.error?.(error)); }, this.actorInactivityMs); timer.unref(); this.#passivationTimers.set(sessionId, timer); }
+  #schedulePassivation(sessionId) { this.#clearPassivation(sessionId); this.#scheduleEntryIndexPreparation(sessionId); if (this.actorInactivityMs === 0) return; const timer = setTimeout(() => { void this.#withSessionMutation(sessionId, async () => { const session = this.store.getSession(sessionId); if (session?.lifecycle === "resident" && session.activity === "idle") await this.#stopActor(sessionId, "passivated"); }).catch((error) => this.logger.error?.(error)); }, this.actorInactivityMs); timer.unref(); this.#passivationTimers.set(sessionId, timer); }
 
   #consumeMessageToken(senderId, now = Date.now()) { const previous = this.#messageBuckets.get(senderId) ?? { tokens: this.messageRateCapacity, updatedAt: now }; const tokens = Math.min(this.messageRateCapacity, previous.tokens + Math.max(0, now - previous.updatedAt) / 1000 * this.messageRateRefillPerSecond); if (tokens < 1) { this.#messageBuckets.set(senderId, { tokens, updatedAt: now }); throw new Error("agent message rate limit exceeded"); } this.#messageBuckets.set(senderId, { tokens: tokens - 1, updatedAt: now }); }
   #actorConnectionKey(sessionId, generation) { return `${sessionId}\0${generation}`; }
@@ -2217,6 +2274,7 @@ export class HarnessSupervisor {
           || !["resident", "starting", "passivated"].includes(target?.lifecycle)
           || this.#stoppingPromise || this.store.isSessionDeleting(message.targetId)) return;
       } else this.#notifications.noteContinuation(message.senderId, `message:${message.messageId}`, message.createdAt);
+      this.#cancelEntryIndexPreparation(message.targetId);
       const residentBefore = this.#actors.get(message.targetId);
       let record = await this.#ensureActorReady(message.targetId);
       let targetState = this.#matchingActorConnection(message.targetId, record.generation)
@@ -2295,6 +2353,7 @@ export class HarnessSupervisor {
     if (this.#actorConnections.get(state.sessionId) !== state || state.deliveryInFlight.has(message.messageId)
       || session?.lifecycle !== "resident" || session.actorGeneration !== state.generation
       || record?.generation !== state.generation || record.expectedLifecycle || !record.worker.isRunning) return;
+    this.#cancelEntryIndexPreparation(state.sessionId, record);
     let delivered; try { delivered = this.store.markMessageDelivered(message.messageId, state.sessionId, Date.now(), this.maxMessageDeliveryAttempts); } catch (error) { this.logger.error?.(error); return; }
     if (!delivered || delivered.permanentlyFailed) return;
     if (delivered.childExitGeneration == null) this.#notifications.noteContinuation(delivered.senderId, `message:${delivered.messageId}`, delivered.createdAt);

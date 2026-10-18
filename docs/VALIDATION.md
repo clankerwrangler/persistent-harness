@@ -84,6 +84,25 @@ The broader private integration checkpoint also exercised a browser client. Brow
 
 ## Models
 
+`IdleEntryIndexHost` checks deferred versus actual idle dispatch, readiness-wake
+cancellation, token/generation ownership, late sealed-prefix publication, and
+nonblocking admission/close. It separately retains normal RPC shutdown drain;
+its ten negative configurations must fail their intended invariants. SDK cache
+bytes and filesystem trust remain the SDK's model/test boundary. Worker and
+supervisor fixtures hold preparation through prompt, family/background input,
+retirement, transport close, and extension shutdown. The public bootstrap fixture
+uses the selected literal SDK manager and complete package graph, checking stable
+paths, no cold cache-directory creation, private idle publication, preserved
+canonical prefixes, and unconfigured in-memory/new/recent modes.
+
+`DependencyLookup` checks the final graph-root candidate without ancestor escape,
+retaining declaration, identity, version, shared-instance and public-export gates.
+Its `SkipRoot`, `AllowEscape`, and `AllowMismatch` controls must fail. Synthetic
+flat/nested installed layouts exercise the real resolver without executing their
+package bodies. Integrated qualification uses the actual public SDK and CLI from
+one bound package graph, not replacement SDK owners.
+
+
 TLA+ sources in `specification/` cover bounded scheduler, stream, provider, retry, history, service ownership, and export-dependency assumptions. Obtain Java and `tla2tools.jar` separately. For example:
 
 ```sh
