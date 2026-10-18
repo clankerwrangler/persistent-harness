@@ -258,6 +258,15 @@ regression checks cycle-member
 session projections without risking a hung test runner and preserves acyclic and
 deleted-intermediate counts.
 
+`PublicRosterProjection` checks the eleven-column live registry projection,
+current one-hop relationships, global lineage, fresh descendant counts, and
+missing/deleted-caller errors across changes. Its `KeepPayload`, `DropParent`, and
+`FilterFamily` controls must fail. The finite model abstracts locale ordering and
+SQLite materialization; `public-roster.test.mjs` checks actual selected columns,
+ordered fields, cross-family/cyclic ancestry, hidden descendants, deleted bridges,
+fresh mutations, and authenticated RPC through the real host consumer without
+worker startup or runtime provisioning.
+
 `FamilyFastMode` covers two independent roots sharing a family label, a child and
 grandchild, root-only preference writes regardless of root model support,
 missing/deleted ancestors, legacy absent-field default-off versus malformed

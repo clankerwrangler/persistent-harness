@@ -1537,7 +1537,9 @@ export class HarnessStore {
   }
 
   getRoster(callerId) {
-    const rows = this.#db.prepare("SELECT * FROM sessions WHERE lifecycle <> 'deleted'").all();
+    const rows = this.#db.prepare(`SELECT id, short_id, display_name, kind, depth,
+      parent_session_id, family_id, activity, lifecycle, cwd, repository_root
+      FROM sessions WHERE lifecycle <> 'deleted'`).all();
     const caller = rows.find((row) => row.id === callerId);
     if (!caller) throw new Error("caller session does not exist");
     const byId = new Map(rows.map((row) => [row.id, row]));
