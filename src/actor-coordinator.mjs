@@ -187,7 +187,9 @@ export class ActorCoordinator {
     return { model: this.session.model, thinkingLevel: this.session.thinkingLevel, isStreaming: this.isBusy,
       isCompacting: this.compacting, isRetrying: this.retrying, retryAttempt: this.retryAttemptNumber - 1, steeringMode: this.steeringMode, followUpMode: this.followUpMode,
       sessionFile: this.manager.getSessionFile(), sessionId: this.manager.getSessionId(), sessionName: this.manager.getSessionName(),
-      messageCount: typeof this.manager.buildSessionSource === "function" ? this.manager.buildSessionSource().length : this.manager.buildSessionProjection().messages.length, pendingMessageCount: this.queue.length,
+      messageCount: typeof this.manager.getSessionMessageCount === "function" ? this.manager.getSessionMessageCount()
+        : typeof this.manager.buildSessionSource === "function" ? this.manager.buildSessionSource().length : this.manager.buildSessionProjection().messages.length,
+      pendingMessageCount: this.queue.length,
       autoCompactionEnabled: this.session.autoCompactionEnabled, ...(this.failure ? { error: this.failure.message } : {}) };
   }
   async emit(event) {
