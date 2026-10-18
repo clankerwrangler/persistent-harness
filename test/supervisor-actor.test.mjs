@@ -1518,6 +1518,49 @@ async function activityEventFixture(t, actorInactivityMs) {
   return { supervisor, client, actor: actors.get(admission.sessionId), sessionId: admission.sessionId };
 }
 
+test("actor entries preserve capped quarter-trimmed suffixes and empty responses", async (t) => {
+  const { client, actor, sessionId } = await activityEventFixture(t, 0);
+  const request = actor.request.bind(actor); const cursors = []; let data;
+  actor.request = async (type, fields) => {
+    if (type !== "get_entries") return request(type, fields);
+    cursors.push(fields); return data;
+  };
+  const get = (fields = {}) => client.request("get_actor_entries", { sessionId, ...fields });
+  const empty = await get();
+  assert.deepEqual(empty, { entries: [], leafId: null, truncated: false });
+  assert.deepEqual(Object.keys(empty), ["entries", "leafId", "truncated"]);
+
+  const capped = Object.freeze(Array.from({ length: 257 }, (_, id) => Object.freeze({ id })));
+  data = Object.freeze({ entries: capped, leafId: 0 });
+  const fitting = await get({ since: "entry-cursor" });
+  assert.deepEqual(fitting, { entries: capped.slice(1), leafId: 0, truncated: true });
+  assert.deepEqual(cursors, [{}, { since: "entry-cursor" }]);
+
+  const rounded = Object.freeze(Array.from({ length: 5 }, (_, id) => Object.freeze({ id, text: "x".repeat(11_000) })));
+  data = Object.freeze({ entries: rounded, leafId: false });
+  assert(Buffer.byteLength(JSON.stringify(rounded)) > 48 * 1024);
+  assert(Buffer.byteLength(JSON.stringify(rounded.slice(1))) <= 48 * 1024);
+  assert.deepEqual(await get(), { entries: rounded.slice(2), leafId: false, truncated: true },
+    "ceil(5/4) discards two entries even when discarding one would fit");
+
+  const multiple = Object.freeze(Array.from({ length: 9 }, (_, id) => Object.freeze({ id,
+    text: `${id}:\"\\\n漢😀\ud800${"x".repeat(10_990)}` })));
+  const leafId = Object.freeze({ id: "leaf" }); data = Object.freeze({ entries: multiple, leafId });
+  const snapshot = JSON.stringify(data);
+  assert(Buffer.byteLength(JSON.stringify(multiple.slice(3))) > 48 * 1024);
+  assert(Buffer.byteLength(JSON.stringify(multiple.slice(5))) <= 48 * 1024);
+  const bounded = await get();
+  assert.deepEqual(bounded, { entries: multiple.slice(5), leafId, truncated: true });
+  assert.deepEqual(await get(), bounded, "repeated calls leave the actor response unchanged");
+  assert.equal(JSON.stringify(data), snapshot);
+  assert.deepEqual(Object.keys(bounded), ["entries", "leafId", "truncated"]);
+
+  data = { entries: [{ text: "x".repeat(48 * 1024) }], leafId: "" };
+  assert.deepEqual(await get(), { entries: [], leafId: "", truncated: true }, "an oversized singleton is discarded");
+  data = { entries: [{ id: "fits" }], leafId: null };
+  assert.deepEqual(await get(), { entries: data.entries, leafId: null, truncated: false });
+});
+
 test("stream updates do not rescan resident session maintenance state", async (t) => {
   const { supervisor, client, actor, sessionId } = await activityEventFixture(t, 0);
   actor.emit("event", { type: "agent_start" });
