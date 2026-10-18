@@ -167,6 +167,79 @@ test("actual text limits, rich text, and native streams keep their existing capa
 });
 
 
+test("actual stream budgets preserve normalized chunks, progress, and fresh executions", { timeout: 30_000 }, async (t) => {
+  const kernel = await fixture(t);
+  const text = "a¢字😀Zignored";
+  const code = `import sys, os
+for piece in ("a", "¢", "字", "😀", "Z", "ignored"):
+    sys.stdout.write(piece)
+    sys.stderr.write(piece)
+None`;
+  for (const limit of [...Array.from({ length: 12 }, (_, i) => i), 18, 19]) {
+    kernel.maxOutputBytes = limit;
+    let expected = "";
+    for (const point of text) {
+      if (Buffer.byteLength(expected + point) > limit) break;
+      expected += point;
+    }
+    const truncated = Buffer.byteLength(text) > limit;
+    const marker = `\n[... output truncated at ${limit} bytes ...]`;
+    const updates = [];
+    const result = await kernel.execute(code, { onUpdate: (value) => updates.push(value) });
+    assert.equal(result.ok, true);
+    assert.equal(result.stdout, expected + (truncated ? marker : ""));
+    assert.equal(result.stderr, result.stdout, "Each stream has its own full budget");
+    assert.equal(result.truncated, truncated);
+    assert.equal(result.totalBytes, 2 * Buffer.byteLength(text), "Discarded chunks still count");
+    assert.equal(result.mime, null);
+    assert.deepEqual(result.outputs, [{ text: updates.map((value) => value.text).join("") }]);
+    for (const stream of ["stdout", "stderr"]) {
+      assert.equal(updates.filter((value) => value.stream === stream).map((value) => value.text).join(""), result[stream]);
+      assert.equal(result[stream].split(marker).length - 1, truncated ? 1 : 0);
+      assert.doesNotMatch(result[stream], /�/);
+    }
+    for (const update of updates) {
+      assert.deepEqual(Object.keys(update), ["stream", "text", "stdout", "stderr", "truncated", "totalBytes"]);
+      assert(update.totalBytes <= result.totalBytes);
+    }
+    if (limit === 4) {
+      assert.deepEqual(updates, [
+        { stream: "stdout", text: "a", stdout: "a", stderr: "", truncated: false, totalBytes: 1 },
+        { stream: "stderr", text: "a", stdout: "a", stderr: "a", truncated: false, totalBytes: 2 },
+        { stream: "stdout", text: "¢", stdout: "a¢", stderr: "a", truncated: false, totalBytes: 4 },
+        { stream: "stderr", text: "¢", stdout: "a¢", stderr: "a¢", truncated: false, totalBytes: 6 },
+        { stream: "stdout", text: marker, stdout: "a¢" + marker, stderr: "a¢", truncated: true, totalBytes: 9 },
+        { stream: "stderr", text: marker, stdout: "a¢" + marker, stderr: "a¢" + marker, truncated: true, totalBytes: 12 },
+      ]);
+    }
+    const fresh = await kernel.execute('sys.stdout.write("Q")\nsys.stderr.write("R")\nNone');
+    assert.equal(fresh.stdout, limit === 0 ? marker : "Q");
+    assert.equal(fresh.stderr, limit === 0 ? marker : "R");
+    assert.equal(fresh.totalBytes, 2);
+    assert.equal(fresh.truncated, limit === 0);
+  }
+  for (const limit of [5, 6]) {
+    kernel.maxOutputBytes = limit;
+    const halves = await kernel.execute(`for half in ("\\ud83d", "\\ude00"):
+    sys.stdout.write(half)
+    sys.stderr.write(half)
+None`);
+    const marker = `\n[... output truncated at ${limit} bytes ...]`;
+    assert.equal(halves.ok, true);
+    assert.equal(halves.stdout, limit === 5 ? "�" + marker : "��");
+    assert.equal(halves.stderr, halves.stdout);
+    assert.equal(halves.totalBytes, 12, "Lone halves normalize before joining, even when fitting");
+    assert.equal(halves.truncated, limit === 5);
+  }
+  kernel.maxOutputBytes = 6;
+  const native = await kernel.execute('os.write(1, b"\\xff")\nos.write(2, b"\\xff")\nNone');
+  assert.equal(native.ok, true);
+  assert.equal(native.stdout, "�"); assert.equal(native.stderr, "�");
+  assert.equal(native.totalBytes, 6, "Native invalid UTF-8 retains the existing normalized byte accounting");
+  assert.equal(native.truncated, false);
+});
+
+
 test("cancelling during repeated image output keeps the control protocol usable", { timeout: 30_000 }, async (t) => {
   const kernel = await fixture(t);
   await kernel.execute(setupImages + '\nlarge_image = Image(data=base64.b64decode("' + PNG_A + '") + b"x" * 400000)');

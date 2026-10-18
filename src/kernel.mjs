@@ -39,6 +39,8 @@ class OutputCollector {
     this.onUpdate = onUpdate;
     this.stdout = "";
     this.stderr = "";
+    this.stdoutBytes = 0;
+    this.stderrBytes = 0;
     this.totalBytes = 0;
     this.stdoutTruncated = false;
     this.stderrTruncated = false;
@@ -63,10 +65,12 @@ class OutputCollector {
     const key = stream === "stderr" ? "stderr" : "stdout";
     let captured = "";
     if (!this[`${key}Truncated`]) {
-      const remaining = this.maxBytes - Buffer.byteLength(this[key]);
+      const remaining = this.maxBytes - this[`${key}Bytes`];
       let end = Math.min(bytes.length, remaining);
       while (end > 0 && (bytes[end] & 0xc0) === 0x80) end -= 1;
-      captured = bytes.subarray(0, end).toString("utf8");
+      const retained = bytes.subarray(0, end);
+      captured = retained.toString("utf8");
+      this[`${key}Bytes`] += retained.length;
       this[key] += captured;
       this.addText(captured);
       if (bytes.length > remaining) {
