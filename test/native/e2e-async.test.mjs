@@ -7,6 +7,7 @@ import path from "node:path";
 import test from "node:test";
 import { zstdDecompressSync } from "node:zlib";
 import { pathToFileURL } from "node:url";
+import { getHeapStatistics } from "node:v8";
 import { HarnessClient } from "../../src/client.mjs";
 import { HarnessSupervisor } from "../../src/supervisor.mjs";
 import { PiSessionActor } from "../../src/session-actor.mjs";
@@ -67,6 +68,8 @@ function respond(response, id, { calls = [], answer = id, usage = { input_tokens
 }
 
 async function fixture(t, script, { customCompaction = false, nativeAsync = true, modelId = "gpt-6-astra", clmExtension = undefined, retry = undefined } = {}) {
+  // Reconstruct only an explicit numeric CLI cap; never forward parent NODE_OPTIONS.
+  const heapCap = process.execArgv.findLast(argument => /^--max-old-space-size=[1-9][0-9]*$/.test(argument));
   const retentionModule = process.env.PI_HARNESS_RETENTION_SDK_MODULE;
   const buildRoot = process.env.PI_HARNESS_NATIVE_ASYNC_BUILD_ROOT;
   const artifacts = process.env.PI_HARNESS_NATIVE_TEST_ARTIFACTS;
@@ -85,6 +88,24 @@ async function fixture(t, script, { customCompaction = false, nativeAsync = true
   const cwd = path.join(root, "project"); const agentDir = path.join(root, "agent");
   await Promise.all([mkdir(cwd), mkdir(agentDir), mkdir(path.join(root, "home"))]);
   await writeFile(path.join(agentDir, "settings.json"), JSON.stringify({ transport: "sse", ...(retry ? { retry } : {}) }));
+  const heapCapsFile = path.join(root, "node-heap-caps.jsonl");
+  const heapCapExtension = path.join(root, "node-heap-cap.ts");
+  await writeFile(heapCapsFile, "");
+  if (heapCap) {
+    await writeFile(heapCapExtension, `import assert from "node:assert/strict";
+import { appendFileSync } from "node:fs";
+import { getHeapStatistics } from "node:v8";
+export default function verifyWorkerHeapCap() {
+  const heapSizeLimit = getHeapStatistics().heap_size_limit;
+  assert.equal(process.env.NODE_OPTIONS, ${JSON.stringify(heapCap)});
+  assert.equal(heapSizeLimit, ${getHeapStatistics().heap_size_limit});
+  appendFileSync(${JSON.stringify(heapCapsFile)}, JSON.stringify({
+    pid: process.pid, nodeOptions: process.env.NODE_OPTIONS, heapSizeLimit,
+    execArgv: process.execArgv,
+  }) + "\\n");
+}
+`);
+  }
   const customCompactionFile = path.join(root, "custom-compaction.jsonl");
   const customExtensionPath = path.join(root, "custom-compaction.ts");
   await writeFile(customCompactionFile, "");
@@ -119,6 +140,7 @@ export default function customCompactionFixture(pi) {
       const sessionFile = sessionId && supervisor?.store.getSession(sessionId)?.sessionFile;
       await writeFile(path.join(artifacts, `${crypto.randomUUID()}.json`), JSON.stringify({
         test: t.name, requests, receipts, customCompactions: await customCompactions(),
+        heapCaps: (await readFile(heapCapsFile, "utf8")).split("\n").filter(Boolean).map(line => JSON.parse(line)),
         errors: errors.map((error) => error.message), events: log?.events,
         transcript: sessionFile ? await readFile(sessionFile, "utf8").catch(() => null) : null,
       }, null, 2));
@@ -136,6 +158,7 @@ export default function customCompactionFixture(pi) {
   for (const key of Object.keys(process.env)) delete process.env[key];
   Object.assign(process.env, {
     PATH: "/usr/local/bin:/usr/bin:/bin", LANG: "C.UTF-8", HOME: path.join(root, "home"),
+    ...(heapCap ? { NODE_OPTIONS: heapCap } : {}),
     IPYTHONDIR: path.join(root, "ipython"), PI_CODING_AGENT_DIR: agentDir,
     PI_HARNESS_PI_COMMAND: command, PI_HARNESS_PI_MODULE: module,
     PI_HARNESS_NATIVE_ASYNC: nativeAsync ? "1" : "0", PI_HARNESS_PYTHON: python, PI_HARNESS_AUTO_INSTALL: "0",
@@ -211,7 +234,7 @@ await runSDKWorkerRpc({ bootstrap: options => bootstrapSDKWorker({ ...options, e
   }
   supervisor = new HarnessSupervisor({ socketPath, databasePath: path.join(root, "state", "harness.sqlite"),
     ...(actorFactory ? { actorFactory } : {}),
-    pidPath: path.join(root, "run", "supervisor.pid"), actorExtensionPaths: [providerPath, ...(customCompaction ? [customExtensionPath] : []), ...(clmExtension ? [clmExtension] : [])], actorInactivityMs: 0 });
+    pidPath: path.join(root, "run", "supervisor.pid"), actorExtensionPaths: [providerPath, ...(heapCap ? [heapCapExtension] : []), ...(customCompaction ? [customExtensionPath] : []), ...(clmExtension ? [clmExtension] : [])], actorInactivityMs: 0 });
   client = new HarnessClient({ socketPath, heartbeatMs: 0, requestTimeoutMs: 30_000 });
   await supervisor.start();
   assert(await client.start({ registrationType: "register_client", clientInstanceId: crypto.randomUUID() }));

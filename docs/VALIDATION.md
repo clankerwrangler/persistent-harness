@@ -16,8 +16,14 @@ Native integration additionally requires `PI_HARNESS_NATIVE_ASYNC_BUILD_ROOT` to
 
 ```sh
 export PI_HARNESS_NATIVE_ASYNC_BUILD_ROOT="$PI_PREFIX"
-npm run test:native
+node --max-old-space-size=256 --test --test-concurrency=1 test/native/e2e-async.test.mjs
 ```
+
+The fixture forwards only an explicit positive decimal `--max-old-space-size=<MiB>`
+CLI argument into its private worker environment. It does not forward arbitrary
+`NODE_OPTIONS`. With that argument, each genuine CLI worker verifies its exact
+cap and V8 heap limit; optional synthetic artifacts include those worker receipts.
+Without the CLI argument, the fixture leaves the worker cap unset.
 
 Set `PI_HARNESS_TEST_CLM_EXTENSION` to a separately maintained candidate CLM `index.ts` to include the direct-mirror integration: inference during a paused Python writer, canonical acceptance, and reopen. Without that optional checkout, this one cross-project test is skipped.
 
@@ -106,6 +112,11 @@ retirement, transport close, and extension shutdown. The public bootstrap fixtur
 uses the selected literal SDK manager and complete package graph, checking stable
 paths, no cold cache-directory creation, private idle publication, preserved
 canonical prefixes, and unconfigured in-memory/new/recent modes.
+
+`NativeFixtureHeapCap` checks private environment reset, cap inheritance by two
+workers, and exact original-environment restoration. Its drop-cap, forward-options,
+and bad-restore controls must fail. The model abstracts numeric CLI selection and
+V8 behavior; the native fixture verifies the actual isolated workers.
 
 `DependencyLookup` checks the final graph-root candidate without ancestor escape,
 retaining declaration, identity, version, shared-instance and public-export gates.
