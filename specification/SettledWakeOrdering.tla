@@ -64,10 +64,91 @@ AcknowledgeStop == /\ stopStarted /\ ~stopDone /\ (~owner \/ BadStopSkipsOwner)
                        emptyRestart,stopStarted,wakeCancelled>>
 Next == Stop \/ Settled \/ ReleaseCompact \/ Register \/ ReleaseReady \/ JoinStop
         \/ CrashDuringReadiness \/ FreshArrival \/ ExplicitRevival \/ FinishReadiness \/ AcknowledgeStop
-Spec == Init /\ [][Next]_vars
 NoStaleReadiness == stopFirst => ~readinessStarted
 StoppedDrained == stopDone => actor="stopped" /\ ~owner
 RegistrationReleasesMutation == owner => "settled" \notin {queue[i]:i \in 1..Len(queue)}
 NoEmptyRevival == ~emptyRestart
 NoLostFreshInput == finished /\ ~stopStarted => ~pending
+
+\* Independent activation owners: two serialized reads and an older launch.
+\* Grant publication remains owned even after its asynchronous write starts.
+CONSTANTS ReadyHeadOnly, RetryRenewsAuthority, SkipGrantJoin, SkipLaunchFence, LeakRetirementFence
+VARIABLES phase, cancelled, released, retiring, acknowledged, deleted, mode,
+          liveActor, staleStart, latePublication, renewed, fence, failed,
+          freshAccepted, laterActivated, refreshed
+activationVars == <<phase,cancelled,released,retiring,acknowledged,deleted,mode,
+                    liveActor,staleStart,latePublication,renewed,fence,failed,
+                    freshAccepted,laterActivated,refreshed>>
+Ids == 1..3
+ActivationInit == /\ phase=[i \in Ids |-> IF i=1 THEN "grant" ELSE IF i=2 THEN "queued" ELSE "identity"]
+                  /\ cancelled={} /\ released={} /\ retiring=FALSE /\ acknowledged=FALSE
+                  /\ deleted=FALSE /\ mode \in {"stop","delete"} /\ liveActor=TRUE
+                  /\ staleStart=FALSE /\ latePublication=FALSE /\ renewed=FALSE
+                  /\ fence=FALSE /\ failed=FALSE /\ freshAccepted=FALSE
+                  /\ laterActivated=FALSE /\ refreshed=FALSE
+ReleaseActivation(i) == /\ i \notin released /\ released'=released \cup {i}
+                        /\ UNCHANGED <<phase,cancelled,retiring,acknowledged,deleted,mode,liveActor,
+                           staleStart,latePublication,renewed,fence,failed,freshAccepted,laterActivated,refreshed>>
+BeginRetirement == /\ ~retiring
+                   /\ retiring'=TRUE /\ fence'=TRUE /\ liveActor'=FALSE
+                   /\ cancelled'=IF ReadyHeadOnly THEN {1} ELSE Ids
+                   /\ UNCHANGED <<phase,released,acknowledged,deleted,mode,staleStart,latePublication,
+                        renewed,failed,freshAccepted,laterActivated,refreshed>>
+RetryReady == /\ phase[2]="queued" /\ phase[1]="done" /\ 2 \in released
+              /\ phase'=[phase EXCEPT ![2]=IF 2 \in cancelled /\ ~RetryRenewsAuthority THEN "done" ELSE "grant"]
+              /\ renewed'=(renewed \/ (2 \in cancelled /\ RetryRenewsAuthority))
+              /\ UNCHANGED <<cancelled,released,retiring,acknowledged,deleted,mode,liveActor,staleStart,
+                   latePublication,fence,failed,freshAccepted,laterActivated,refreshed>>
+GrantRead(i) == /\ phase[i]="grant" /\ i \in released
+                /\ phase'=[phase EXCEPT ![i]=IF i \in cancelled THEN "done" ELSE "write"]
+                /\ UNCHANGED <<cancelled,released,retiring,acknowledged,deleted,mode,liveActor,staleStart,
+                     latePublication,renewed,fence,failed,freshAccepted,laterActivated,refreshed>>
+PublishGrant(i) == /\ phase[i]="write"
+                   /\ phase'=[phase EXCEPT ![i]=IF i \in cancelled THEN "done" ELSE "identity"]
+                   /\ latePublication'=(latePublication \/ acknowledged)
+                   /\ UNCHANGED <<cancelled,released,retiring,acknowledged,deleted,mode,liveActor,
+                        staleStart,renewed,fence,failed,freshAccepted,laterActivated,refreshed>>
+FinishLaunch(i) == LET permitted == i \notin cancelled \/ SkipLaunchFence
+                   IN /\ phase[i]="identity" /\ i \in released
+                      /\ phase'=[phase EXCEPT ![i]="done"]
+                      /\ liveActor'=(liveActor \/ permitted)
+                      /\ staleStart'=(staleStart \/ (retiring /\ permitted))
+                      /\ UNCHANGED <<cancelled,released,retiring,acknowledged,deleted,mode,
+                           latePublication,renewed,fence,failed,freshAccepted,laterActivated,refreshed>>
+Tracked == IF ReadyHeadOnly THEN {1} ELSE Ids
+DrainComplete == \A i \in Tracked : phase[i]="done" \/ (SkipGrantJoin /\ phase[i]="write")
+AcknowledgeRetirement == /\ retiring /\ ~acknowledged /\ ~failed /\ DrainComplete
+                         /\ acknowledged'=TRUE /\ deleted'=(mode="delete")
+                         /\ fence'=LeakRetirementFence
+                         /\ UNCHANGED <<phase,cancelled,released,retiring,mode,liveActor,staleStart,
+                              latePublication,renewed,failed,freshAccepted,laterActivated,refreshed>>
+FailRetirement == /\ retiring /\ ~acknowledged /\ ~failed /\ DrainComplete
+                  /\ failed'=TRUE /\ fence'=LeakRetirementFence
+                  /\ UNCHANGED <<phase,cancelled,released,retiring,acknowledged,deleted,mode,liveActor,
+                       staleStart,latePublication,renewed,freshAccepted,laterActivated,refreshed>>
+AcceptFresh == /\ ~retiring /\ ~freshAccepted /\ freshAccepted'=TRUE
+               /\ UNCHANGED <<phase,cancelled,released,retiring,acknowledged,deleted,mode,liveActor,
+                    staleStart,latePublication,renewed,fence,failed,laterActivated,refreshed>>
+LaterActivation == /\ (acknowledged \/ failed) /\ ~fence /\ ~deleted /\ ~laterActivated
+                   /\ liveActor'=TRUE /\ laterActivated'=TRUE
+                   /\ UNCHANGED <<phase,cancelled,released,retiring,acknowledged,deleted,mode,staleStart,
+                        latePublication,renewed,fence,failed,freshAccepted,refreshed>>
+ResidentRefresh == /\ ~retiring /\ ~refreshed /\ phase[1]="identity" /\ 1 \in released
+                   /\ refreshed'=TRUE /\ liveActor'=FALSE
+                   /\ UNCHANGED <<phase,cancelled,released,retiring,acknowledged,deleted,mode,
+                        staleStart,latePublication,renewed,fence,failed,freshAccepted,laterActivated>>
+ActivationNext == BeginRetirement \/ RetryReady \/ AcknowledgeRetirement \/ FailRetirement
+                  \/ AcceptFresh \/ LaterActivation \/ ResidentRefresh
+                  \/ (\E i \in Ids : ReleaseActivation(i) \/ GrantRead(i) \/ PublishGrant(i) \/ FinishLaunch(i))
+Spec == Init /\ ActivationInit /\ mode="stop" /\ [][Next /\ UNCHANGED activationVars]_<<vars,activationVars>>
+ActivationSpec == Init /\ ActivationInit /\ [][ActivationNext /\ UNCHANGED vars]_<<vars,activationVars>>
+AllOwnersDrained == acknowledged => \A i \in Ids : phase[i]="done"
+NoOldStart == ~staleStart
+NoLatePublication == ~latePublication
+StableCancellation == ~renewed
+RetirementReleased == (acknowledged \/ failed) => ~fence
+LaterActivationAvailable == (acknowledged \/ failed) /\ ~deleted /\ ~laterActivated => ENABLED LaterActivation
+RefreshDoesNotRetire == refreshed /\ ~retiring => ~fence
+FreshAdmissionAvailable == ~retiring /\ ~freshAccepted => ENABLED AcceptFresh
+
 =============================================================================

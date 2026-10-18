@@ -96,8 +96,14 @@ async function fixture(t, { real = false } = {}) {
       processTerminator: async () => ({ terminated: true }) }), logger: { error: (error) => errors.push(String(error)) } });
   await supervisor.start(); client = new HarnessClient({ socketPath, heartbeatMs: 0, requestTimeoutMs: 30_000 });
   await client.start({ registrationType: "register_client", clientInstanceId: crypto.randomUUID() });
-  const sessionId = (await client.request("create_root", { cwd, repositoryRoot: null, name: "Stop ordering proof",
-    provider: real ? "harness-fake" : null, model: real ? "fake-model" : null, thinkingLevel: "off" })).admission.sessionId;
+  let sessionId;
+  if (real) sessionId = (await client.request("create_root", { cwd, repositoryRoot: null, name: "Stop ordering proof",
+    provider: "harness-fake", model: "fake-model", thinkingLevel: "off" })).admission.sessionId;
+  else {
+    sessionId = crypto.randomUUID(); const sessionFile = path.join(directory, `${sessionId}.jsonl`);
+    await writeFile(sessionFile, `${JSON.stringify({ type: "session", version: 3, id: sessionId, timestamp: new Date().toISOString(), cwd })}\n`);
+    supervisor.store.createRoot({ sessionId, sessionFile, cwd, repositoryRoot: null, name: "Stop ordering proof", actorToken: crypto.randomUUID() });
+  }
   await client.request("subscribe_session", { selector: sessionId });
   return { directory, sessionId, client, supervisor, workers, rawEvents, entered, release, readinessReturned, providerEntered, providerRelease,
     gatedCalls: () => gatedCalls,
@@ -229,4 +235,54 @@ test("family stop_child drains earlier settled readiness without reviving its st
   assert.equal(f.supervisor.store.getSession(childId).lifecycle, "stopped");
   assert.equal(f.supervisor.store.getSession(childId).actorGeneration, generation);
   assert.equal(f.workers.filter((worker) => worker.session.sessionId === childId).length, 1);
+});
+
+
+test("standalone readiness and every queued read retire before Stop acknowledges", { timeout: 30_000 }, async (t) => {
+  const f = await fixture(t); await f.changeSkills();
+  const outcomes = [];
+  const read = (type, params) => f.client.request(type, params).then(
+    () => outcomes.push("ready"), error => { outcomes.push(error.message); });
+  const first = read("get_actor_state", { sessionId: f.sessionId }); await f.entered.promise;
+  const queued = [read("get_actor_entries", { sessionId: f.sessionId }), read("subscribe_session", { selector: f.sessionId })];
+  await f.client.request("heartbeat");
+  let acknowledged = false;
+  const stop = f.client.request("stop_session", { sessionId: f.sessionId }).then(reply => { acknowledged = true; return reply; });
+  await until(() => f.supervisor.store.getSession(f.sessionId).lifecycle === "stopped", "explicit stop reaches shutdown");
+  // Same-connection reads remain available while the older skill owner is held.
+  await f.client.request("heartbeat"); await f.client.request("list_sessions");
+  const acknowledgedWhileHeld = acknowledged;
+  const generation = f.supervisor.store.getSession(f.sessionId).actorGeneration;
+  const duringRead = f.client.request("get_actor_state", { sessionId: f.sessionId }).then(() => "ready", error => error.message);
+  await f.client.request("heartbeat");
+  f.releaseReadiness(); const during = await duringRead; await Promise.all([first, ...queued, stop]);
+  t.diagnostic(JSON.stringify({ acknowledgedWhileHeld, outcomes, during, generations: [generation, f.supervisor.store.getSession(f.sessionId).actorGeneration], workers: f.workers.length }));
+  assert.equal(acknowledgedWhileHeld, false);
+  assert.match(during, /stopped|retiring/);
+  assert.equal(outcomes.length, 3); for (const outcome of outcomes) assert.match(outcome, /stopped|retiring/);
+  await assertStopped(f); assert.equal(f.workers.length, 1);
+  assert.equal(f.supervisor.store.getSession(f.sessionId).actorGeneration, generation);
+  // A later explicit read supplies fresh authority and does not replay an input.
+  await f.client.request("get_actor_entries", { sessionId: f.sessionId });
+  assert.equal(f.workers.length, 2); assert.deepEqual(f.workers.flatMap(worker => worker.inputs), []);
+});
+
+
+test("resident skill refresh completes without self-join and leaves durable admission independent", { timeout: 30_000 }, async t => {
+  const f = await fixture(t); await f.changeSkills();
+  const ready = f.client.request("get_actor_state", { sessionId: f.sessionId }); await f.entered.promise;
+  const receipt = await f.client.request("submit_input", { sessionId: f.sessionId, message: "FRESH_DURING_REFRESH", behavior: "auto" });
+  assert.equal(receipt.accepted, true); assert.equal(f.gatedCalls(), 1);
+  assert.equal(f.supervisor.store.listPendingActorInputs(f.sessionId).length, 1);
+  assert.equal(f.workers.length, 1);
+  f.releaseReadiness(); await ready;
+  await until(() => f.workers.some(worker => worker.inputs.includes("FRESH_DURING_REFRESH")), "fresh input after resident refresh");
+  assert.equal(f.workers.length, 2); assert.equal(f.workers[0].isRunning, false);
+  assert.equal(f.workers.flatMap(worker => worker.inputs).filter(message => message === "FRESH_DURING_REFRESH").length, 1);
+  assert.deepEqual(f.supervisor.store.listPendingActorInputs(f.sessionId), []);
+  const grant = f.supervisor.store.getSessionSkillGrant(f.sessionId);
+  assert.equal(grant.skills.length, 1); assert.equal(grant.skills[0].id, "changed");
+  const before = JSON.stringify(grant);
+  await f.client.request("get_actor_entries", { sessionId: f.sessionId });
+  assert.equal(f.workers.length, 2); assert.equal(JSON.stringify(f.supervisor.store.getSessionSkillGrant(f.sessionId)), before);
 });

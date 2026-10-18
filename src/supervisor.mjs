@@ -364,6 +364,8 @@ export class HarnessSupervisor {
   #resolveStopped;
   #logTail = Promise.resolve();
   #actorReadyPromises = new Map();
+  #actorActivationOwners = new Map();
+  #actorRetirements = new Map();
   #actorInputWakes = new Map();
   #skillGrantPromises = new Map();
   #runtimeReadinessPromises = new Map();
@@ -990,10 +992,11 @@ export class HarnessSupervisor {
     // Fence before the first await, including legacy tombstoned intermediates.
     const sessions = this.store.beginSessionDeletion(sessionId);
     const ids = sessions.map((session) => session.sessionId);
-    const outgoing = ids.flatMap(id => this.store.listMessagesAwaitingSenderEntry(id, Math.min(this.pendingMessageLimit, 1000)));
-    const pending = ids.flatMap((id) => [this.#sessionMutationTails.get(id), this.#launchPromises.get(id), this.#actorInputWakes.get(id)?.done]).filter(Boolean);
+    const retirement = this.#beginActorRetirement(ids);
     const failures = [];
     try {
+      const outgoing = ids.flatMap(id => this.store.listMessagesAwaitingSenderEntry(id, Math.min(this.pendingMessageLimit, 1000)));
+      const pending = [retirement.done, ...ids.map(id => this.#sessionMutationTails.get(id)).filter(Boolean)];
       for (const id of ids) {
         try { await this.#stopActor(id, "stopped"); } catch (error) { failures.push(error); }
       }
@@ -1021,7 +1024,7 @@ export class HarnessSupervisor {
       for (const client of this.#clientConnections) this.#write(client, event("sessions_deleted", { sessionIds: ids }));
       this.#broadcastNavigator("sessions_deleted");
       return { session, deletedSessionIds: ids };
-    } finally { this.store.endSessionDeletion(sessions); }
+    } finally { retirement.release(); this.store.endSessionDeletion(sessions); }
   }
 
   #clearSessionRouting(sessionId) {
@@ -1661,21 +1664,66 @@ export class HarnessSupervisor {
     }
   }
 
-  #reconcileSkillGrant(sessionId, ancestry = new Set()) {
-    if (ancestry.has(sessionId)) return Promise.reject(new Error("session family contains a cycle"));
-    const current = this.#skillGrantPromises.get(sessionId);
-    if (current) return current.then(
-      () => this.#reconcileSkillGrant(sessionId, ancestry),
-      () => this.#reconcileSkillGrant(sessionId, ancestry),
-    );
-    const nextAncestry = new Set(ancestry).add(sessionId);
-    const operation = this.#reconcileSkillGrantOnce(sessionId, nextAncestry)
-      .finally(() => { if (this.#skillGrantPromises.get(sessionId) === operation) this.#skillGrantPromises.delete(sessionId); });
-    this.#skillGrantPromises.set(sessionId, operation);
-    return operation;
+  #withActorActivation(sessionId, operation, check = () => {}) {
+    const owner = { cancelled: false, done: null };
+    const validate = () => {
+      if (this.#stoppingPromise || owner.cancelled) throw requestFailure("unavailable", "actor activation was stopped");
+      if (this.#actorRetirements.has(sessionId)) throw requestFailure("unavailable", "session actor is retiring");
+      check();
+    };
+    try { validate(); } catch (error) { return Promise.reject(error); }
+    const owners = this.#actorActivationOwners.get(sessionId) ?? new Set();
+    this.#actorActivationOwners.set(sessionId, owners); owners.add(owner);
+    owner.done = Promise.resolve().then(() => { validate(); return operation(validate); })
+      .then(result => { validate(); return result; })
+      .finally(() => {
+        owners.delete(owner);
+        if (!owners.size) this.#actorActivationOwners.delete(sessionId);
+        this.#syncPassivationTimer(sessionId);
+      });
+    return owner.done;
   }
 
-  async #reconcileSkillGrantOnce(sessionId, ancestry) {
+  #beginActorRetirement(ids) {
+    const pending = [];
+    for (const id of ids) {
+      this.#actorRetirements.set(id, (this.#actorRetirements.get(id) ?? 0) + 1);
+      const launch = this.#launchPromises.get(id);
+      if (launch) pending.push(launch);
+      const wake = this.#actorInputWakes.get(id);
+      if (wake) { wake.cancelled = true; pending.push(wake.done); }
+      // Include every invocation, not just the current serialization-map head.
+      for (const owner of this.#actorActivationOwners.get(id) ?? []) {
+        owner.cancelled = true; pending.push(owner.done);
+      }
+    }
+    return { done: Promise.allSettled(pending), release: () => {
+      for (const id of ids) {
+        const count = this.#actorRetirements.get(id);
+        if (count === 1) this.#actorRetirements.delete(id);
+        else this.#actorRetirements.set(id, count - 1);
+      }
+    } };
+  }
+
+  #reconcileSkillGrant(sessionId, ancestry = new Set(), check = () => {}) {
+    if (ancestry.has(sessionId)) return Promise.reject(new Error("session family contains a cycle"));
+    return this.#withActorActivation(sessionId, validate => {
+      const run = () => {
+        validate();
+        const current = this.#skillGrantPromises.get(sessionId);
+        if (current) return current.then(run, run);
+        const nextAncestry = new Set(ancestry).add(sessionId);
+        const operation = this.#reconcileSkillGrantOnce(sessionId, nextAncestry, validate)
+          .finally(() => { if (this.#skillGrantPromises.get(sessionId) === operation) this.#skillGrantPromises.delete(sessionId); });
+        this.#skillGrantPromises.set(sessionId, operation);
+        return operation;
+      };
+      return run();
+    }, check);
+  }
+
+  async #reconcileSkillGrantOnce(sessionId, ancestry, check) {
     const session = this.store.getSession(sessionId);
     if (!session || session.lifecycle === "deleted" || !session.sessionFile) throw new Error("session does not exist");
     const previous = this.store.getSessionSkillGrant(sessionId);
@@ -1684,9 +1732,10 @@ export class HarnessSupervisor {
       skills = await this.#rootSkillCatalog(previous);
     } else {
       if (!session.parentSessionId) throw new Error("child session has no immediate parent");
-      const parent = await this.#reconcileSkillGrant(session.parentSessionId, ancestry);
+      const parent = await this.#reconcileSkillGrant(session.parentSessionId, ancestry, check);
       skills = parent.skills;
     }
+    check();
     const changed = !previous || !sameSkillCatalog(previous.skills, skills);
     const grant = changed ? this.store.setSessionSkillGrant(sessionId, skills) : previous;
     const capabilities = executableCapabilities(skills);
@@ -1697,6 +1746,7 @@ export class HarnessSupervisor {
       grantSidecarCurrent = persisted?.version === 1 && sameSkillCatalog(persisted.skills, skills)
         && sameSkillCatalog(persisted.capabilities?.map((item) => ({ ...item, pythonBacked: true })) ?? [], capabilities.map((item) => ({ ...item, pythonBacked: true })));
     } catch {}
+    // Once the grant is stored, finish its paired sidecars before releasing ownership.
     if (changed || !grantSidecarCurrent) {
       await writeJsonAtomic(sidecars.skillGrantPath, { version: 1, skills, capabilities });
     }
@@ -1705,6 +1755,7 @@ export class HarnessSupervisor {
   }
 
   #requestActorStart(sessionId, revive) {
+    if (this.#actorRetirements.has(sessionId)) throw requestFailure("unavailable", "session actor is retiring");
     if (this.#stoppingPromise) throw requestFailure("unavailable", "supervisor is stopping");
     this.store.assertSessionAvailable(sessionId);
     let session = this.store.getSession(sessionId); if (!session || session.lifecycle === "deleted") throw new Error("session does not exist");
@@ -1714,16 +1765,19 @@ export class HarnessSupervisor {
     this.#startQueue.push(sessionId); setImmediate(() => this.#drainActorStarts()); return session;
   }
   #ensureActorReady(sessionId, check = () => {}) {
-    check();
-    const current = this.#actorReadyPromises.get(sessionId);
-    if (current) return current.then(
-      () => this.#ensureActorReady(sessionId, check),
-      () => this.#ensureActorReady(sessionId, check),
-    );
-    const operation = this.#ensureActorReadyOnce(sessionId, check)
-      .finally(() => { if (this.#actorReadyPromises.get(sessionId) === operation) this.#actorReadyPromises.delete(sessionId); this.#syncPassivationTimer(sessionId); });
-    this.#actorReadyPromises.set(sessionId, operation);
-    return operation;
+    return this.#withActorActivation(sessionId, validate => {
+      // Retries retain the original owner and cannot acquire later authority.
+      const run = () => {
+        validate();
+        const current = this.#actorReadyPromises.get(sessionId);
+        if (current) return current.then(run, run);
+        const operation = this.#ensureActorReadyOnce(sessionId, validate)
+          .finally(() => { if (this.#actorReadyPromises.get(sessionId) === operation) this.#actorReadyPromises.delete(sessionId); });
+        this.#actorReadyPromises.set(sessionId, operation);
+        return operation;
+      };
+      return run();
+    }, check);
   }
 
   async #ensureActorReadyOnce(sessionId, check) {
@@ -1732,7 +1786,7 @@ export class HarnessSupervisor {
       check(); this.store.assertSessionAvailable(sessionId);
     };
     validate();
-    const desired = await this.#reconcileSkillGrant(sessionId);
+    const desired = await this.#reconcileSkillGrant(sessionId, new Set(), check);
     validate();
     let session = this.store.getSession(sessionId);
     if (!session || session.lifecycle === "deleted") throw new Error("session does not exist");
@@ -1764,7 +1818,7 @@ export class HarnessSupervisor {
     try {
       while (this.#startQueue.length && this.#activeStarts < this.maxConcurrentStarts && !this.#stoppingPromise) {
         const nextId = this.#startQueue[0];
-        if (this.store.isSessionDeleting(nextId)) { this.#startQueue.shift(); continue; }
+        if (this.store.isSessionDeleting(nextId) || this.#actorRetirements.has(nextId)) { this.#startQueue.shift(); continue; }
         if (new Set([...this.#actors.keys(), ...this.#startingActors]).size >= this.maxResidentActors) {
           const excludeIds = [];
           let victim;
@@ -1783,7 +1837,8 @@ export class HarnessSupervisor {
         }
         this.#startQueue.shift(); const session = this.store.getSession(nextId); if (!session || session.lifecycle !== "starting") continue;
         this.#startingActors.add(nextId); this.#activeStarts += 1;
-        const launchPromise = this.#launchActor(nextId).catch((error) => {
+        const launchPromise = this.#withActorActivation(nextId, check => this.#launchActor(nextId, check)).catch((error) => {
+          if (this.#actorRetirements.has(nextId) || this.store.isSessionDeleting(nextId) || this.#stoppingPromise) return;
           const failed = this.store.getSession(nextId);
           const message = error instanceof Error ? error.message : String(error);
           // Factory/setup failures can precede the worker's own startup catch.
@@ -1815,11 +1870,12 @@ export class HarnessSupervisor {
     env.PI_HARNESS_ACTOR_SKILL_GRANT = sessionSidecarPaths(session.sessionFile).skillGrantPath;
     return env;
   }
-  async #launchActor(sessionId) {
+  async #launchActor(sessionId, check) {
     let skillGrant;
     try {
-      skillGrant = await this.#reconcileSkillGrant(sessionId);
+      skillGrant = await this.#reconcileSkillGrant(sessionId, new Set(), check);
     } catch (error) {
+      check();
       const failed = this.store.getActorLaunch(sessionId);
       const message = error instanceof Error ? error.message : String(error);
       if (failed?.lifecycle === "starting") this.store.markActorLifecycle(sessionId, failed.actorGeneration, "error", message);
@@ -1827,6 +1883,7 @@ export class HarnessSupervisor {
       throw error;
     }
     const compileCache = await (this.#actorCompileCache ??= createActorCompileCache());
+    check();
     const session = this.store.getActorLaunch(sessionId); if (!session || session.lifecycle !== "starting" || this.store.isSessionDeleting(sessionId)) return;
     const worker = this.actorFactory({ command: process.execPath, args: [STOCK_ACTOR_WORKER, ...this.#actorArgs(session)], cwd: session.cwd, env: { ...this.#actorEnv(session, compileCache), PI_HARNESS_PI_COMMAND: this.piCommand }, startupTimeoutMs: this.actorStartupTimeoutMs, promptPreflightTimeoutMs: this.actorPromptPreflightTimeoutMs,
       shutdownTimeoutMs: this.actorShutdownTimeoutMs, session });
@@ -1836,6 +1893,7 @@ export class HarnessSupervisor {
     worker.on("event", (frame) => this.#onActorEvent(sessionId, record, frame)); worker.on("protocolError", (error) => this.logger.error?.(`actor ${sessionId} RPC protocol error: ${error.message}`)); worker.on("exit", (details) => this.#onActorExit(sessionId, record, details));
     try {
       const state = await worker.start();
+      check();
       if (this.#stoppingPromise || record.expectedLifecycle) throw requestFailure("unavailable", "actor startup was stopped");
       if (state?.sessionId !== session.sessionId) throw new Error(`Pi session mismatch: expected ${session.sessionId}, received ${String(state?.sessionId)}`);
       if (session.launch?.model?.resolved && (state?.model?.provider !== session.launch.model.resolved.provider || state?.model?.id !== session.launch.model.resolved.id)) {
@@ -1851,12 +1909,16 @@ export class HarnessSupervisor {
       }
       this.store.assertSessionAvailable(sessionId);
       const processIdentity = await this.processIdentityFactory(worker.pid, session.actorToken);
+      check();
+      if (record.expectedLifecycle) throw requestFailure("unavailable", "actor startup was stopped");
       this.store.markActorStarted(sessionId, session.actorGeneration, { pid: worker.pid, sessionFile: state.sessionFile, processIdentity });
       await this.#sendPendingInference(sessionId, record);
+      check();
       await this.#deliverActorInputs(sessionId, record);
       setImmediate(() => this.#retryQueuedMessages(sessionId));
       await this.#log("actor_started", { sessionId, generation: session.actorGeneration, kind: session.kind }); this.#broadcastNavigator("actor_resident"); this.#syncPassivationTimers();
       if (this.#stoppingPromise) { await this.#stopActor(sessionId, "passivated"); return; }
+      check();
       await this.#submitInitialTask(sessionId, record);
     } catch (error) {
       const expected = record.expectedLifecycle; const message = error instanceof Error ? error.message : String(error); record.expectedLifecycle ??= "error"; record.exitError = message;
@@ -2184,10 +2246,15 @@ export class HarnessSupervisor {
     void this.#log("actor_stopped", { sessionId, generation: record.generation, lifecycle, ...(error ? { error } : {}) }); this.#broadcastNavigator(lifecycle === "error" ? "actor_error" : "actor_passivated"); setImmediate(() => this.#drainActorStarts());
   }
   async #stopActorAndDrainInputs(sessionId) {
-    const wake = this.#actorInputWakes.get(sessionId);
-    if (wake) wake.cancelled = true;
-    await this.#stopActor(sessionId, "stopped");
-    await wake?.done;
+    // General passivation is called by readiness itself; join only here.
+    const retirement = this.#beginActorRetirement([sessionId]);
+    try {
+      let failure;
+      try { await this.#stopActor(sessionId, "stopped"); } catch (error) { failure = error; }
+      await retirement.done;
+      if (failure) throw failure;
+      if (this.#actors.get(sessionId)?.worker.isRunning) await this.#stopActor(sessionId, "stopped");
+    } finally { retirement.release(); }
   }
   async #stopActor(sessionId, lifecycle = "passivated", error = null) {
     this.#cancelEntryIndexPreparation(sessionId);
@@ -2701,7 +2768,7 @@ export class HarnessSupervisor {
       await this.#cronScheduler?.stop(); this.#cronScheduler = undefined;
       await Promise.all([...this.#actors.keys()].map((id) => this.#stopActor(id, "passivated"))); await Promise.all([...this.#launchPromises.values()]);
       await Promise.allSettled([...this.#actorInputWakes.values()].map((wake) => wake.done));
-      await Promise.allSettled([...this.#actorReadyPromises.values()]);
+      await Promise.allSettled([...this.#actorActivationOwners.values()].flatMap(owners => [...owners].map(owner => owner.done)));
       // A failed close can leave a writer; do not remove its cache.
       if ([...this.#actors.values()].every(({ worker }) => worker.isRunning === false)) {
         await (await this.#actorCompileCache)?.dispose();
@@ -2717,7 +2784,7 @@ export class HarnessSupervisor {
       this.#cronStore?.close(); this.#cronStore = undefined;
       for (const waiters of this.#actorConnectionWaiters.values()) for (const finish of waiters) finish(undefined);
       this.#actorConnectionWaiters.clear();
-      this.#store?.close(); this.#store = undefined; this.#actorConnections.clear(); this.#clientConnections.clear(); this.#actors.clear(); this.#messageBuckets.clear(); this.#actorReadyPromises.clear(); this.#actorInputWakes.clear(); this.#skillGrantPromises.clear(); this.#runtimeReadinessPromises.clear(); this.#sessionMutationTails.clear(); this.#cronCompletionTails.clear(); this.#resolveStopped();
+      this.#store?.close(); this.#store = undefined; this.#actorConnections.clear(); this.#clientConnections.clear(); this.#actors.clear(); this.#messageBuckets.clear(); this.#actorReadyPromises.clear(); this.#actorActivationOwners.clear(); this.#actorRetirements.clear(); this.#actorInputWakes.clear(); this.#skillGrantPromises.clear(); this.#runtimeReadinessPromises.clear(); this.#sessionMutationTails.clear(); this.#cronCompletionTails.clear(); this.#resolveStopped();
     })();
     return this.#stoppingPromise;
   }
