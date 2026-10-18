@@ -1313,7 +1313,7 @@ export class HarnessSupervisor {
     const cron = family.members.some(s => this.#cronStore?.hasActiveRunForSession(s.id));
     const backgroundCount = family.members.reduce((n, s) => n + (this.#backgroundCompletionMonitor?.getActiveBackgroundJobs(s.id)?.length ?? 0), 0);
     const liveActors = family.members.filter(s => this.#actors.get(s.id)?.notificationWork?.size).map(s => s.id);
-    this.#notifications.observe(sessionId, { owner: cron ? "cron" : null, backgroundCount, liveActors });
+    this.#notifications.observe(sessionId, { owner: cron ? "cron" : null, backgroundCount, liveActors }, family);
   }
   #broadcastNavigator(reason) {
     if (this.#clientConnections.size === 0) return;

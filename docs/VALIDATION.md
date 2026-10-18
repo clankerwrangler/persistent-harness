@@ -123,6 +123,13 @@ own input, wake, tool, compaction, and serialized control work through retiremen
 attempts. The retirement callback uses its existing mutation owner; that owner
 must not reject itself as unrelated pending work. Family notification tests keep
 settlement dependent on the child after the parent retires.
+`NotificationLifecycle.Snapshot.cfg` separately checks one family projection per
+synchronous observation, fresh direct/default and next-call reads, authoritative
+null, and equivalent decisions. Its reread, stale, null-fallback, and root-only
+controls must fail. The external-write configuration intentionally demonstrates
+non-equivalence between the old sample times; neither version guarantees
+latest-at-commit family state. SQL isolation and runtime allocation are outside
+this finite abstraction.
 
 `IdleEntryIndexHost` checks deferred versus actual idle dispatch, readiness-wake
 cancellation, token/generation ownership, late sealed-prefix publication, and
