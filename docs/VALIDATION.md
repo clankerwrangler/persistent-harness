@@ -355,6 +355,16 @@ per-chunk accounting, replacement after truncation, and 512-row eviction.
 retain identity and actual supervisor caller coverage with synthetic in-process
 actors.
 
+`BoundedReconnectReplay` checks the ordered capped suffix, exact wrapper-byte
+subtraction including separators, the singleton budget exception, one full-array
+measurement, and serialization-free empty/single selections. Two requests see
+changed aliased values without using stored event sizes. Its `Separator`,
+`DropLast`, `Stale`, `Rescan`, and `Eager` controls must fail their intended
+invariants. Wrapper lengths abstract JSON-plain serialization; the bounded model
+uses three retained items. `supervisor-actor.test.mjs` checks the public reconnect
+caller with synthetic workers, 128-item selection, escaped/multibyte text, both
+ring append paths, and repeat requests without ring mutation.
+
 `EventLogTail` compares a reverse nonempty-line scan with the complete forward
 log oracle, including malformed-line quota and exact truncation detection. It
 checks 6,441 distinct states for the bounded configuration. The model abstracts
