@@ -995,6 +995,8 @@ if recovery_validation is None:
     restore_report = restore_snapshot(config["snapshotPath"], shell.user_ns, protected_names)
 else:
     restore_report = restore_validated_snapshot(recovery_validation, shell.user_ns, protected_names)
+# Descriptor-bound serialized bytes are needed through restore, not runtime life.
+recovery_validation = None
 namespace_checkpoint = restore_report.get("namespaceCheckpoint")
 emit({
     "type": "ready",
