@@ -319,6 +319,15 @@ SDK/coordinator fixture checks cold resume, the first ordinary request, recovery
 and bookkeeping with public-read counters. Default/array managers and explicit
 history, tree, edit, and branch operations retain complete values.
 
+`SessionEntryReader` separates live indexed keys from full captured values. It
+checks fixed-length bounds, owner/generation expiry, equivalent pending persistence,
+missing or changed keys before I/O, post-read key and byte checks, default captures,
+successor reads, suffix-only metadata work, and no partial H publication. Its nine
+negative configurations must fail their intended invariants. The model abstracts
+JSONL digests and JavaScript allocation; SDK and canonical-retention tests exercise
+actual values, same-generation `_persist(existingId)` redirects, detached reads,
+source replacement, and legacy full-source fallbacks.
+
 `CanonicalFactStorage` checks omission of empty per-message fact containers,
 exact nonempty native/alias/observation evidence, selected rejection and reload.
 Its empty-retention and dropped-fact controls must fail. The retention regression
