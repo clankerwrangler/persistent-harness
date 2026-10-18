@@ -2,15 +2,16 @@
 EXTENDS Integers, TLC
 CONSTANTS ConflateFamily, ResetFamilyAge, IgnoreOwnWork, StaleTimer,
           SkipWake, BlockPreparation, RetireChild
-VARIABLES s, projection
-vars == <<s, projection>>
+VARIABLES s, projection, grantContext
+vars == <<s, projection, grantContext>>
 OwnIdle == s.stage="resident" /\ ~s.streaming /\ s.quiet>=0
 NoOwnWork == ~s.tool /\ ~s.mutation /\ ~s.wake /\ s.pending="none"
 Eligible == OwnIdle /\ NoOwnWork
 Display == IF s.streaming THEN "working" ELSE IF s.child THEN "delegating" ELSE "idle"
 PolicyIdle == OwnIdle /\ (~ConflateFamily \/ Display="idle")
 MayRetire == PolicyIdle /\ (NoOwnWork \/ IgnoreOwnWork)
-Init == /\ projection="inactive"
+Init == /\ grantContext="inactive"
+        /\ projection="inactive"
         /\ s = [stage |-> "resident", generation |-> 1, now |-> 0, quiet |-> 0,
              streaming |-> FALSE, tool |-> FALSE, mutation |-> FALSE, wake |-> FALSE,
              child |-> TRUE, pending |-> "none", admitted |-> FALSE, delivered |-> FALSE,
@@ -59,7 +60,7 @@ PolicyNext == Tick \/ ChildChange \/ Start \/ Settle \/ Tool \/ Mutation \/ Wake
         \/ Deliver \/ DrainWake \/ Arm \/ FinishClose \/ SchedulePrep \/ DispatchPrep \/ FinishPrep
         \/ (\E kind \in {"input","family"}: Admit(kind))
         \/ (\E reason \in {"capacity","expiry"}: Retire(reason))
-Next == PolicyNext /\ UNCHANGED projection
+Next == PolicyNext /\ UNCHANGED <<projection,grantContext>>
 Spec == Init /\ [][Next]_vars
 SafeRetirement == ~s.unsafe
 StableOwnAge == ~s.ageReset
@@ -112,7 +113,7 @@ ProjectionDeferred(row, captured, guard) ==
   [prepare |-> ProjectionOwnIdle(row, guard),
    retire |-> row.quietSince=captured.quietSince /\ ProjectionOwnIdle(row, guard),
    resetAttempt |-> row.activity="working"]
-ProjectionInit(fault) == /\ s="inactive"
+ProjectionInit(fault) == /\ grantContext="inactive" /\ s="inactive"
   /\ \E pair \in ProjectionCases, running \in BOOLEAN, guard \in 0..8, depth \in 0..2:
     projection=[fault |-> fault, pair |-> pair, running |-> running, guard |-> guard, depth |-> depth,
       step |-> 0, reads |-> 0, expectedReads |-> 0, localSql |-> 0,
@@ -163,7 +164,7 @@ ProjectionDeferredSample == /\ projection.step=3
           !.deferredBad=@ \/ (ProjectionDeferred(full,captured,projection.guard)#ProjectionDeferred(local,captured,projection.guard)),
           !.freshnessBad=@ \/ (ProjectionFault="deferred" /\ projection.pair[1]#projection.pair[2])]
   /\ UNCHANGED s
-ProjectionNext == ProjectionEntryRead \/ ProjectionFirstSample \/ ProjectionSecondSample \/ ProjectionDeferredSample
+ProjectionNext == (ProjectionEntryRead \/ ProjectionFirstSample \/ ProjectionSecondSample \/ ProjectionDeferredSample) /\ UNCHANGED grantContext
 ProjectionSpec == ProjectionInit("none") /\ [][ProjectionNext]_vars
 ProjectionMergeSpec == ProjectionInit("merge") /\ [][ProjectionNext]_vars
 ProjectionCacheSpec == ProjectionInit("cache") /\ [][ProjectionNext]_vars
@@ -177,4 +178,75 @@ ProjectionSampling == ~projection.sampleBad /\ projection.reads=projection.expec
 ProjectionFresh == ~projection.freshnessBad
 ProjectionDeferredEquivalent == ~projection.deferredBad
 ProjectionWork == projection.localSql=projection.reads /\ projection.familySql=0 /\ projection.ancestrySql=0 /\ projection.jsonWork=0
+
+\* Reconciliation selects raw context fields at each original observation.
+\* Two row samples cover boundary edits; unrelated mapper work is abstracted.
+GrantContextRow(life, file, kind, parent) ==
+  [lifecycle |-> life, sessionFile |-> file, kind |-> kind, parentSessionId |-> parent]
+GrantContextMissing == GrantContextRow("missing", "null", "root", "null")
+GrantContextRoot == GrantContextRow("starting", "root.jsonl", "root", "null")
+GrantContextChild == GrantContextRow("resident", "child.jsonl", "child", "parent-a")
+GrantContextCases == {
+  <<GrantContextMissing, GrantContextRoot>>, <<GrantContextRoot, GrantContextMissing>>,
+  <<GrantContextRoot, GrantContextRow("deleted", "root.jsonl", "root", "null")>>,
+  <<GrantContextRow("deleted", "child.jsonl", "child", "parent-a"), GrantContextChild>>,
+  <<GrantContextRoot, GrantContextRow("starting", "new.jsonl", "root", "null")>>,
+  <<GrantContextRoot, GrantContextRow("starting", "", "root", "null")>>,
+  <<GrantContextRoot, GrantContextRow("starting", "null", "root", "null")>>,
+  <<GrantContextChild, GrantContextRow("resident", "child.jsonl", "child", "parent-b")>>,
+  <<GrantContextChild, GrantContextRow("resident", "child.jsonl", "child", "null")>>,
+  <<GrantContextChild, GrantContextRow("resident", "child.jsonl", "child", "")>>,
+  <<GrantContextChild, GrantContextRow("resident", "child.jsonl", "root", "parent-a")>>,
+  <<GrantContextRoot, GrantContextChild>>,
+  <<GrantContextRow("stopped", "root.jsonl", "root", "null"), GrantContextRoot>>,
+  <<GrantContextRow("error", "child.jsonl", "child", "parent-a"), GrantContextChild>>,
+  <<GrantContextChild, GrantContextRow("starting", "new-child.jsonl", "child", "parent-b")>>,
+  <<GrantContextRoot, GrantContextRoot>>}
+GrantContextFull(row) == row
+GrantContextLocal(row) ==
+  IF row.lifecycle="missing" THEN IF grantContext.fault="missing" THEN GrantContextRoot ELSE row
+  ELSE IF grantContext.fault="deleted" /\ row.lifecycle="deleted" THEN GrantContextMissing
+  ELSE [lifecycle |-> row.lifecycle,
+        sessionFile |-> IF grantContext.fault="file" THEN "constant.jsonl" ELSE row.sessionFile,
+        kind |-> IF grantContext.fault="kind" THEN "root" ELSE row.kind,
+        parentSessionId |-> IF grantContext.fault="parent" THEN "null" ELSE row.parentSessionId]
+GrantContextDecision(row) ==
+  IF row.lifecycle="missing" THEN "absent"
+  ELSE IF row.lifecycle="deleted" \/ row.sessionFile \in {"null",""} THEN "reject"
+  ELSE IF row.kind="root" THEN <<"discover",row.sessionFile>>
+  ELSE IF row.parentSessionId \in {"null",""} THEN "orphan"
+  ELSE <<"parent",row.parentSessionId,row.sessionFile>>
+GrantContextInit(fault) == /\ s="inactive" /\ projection="inactive"
+  /\ \E pair \in GrantContextCases, depth \in 0..2, opaque \in 0..2:
+     grantContext=[fault |-> fault, pair |-> pair, depth |-> depth, opaque |-> opaque,
+       step |-> 0, reads |-> 0, localSql |-> 0, familySql |-> 0, ancestorSql |-> 0,
+       lineageSql |-> 0, jsonWork |-> 0, bad |-> FALSE, stale |-> FALSE]
+GrantContextRead == /\ grantContext.step<2
+  /\ LET row == grantContext.pair[grantContext.step+1]
+         full == GrantContextFull(row)
+         sampled == IF grantContext.fault="cache" THEN grantContext.pair[1] ELSE row
+         local == GrantContextLocal(sampled)
+         extra == grantContext.fault="full" /\ row.lifecycle#"missing"
+     IN grantContext'=[grantContext EXCEPT !.step=@+1, !.reads=@+1, !.localSql=@+1,
+          !.familySql=@+IF extra THEN 1 ELSE 0,
+          !.ancestorSql=@+IF extra THEN grantContext.depth ELSE 0,
+          !.lineageSql=@+IF extra THEN grantContext.depth+1 ELSE 0,
+          !.jsonWork=@+IF extra THEN grantContext.opaque+1 ELSE 0,
+          !.bad=@ \/ full#local \/ GrantContextDecision(full)#GrantContextDecision(local),
+          !.stale=@ \/ (sampled#row)]
+  /\ UNCHANGED <<s,projection>>
+GrantContextSpec == GrantContextInit("none") /\ [][GrantContextRead]_vars
+GrantContextCacheSpec == GrantContextInit("cache") /\ [][GrantContextRead]_vars
+GrantContextMissingSpec == GrantContextInit("missing") /\ [][GrantContextRead]_vars
+GrantContextDeletedSpec == GrantContextInit("deleted") /\ [][GrantContextRead]_vars
+GrantContextFileSpec == GrantContextInit("file") /\ [][GrantContextRead]_vars
+GrantContextKindSpec == GrantContextInit("kind") /\ [][GrantContextRead]_vars
+GrantContextParentSpec == GrantContextInit("parent") /\ [][GrantContextRead]_vars
+GrantContextFullSpec == GrantContextInit("full") /\ [][GrantContextRead]_vars
+GrantContextEquivalent == ~grantContext.bad
+GrantContextFresh == ~grantContext.stale
+GrantContextSampling == grantContext.reads=grantContext.step
+GrantContextWork == grantContext.localSql=grantContext.reads /\ grantContext.familySql=0
+  /\ grantContext.ancestorSql=0 /\ grantContext.lineageSql=0 /\ grantContext.jsonWork=0
+
 =============================================================================

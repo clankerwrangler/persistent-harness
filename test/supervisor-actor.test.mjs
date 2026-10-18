@@ -309,10 +309,8 @@ test("family messages reach a working actor while a skill refresh is pending", a
   await supervisor.start(); t.after(async () => { await supervisor.stop(); await rm(root, { recursive: true, force: true }); });
   const browser = new HarnessClient({ socketPath, heartbeatMs: 0 });
   await browser.start({ registrationType: "register_client", clientInstanceId: "message-skill-refresh" }); t.after(() => browser.stop());
-  const senderAdmission = (await browser.request("create_root", { cwd: root, repositoryRoot: null, name: "sender",
-    provider: null, model: null, thinkingLevel: null })).admission;
-  const targetAdmission = (await browser.request("create_root", { cwd: root, repositoryRoot: null, name: "target",
-    provider: null, model: null, thinkingLevel: null })).admission;
+  const senderAdmission = (await admitFauxSkillRoot(supervisor, browser, root, "sender")).admission;
+  const targetAdmission = (await admitFauxSkillRoot(supervisor, browser, root, "target")).admission;
   const senderActor = await eventually(() => actors.get(senderAdmission.sessionId));
   const targetActor = await eventually(() => actors.get(targetAdmission.sessionId));
   await eventually(() => senderActor.isRunning && targetActor.isRunning);
@@ -906,6 +904,15 @@ test("selected-session inference accepts busy changes, persists latest intent an
   assert.equal(supervisor.store.getSession(id).launch.model.resolved.id, "alpha", "old generation cannot change active state");
 });
 
+async function admitFauxSkillRoot(supervisor, client, root, name) {
+  const sessionId = crypto.randomUUID(), sessionFile = path.join(root, `${sessionId}.jsonl`);
+  await writeFile(sessionFile, `${JSON.stringify({ type: "session", version: 3, id: sessionId, timestamp: new Date().toISOString(), cwd: root })}\n`);
+  const admitted = supervisor.store.createRoot({ sessionId, sessionFile, cwd: root, repositoryRoot: null, name,
+    actorToken: crypto.randomUUID(), launch: { model: null, thinking: null, capabilities: [], skillCatalog: [] } });
+  await client.request("revive_session", { sessionId });
+  return { admission: admitted.session };
+}
+
 async function writeGuidanceSkill(root, name, description) {
   const directory = path.join(root, name);
   await mkdir(directory, { recursive: true });
@@ -943,7 +950,7 @@ test("existing root actors reconcile additions, hashes, removals, and invalid pa
   const client = new HarnessClient({ socketPath, heartbeatMs: 0 });
   await client.start({ registrationType: "register_client", clientInstanceId: "live-skills" });
   t.after(() => client.stop());
-  const created = await client.request("create_root", { cwd: root, repositoryRoot: null, name: "Skills", provider: null, model: null, thinkingLevel: null });
+  const created = await admitFauxSkillRoot(supervisor, client, root, "Skills");
   const id = created.admission.sessionId;
   await eventually(() => actors.get(id)?.[0]?.actor.isRunning);
   assert.deepEqual(supervisor.store.getSessionSkillGrant(id).skills.map((skill) => skill.id), ["alpha"]);

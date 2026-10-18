@@ -273,3 +273,50 @@ test("ordinary capacity and inactivity passivation still allow fresh activation"
   await f.client.request("get_actor_state", { sessionId: first.sessionId });
   assert(f.actors.get(first.sessionId).isRunning); assert.deepEqual(f.errors, []);
 });
+
+
+test("cold reconciliation promotes a verified grant before capacity and retains it at launch", { timeout: 10_000 }, async t => {
+  const slotEntered = Promise.withResolvers(), releaseSlot = Promise.withResolvers();
+  t.after(() => releaseSlot.resolve());
+  const f = await deletionFixture(t);
+  await fs.mkdir(`${f.dir}/skills/alpha`);
+  await writeFile(`${f.dir}/skills/alpha/SKILL.md`, "---\nname: alpha\ndescription: Valid retained guidance.\n---\nAlpha.\n");
+  f.supervisor.maxConcurrentStarts = 1;
+  const blocker = await f.admit("Slot owner", null, { start: false });
+  f.startGate = async actor => { if (actor.session.sessionId === blocker.sessionId) { slotEntered.resolve(); await releaseSlot.promise; } };
+  const occupying = f.client.request("get_actor_state", { sessionId: blocker.sessionId });
+  await slotEntered.promise;
+  const target = await f.admit("Early promotion", null, { start: false, seedGrant: false });
+  assert.equal(f.supervisor.store.getSessionSkillGrant(target.sessionId), undefined);
+  const sidecars = sessionSidecarPaths(target.sessionFile), promoted = Promise.withResolvers(), rename = fs.rename;
+  t.after(() => { fs.rename = rename; syncBuiltinESMExports(); });
+  fs.rename = async (from, to) => { const result = await rename(from, to); if (to === sidecars.capabilitiesPath) promoted.resolve(); return result; };
+  syncBuiltinESMExports();
+  const ready = f.client.request("get_actor_entries", { sessionId: target.sessionId });
+  await promoted.promise; await f.client.request("heartbeat");
+  const previous = f.supervisor.store.getSessionSkillGrant(target.sessionId);
+  assert.deepEqual(previous.skills.map(skill => skill.id), ["alpha"]);
+  assert.equal(f.actors.has(target.sessionId), false, "capacity still separates the two observations");
+  await fs.mkdir(`${f.dir}/skills/invalid`); await writeFile(`${f.dir}/skills/invalid/SKILL.md`, "# malformed package\n");
+  releaseSlot.resolve(); await Promise.all([occupying, ready]);
+  assert(f.actors.get(target.sessionId).isRunning);
+  assert.deepEqual(f.supervisor.store.getSessionSkillGrant(target.sessionId), previous);
+  assert.deepEqual(JSON.parse(await readFile(sidecars.skillGrantPath, "utf8")).skills, previous.skills);
+  assert.deepEqual(JSON.parse(await readFile(sidecars.capabilitiesPath, "utf8")), { version: 1, capabilities: [] });
+  assert((await f.client.request("get_status")).diagnostics.some(item => item.code === "skill_catalog_not_ready"));
+  assert.deepEqual(f.errors, []);
+});
+
+test("cold reconciliation fails before revival intent and a later repaired read remains available", { timeout: 10_000 }, async t => {
+  const f = await deletionFixture(t), session = await f.admit("Pre-intent failure", null, { start: false, seedGrant: false });
+  f.supervisor.store.markActorLifecycle(session.sessionId, session.actorGeneration, "stopped");
+  await fs.mkdir(`${f.dir}/skills/invalid`); await writeFile(`${f.dir}/skills/invalid/SKILL.md`, "# malformed package\n");
+  await assert.rejects(f.client.request("get_actor_state", { sessionId: session.sessionId }), /skill catalog reconciliation failed/);
+  const failed = f.supervisor.store.getSession(session.sessionId);
+  assert.equal(failed.lifecycle, "stopped"); assert.equal(failed.actorGeneration, session.actorGeneration);
+  assert.equal(f.actors.has(session.sessionId), false);
+  await fs.rm(`${f.dir}/skills/invalid`, { recursive: true });
+  await f.client.request("get_actor_state", { sessionId: session.sessionId });
+  assert.equal(f.supervisor.store.getSession(session.sessionId).actorGeneration, session.actorGeneration + 1);
+  assert(f.actors.get(session.sessionId).isRunning); assert.deepEqual(f.errors, []);
+});
