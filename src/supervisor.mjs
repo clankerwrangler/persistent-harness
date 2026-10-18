@@ -1315,7 +1315,7 @@ export class HarnessSupervisor {
   #broadcastNavigator(reason) {
     if (this.#clientConnections.size === 0) return;
     const frame = event("navigator_changed", { reason, ...this.#navigator() });
-    for (const state of this.#clientConnections) this.#write(state, frame);
+    this.#broadcast(this.#clientConnections, frame);
   }
 
 
@@ -1901,7 +1901,8 @@ export class HarnessSupervisor {
   #publishInputOutcome(sessionId, input) {
     this.#actors.get(sessionId)?.liveConversation.remove(input.inputId);
     const outcome = { inputId: input.inputId, clientMessageId: input.clientMessageId, outcome: input.outcome, handledAt: input.handledAt };
-    for (const client of this.#clientConnections) if (client.subscriptions.has(sessionId)) this.#write(client, event("input_outcome", { sessionId, ...outcome }));
+    const recipients = [...this.#clientConnections].filter(client => client.subscriptions.has(sessionId));
+    this.#broadcast(recipients, event("input_outcome", { sessionId, ...outcome }));
   }
 
   #publishInputState(sessionId, message) {
@@ -1915,10 +1916,9 @@ export class HarnessSupervisor {
       actor.eventRingBytes += retainedBytes;
       while (actor.eventRing.length > 128 || actor.eventRingBytes > 256 * 1024) actor.eventRingBytes -= actor.eventRing.shift().retainedBytes;
     }
-    for (const client of this.#clientConnections) if (client.subscriptions.has(sessionId)) {
-      this.#write(client, actor ? event("actor_event", { sessionId, actorGeneration: actor.generation, seq: actor.eventSeq, event: publicEvent })
-        : event("input_state", { sessionId, message }));
-    }
+    const recipients = [...this.#clientConnections].filter(client => client.subscriptions.has(sessionId));
+    this.#broadcast(recipients, actor ? event("actor_event", { sessionId, actorGeneration: actor.generation, seq: actor.eventSeq, event: publicEvent })
+      : event("input_state", { sessionId, message }));
   }
 
   #queueActorInputWake(sessionId, automaticRecord = null) {
@@ -2168,7 +2168,7 @@ export class HarnessSupervisor {
       const subscribers = [...this.#clientConnections].filter((client) => client.subscriptions.has(sessionId));
       const dialog = visibleRetained.type === "extension_ui_request" && ["select", "confirm", "input", "editor"].includes(visibleRetained.method);
       const recipients = dialog && !this.#trackExtensionUiRequest(sessionId, record, visibleRetained) ? [] : dialog ? subscribers.slice(0, 1) : subscribers;
-      for (const client of recipients) this.#write(client, event("actor_event", { sessionId, actorGeneration: record.generation, seq: record.eventSeq, event: visibleRetained }));
+      this.#broadcast(recipients, event("actor_event", { sessionId, actorGeneration: record.generation, seq: record.eventSeq, event: visibleRetained }));
     }
     if (["agent_start", "agent_settled"].includes(frame?.type)) this.#broadcastNavigator(frame.type);
   }
@@ -2613,10 +2613,23 @@ export class HarnessSupervisor {
       return encodeFrame(fallback, { maxFrameBytes: this.maxFrameBytes });
     }
   }
+  #broadcast(recipients, frame) {
+    let attempted = false, encoded, encodingError;
+    // Resolve inside #write's eligibility check; queues retain only the immutable bytes.
+    const shared = () => {
+      if (!attempted) {
+        attempted = true;
+        try { encoded = this.#encode(frame); } catch (error) { encodingError = error; }
+      }
+      if (encoded === undefined) throw encodingError;
+      return encoded;
+    };
+    for (const state of recipients) this.#write(state, shared);
+  }
   #write(state, frame, callback) {
     if (state.closing || state.cleaned || state.socket.destroyed || state.socket.writableEnded) return false;
     let encoded;
-    try { encoded = Buffer.isBuffer(frame) ? frame : this.#encode(frame); }
+    try { encoded = typeof frame === "function" ? frame() : Buffer.isBuffer(frame) ? frame : this.#encode(frame); }
     catch { state.socket.destroy(); return false; }
     const limit = socketOutputBufferLimit(this.maxFrameBytes);
     if (state.outputBytes + state.socket.writableLength + encoded.length > limit) {
