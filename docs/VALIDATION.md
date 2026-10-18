@@ -84,6 +84,18 @@ The broader private integration checkpoint also exercised a browser client. Brow
 
 ## Models
 
+`OwnIdleRetirement` separates the worker's quiet age from descendant display
+activity. It checks safe and available inactivity/capacity retirement, stable
+own age, generation/interval expiry fencing, independent children, input/family
+wake availability, and optional preparation. Its seven negative configurations
+must fail their intended invariants. Isolated supervisor fixtures reproduce the
+old retained delegating parent, hold preparation during retirement, keep children
+working, deliver input and family wakes before and after retirement, and hold
+own input, wake, tool, compaction, and serialized control work through retirement
+attempts. The retirement callback uses its existing mutation owner; that owner
+must not reject itself as unrelated pending work. Family notification tests keep
+settlement dependent on the child after the parent retires.
+
 `IdleEntryIndexHost` checks deferred versus actual idle dispatch, readiness-wake
 cancellation, token/generation ownership, late sealed-prefix publication, and
 nonblocking admission/close. It separately retains normal RPC shutdown drain;

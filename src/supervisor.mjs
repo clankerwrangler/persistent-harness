@@ -681,6 +681,7 @@ export class HarnessSupervisor {
         const message = this.store.acknowledgeMessage(params.messageId, state.sessionId);
         state.deliveryInFlight.delete(message.messageId);
         await this.#publishFamilyAdmission(state.sessionId, message.messageId).catch(error => this.logger.error?.(error));
+        this.#syncPassivationTimer(state.sessionId);
         return { message };
       } };
     }
@@ -1038,7 +1039,11 @@ export class HarnessSupervisor {
     });
     const tail = current.catch(() => {});
     this.#sessionMutationTails.set(sessionId, tail);
-    void tail.finally(() => { if (this.#sessionMutationTails.get(sessionId) === tail) this.#sessionMutationTails.delete(sessionId); });
+    void tail.finally(() => {
+      if (this.#sessionMutationTails.get(sessionId) !== tail) return;
+      this.#sessionMutationTails.delete(sessionId);
+      this.#syncPassivationTimer(sessionId);
+    });
     return current;
   }
 
@@ -1716,7 +1721,7 @@ export class HarnessSupervisor {
       () => this.#ensureActorReady(sessionId, check),
     );
     const operation = this.#ensureActorReadyOnce(sessionId, check)
-      .finally(() => { if (this.#actorReadyPromises.get(sessionId) === operation) this.#actorReadyPromises.delete(sessionId); });
+      .finally(() => { if (this.#actorReadyPromises.get(sessionId) === operation) this.#actorReadyPromises.delete(sessionId); this.#syncPassivationTimer(sessionId); });
     this.#actorReadyPromises.set(sessionId, operation);
     return operation;
   }
@@ -1760,7 +1765,22 @@ export class HarnessSupervisor {
       while (this.#startQueue.length && this.#activeStarts < this.maxConcurrentStarts && !this.#stoppingPromise) {
         const nextId = this.#startQueue[0];
         if (this.store.isSessionDeleting(nextId)) { this.#startQueue.shift(); continue; }
-        if (new Set([...this.#actors.keys(), ...this.#startingActors]).size >= this.maxResidentActors) { const victim = this.store.findIdleResidentActor(nextId); if (!victim) break; await this.#stopActor(victim.sessionId, "passivated"); continue; }
+        if (new Set([...this.#actors.keys(), ...this.#startingActors]).size >= this.maxResidentActors) {
+          const excludeIds = [];
+          let victim;
+          // SQL first excludes active and durably pending workers. Check only
+          // remaining candidates against their live ownership, in own-idle order.
+          while ((victim = this.store.findIdleResidentActor(nextId, { excludeIds }))) {
+            if (this.#isActorOwnIdle(victim.sessionId, this.#actors.get(victim.sessionId), false, victim)) break;
+            excludeIds.push(victim.sessionId);
+          }
+          if (!victim) break;
+          const record = this.#actors.get(victim.sessionId);
+          await this.#withSessionMutation(victim.sessionId, async () => {
+            if (this.#isActorOwnIdle(victim.sessionId, record, true)) await this.#stopActor(victim.sessionId, "passivated");
+          });
+          continue;
+        }
         this.#startQueue.shift(); const session = this.store.getSession(nextId); if (!session || session.lifecycle !== "starting") continue;
         this.#startingActors.add(nextId); this.#activeStarts += 1;
         const launchPromise = this.#launchActor(nextId).catch((error) => {
@@ -1772,7 +1792,7 @@ export class HarnessSupervisor {
             this.#broadcastNavigator("actor_error");
           }
           this.logger.error?.(`actor ${nextId} launch failed: ${message}`);
-        }).finally(() => { this.#launchPromises.delete(nextId); this.#startingActors.delete(nextId); this.#activeStarts -= 1; setImmediate(() => this.#drainActorStarts()); });
+        }).finally(() => { this.#launchPromises.delete(nextId); this.#startingActors.delete(nextId); this.#activeStarts -= 1; this.#syncPassivationTimer(nextId); setImmediate(() => this.#drainActorStarts()); });
         this.#launchPromises.set(nextId, launchPromise);
       }
     } finally { this.#drainingStarts = false; }
@@ -1854,6 +1874,7 @@ export class HarnessSupervisor {
     // canonical row from this read, never a reconstruction of submitted text.
     const message = transcript.messages?.find((row) => row.id === proof.entryId && row.inputId === input.inputId);
     if (changed && message) this.#publishInputState(sessionId, { ...message, id: input.inputId, entryId: proof.entryId });
+    this.#syncPassivationTimer(sessionId);
     return changed;
   }
 
@@ -1950,7 +1971,7 @@ export class HarnessSupervisor {
         // land between the loop ending and removal of its owner.
         if (this.#actorInputWakes.get(sessionId) === wake) {
           this.#actorInputWakes.delete(sessionId);
-          this.#scheduleEntryIndexPreparation(sessionId);
+          this.#syncPassivationTimer(sessionId);
         }
       }
     }).catch((error) => this.logger.error?.(`actor input wake cleanup failed for ${sessionId}: ${error.message}`));
@@ -2119,7 +2140,9 @@ export class HarnessSupervisor {
       if (frame?.type === "tool_execution_end") record.notificationWork.delete(`tool:${frame.toolCallId}`);
       if (frame?.type === "compaction_start") record.notificationWork.add("compaction");
       if (frame?.type === "compaction_end") record.notificationWork.delete("compaction");
-      if (["tool_execution_start", "tool_execution_end", "compaction_start", "compaction_end"].includes(frame?.type)) this.#observeNotifications(sessionId);
+      if (["tool_execution_start", "tool_execution_end", "compaction_start", "compaction_end"].includes(frame?.type)) {
+        this.#observeNotifications(sessionId); this.#syncPassivationTimer(sessionId);
+      }
       if (frame?.type === "agent_start") this.store.setActorActivity(sessionId, record.generation, true);
       else if (frame?.type === "agent_settled") {
         const failure = this.store.submittedChildTask?.(sessionId) ? assistantTurnFailureFromEvents(record) : null;
@@ -2199,9 +2222,7 @@ export class HarnessSupervisor {
     setImmediate(() => {
       if (this.#actors.get(sessionId) !== record || record.entryIndexPreparation !== current) return;
       const session = this.#stoppingPromise ? null : this.store.getSession(sessionId);
-      if (!session || session.lifecycle !== "resident" || session.activity !== "idle" || session.actorGeneration !== current.generation
-        || record.expectedLifecycle || !record.worker.isRunning || this.store.isSessionDeleting(sessionId)
-        || this.#actorInputWakes.has(sessionId) || this.store.hasPendingSessionWork(sessionId)) {
+      if (!session || session.actorGeneration !== current.generation || !this.#isActorOwnIdle(sessionId, record, false, session)) {
         record.entryIndexPreparation = undefined;
         return;
       }
@@ -2218,20 +2239,47 @@ export class HarnessSupervisor {
       });
     });
   }
-  #syncPassivationTimers() {
-    for (const [sessionId, record] of this.#actors) {
-      const session = this.store.getSession(sessionId);
-      if (session?.lifecycle === "resident" && session.activity === "idle") {
-        if (!this.#passivationTimers.has(sessionId)) this.#schedulePassivation(sessionId);
-      } else {
-        this.#clearPassivation(sessionId);
-        this.#cancelEntryIndexPreparation(sessionId, record);
-        record.entryIndexIdleAttempted = false;
-      }
+  #isActorOwnIdle(sessionId, record = this.#actors.get(sessionId), mutationOwned = false, session = this.store.getSession(sessionId)) {
+    return Boolean(record && this.#actors.get(sessionId) === record && record.worker.isRunning && !record.expectedLifecycle
+      && session?.lifecycle === "resident" && session.actorGeneration === record.generation && session.quietSince != null
+      && !record.notificationWork.size && !this.#startingActors.has(sessionId) && !this.#actorReadyPromises.has(sessionId)
+      && !this.#actorInputWakes.has(sessionId) && (mutationOwned || !this.#sessionMutationTails.has(sessionId))
+      && !this.store.isSessionDeleting(sessionId) && !this.store.hasPendingSessionWork(sessionId));
+  }
+  #syncPassivationTimer(sessionId) {
+    if (!this.#store || this.#stoppingPromise) return;
+    const record = this.#actors.get(sessionId), session = this.store.getSession(sessionId);
+    if (this.#isActorOwnIdle(sessionId, record, false, session)) {
+      // A wake can cancel a deferred attempt without consuming this idle interval.
+      this.#scheduleEntryIndexPreparation(sessionId);
+      if (!this.#passivationTimers.has(sessionId)) this.#schedulePassivation(sessionId, record, session);
+      if (this.#startQueue.length) setImmediate(() => this.#drainActorStarts());
+    } else {
+      this.#clearPassivation(sessionId);
+      this.#cancelEntryIndexPreparation(sessionId, record);
+      if (record && session?.activity === "working") record.entryIndexIdleAttempted = false;
     }
   }
+  #syncPassivationTimers() {
+    for (const sessionId of this.#actors.keys()) this.#syncPassivationTimer(sessionId);
+  }
   #clearPassivation(sessionId) { const timer = this.#passivationTimers.get(sessionId); if (timer) clearTimeout(timer); this.#passivationTimers.delete(sessionId); }
-  #schedulePassivation(sessionId) { this.#clearPassivation(sessionId); this.#scheduleEntryIndexPreparation(sessionId); if (this.actorInactivityMs === 0) return; const timer = setTimeout(() => { void this.#withSessionMutation(sessionId, async () => { const session = this.store.getSession(sessionId); if (session?.lifecycle === "resident" && session.activity === "idle") await this.#stopActor(sessionId, "passivated"); }).catch((error) => this.logger.error?.(error)); }, this.actorInactivityMs); timer.unref(); this.#passivationTimers.set(sessionId, timer); }
+  #schedulePassivation(sessionId, record, session) {
+    this.#clearPassivation(sessionId);
+    if (this.actorInactivityMs === 0) return;
+    const delay = Math.max(0, session.quietSince + this.actorInactivityMs - Date.now());
+    const timer = setTimeout(() => {
+      if (this.#passivationTimers.get(sessionId) !== timer) return;
+      this.#passivationTimers.delete(sessionId);
+      void this.#withSessionMutation(sessionId, async () => {
+        const current = this.store.getSession(sessionId);
+        if (current?.quietSince === session.quietSince && this.#isActorOwnIdle(sessionId, record, true, current)) {
+          await this.#stopActor(sessionId, "passivated");
+        }
+      }).catch(error => this.logger.error?.(error));
+    }, delay);
+    timer.unref(); this.#passivationTimers.set(sessionId, timer);
+  }
 
   #consumeMessageToken(senderId, now = Date.now()) { const previous = this.#messageBuckets.get(senderId) ?? { tokens: this.messageRateCapacity, updatedAt: now }; const tokens = Math.min(this.messageRateCapacity, previous.tokens + Math.max(0, now - previous.updatedAt) / 1000 * this.messageRateRefillPerSecond); if (tokens < 1) { this.#messageBuckets.set(senderId, { tokens, updatedAt: now }); throw new Error("agent message rate limit exceeded"); } this.#messageBuckets.set(senderId, { tokens: tokens - 1, updatedAt: now }); }
   #actorConnectionKey(sessionId, generation) { return `${sessionId}\0${generation}`; }
