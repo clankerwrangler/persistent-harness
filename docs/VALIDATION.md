@@ -360,10 +360,20 @@ subtraction including separators, the singleton budget exception, one full-array
 measurement, and serialization-free empty/single selections. Two requests see
 changed aliased values without using stored event sizes. Its `Separator`,
 `DropLast`, `Stale`, `Rescan`, and `Eager` controls must fail their intended
-invariants. Wrapper lengths abstract JSON-plain serialization; the bounded model
-uses three retained items. `supervisor-actor.test.mjs` checks the public reconnect
-caller with synthetic workers, 128-item selection, escaped/multibyte text, both
-ring append paths, and repeat requests without ring mutation.
+invariants. Wrapper lengths abstract JSON-plain serialization; the replay
+configuration uses three retained items. `supervisor-actor.test.mjs` checks the
+public reconnect caller with synthetic workers, 128-item selection,
+escaped/multibyte text, both ring append paths, and repeat requests without ring
+mutation.
+
+The same model's `Entries.cfg` policy separately checks quarter-prefix removal,
+empty output, truncation, exact prefix-array byte subtraction, and one initial
+measurement per nonempty request. It uses five selected items, six source items,
+and changed aliases on a second request. Its `EntriesSeparator`, `EntriesRounding`,
+`EntriesKeepOne`, `EntriesRescan`, and `EntriesEager` controls must fail their
+intended invariants. The public actor-entries regression checks the last-256 cap,
+48 KiB budget, quarter rounding, multiple trims, oversized-singleton removal,
+leafId/defaults, cursor forwarding, field order, and unchanged source responses.
 
 `EventLogTail` compares a reverse nonempty-line scan with the complete forward
 log oracle, including malformed-line quota and exact truncation detection. It

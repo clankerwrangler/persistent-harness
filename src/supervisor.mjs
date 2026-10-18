@@ -2607,7 +2607,17 @@ export class HarnessSupervisor {
     }
     return selected;
   }
-  #boundedEntries(data) { const entries = Array.isArray(data?.entries) ? data.entries : []; let selected = entries.slice(-256); while (selected.length && Buffer.byteLength(JSON.stringify(selected)) > 48 * 1024) selected = selected.slice(Math.ceil(selected.length / 4)); return { entries: selected, leafId: data?.leafId ?? null, truncated: selected.length < entries.length }; }
+  #boundedEntries(data) {
+    const entries = Array.isArray(data?.entries) ? data.entries : []; let selected = entries.slice(-256);
+    let bytes = selected.length ? Buffer.byteLength(JSON.stringify(selected)) : 0;
+    while (selected.length && bytes > 48 * 1024) {
+      const drop = Math.ceil(selected.length / 4);
+      // JSON-plain worker rows make prefix-array bytes minus one the exact decrease.
+      if (drop < selected.length) bytes -= Buffer.byteLength(JSON.stringify(selected.slice(0, drop))) - 1;
+      selected = selected.slice(drop);
+    }
+    return { entries: selected, leafId: data?.leafId ?? null, truncated: selected.length < entries.length };
+  }
   #encode(frame) {
     try { return encodeFrame(frame, { maxFrameBytes: this.maxFrameBytes }); }
     catch (error) {
