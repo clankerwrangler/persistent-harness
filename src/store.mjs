@@ -149,6 +149,18 @@ function mapActorInputReceipt(row) {
       acceptedAt: new Date(acceptedAt).toISOString(), deliveredAt: deliveredAt === null ? null : new Date(deliveredAt).toISOString() } };
 }
 
+function mapActorInput(receipt, pending, { includeDigest = false } = {}) {
+  const receiptValue = mapActorInputReceipt(receipt);
+  if (pending?.wake_error_generation != null && receiptValue.delivery.state === "accepted") receiptValue.delivery.retryableError = {
+    code: "actor_wake_failed", generation: Number(pending.wake_error_generation),
+    message: "Message saved. The agent could not receive it. Retry sending." };
+  return { ...receiptValue, ...(includeDigest ? { digest: receipt.digest } : {}), state: pending?.state ?? "completed",
+    transportAcceptedAt: pending?.accepted_at ?? null,
+    acceptedGeneration: pending?.accepted_generation == null ? null : Number(pending.accepted_generation),
+    ...(pending ? { message: pending.body, images: parseJson(pending.images_json, []), behavior: pending.behavior,
+      ...(pending.location_json == null ? {} : { location: normalizeInputLocation(JSON.parse(pending.location_json)) }) } : {}) };
+}
+
 function mapTask(row) {
   if (!row) return undefined;
   return {
@@ -1381,15 +1393,7 @@ export class HarnessStore {
     const receipt = this.#db.prepare("SELECT * FROM actor_input_receipts WHERE id = ? AND session_id = ?").get(inputId, sessionId);
     if (!receipt) return undefined;
     const pending = this.#db.prepare("SELECT * FROM actor_inputs WHERE id = ? AND session_id = ?").get(inputId, sessionId);
-    const receiptValue = mapActorInputReceipt(receipt);
-    if (pending?.wake_error_generation != null && receiptValue.delivery.state === "accepted") receiptValue.delivery.retryableError = {
-      code: "actor_wake_failed", generation: Number(pending.wake_error_generation),
-      message: "Message saved. The agent could not receive it. Retry sending." };
-    return { ...receiptValue, ...(includeDigest ? { digest: receipt.digest } : {}), state: pending?.state ?? "completed",
-      transportAcceptedAt: pending?.accepted_at ?? null,
-      acceptedGeneration: pending?.accepted_generation == null ? null : Number(pending.accepted_generation),
-      ...(pending ? { message: pending.body, images: parseJson(pending.images_json, []), behavior: pending.behavior,
-        ...(pending.location_json == null ? {} : { location: normalizeInputLocation(JSON.parse(pending.location_json)) }) } : {}) };
+    return mapActorInput(receipt, pending, { includeDigest });
   }
 
   listActorInputReceipts(sessionId, { inputIds = null, limit = 1000 } = {}) {
@@ -1403,17 +1407,36 @@ export class HarnessStore {
         .all(sessionId, JSON.stringify(inputIds), limit)).map(mapActorInputReceipt);
   }
 
-  listPendingActorInputs(sessionId) {
-    return this.#db.prepare(`SELECT i.id FROM actor_inputs i JOIN actor_input_receipts r ON r.id = i.id
-      WHERE i.session_id = ? ORDER BY r.sequence`).all(sessionId).map((row) => this.getActorInput(row.id, sessionId));
+  hasPendingActorInputs(sessionId) {
+    return Boolean(this.#db.prepare(`SELECT 1 FROM actor_inputs i JOIN actor_input_receipts r
+      ON r.id = i.id AND r.session_id = i.session_id WHERE i.session_id = ? LIMIT 1`).get(sessionId));
   }
+
+  #pendingActorInputs(sessionId, inputIds = null) {
+    // Keep additive fields optional for read-only legacy schemas. The receipt,
+    // not the pending payload, owns acceptance time and ordering.
+    const rows = this.#db.prepare(`SELECT i.*, r.*, r.created_at AS receipt_created_at
+      FROM actor_inputs i JOIN actor_input_receipts r ON r.id = i.id AND r.session_id = i.session_id
+      WHERE i.session_id = ? ${inputIds === null ? "" : "AND i.id IN (SELECT value FROM json_each(?))"}
+      ORDER BY r.sequence`).iterate(...(inputIds === null ? [sessionId] : [sessionId, JSON.stringify(inputIds)]));
+    return Array.from(rows, (row) => mapActorInput({ ...row, created_at: row.receipt_created_at }, row));
+  }
+
+  listPendingActorInputs(sessionId) { return this.#pendingActorInputs(sessionId); }
 
   setActorInputWakeError(sessionId, generation = null) {
     if (generation !== null && (!Number.isSafeInteger(generation) || generation < 1)) throw new Error("invalid actor generation");
-    const inputs = this.listPendingActorInputs(sessionId);
-    this.#db.prepare("UPDATE actor_inputs SET wake_error_generation = ? WHERE session_id = ?").run(generation, sessionId);
-    return inputs.filter(input => generation !== null || input.delivery.retryableError)
-      .map(input => this.getActorInput(input.inputId, sessionId));
+    const update = `UPDATE actor_inputs SET wake_error_generation = ?
+      WHERE session_id = ? AND wake_error_generation IS NOT ?`;
+    if (generation !== null) {
+      this.#db.prepare(update).run(generation, sessionId, generation);
+      // Repeated failure publication still returns the complete pending queue.
+      return this.listPendingActorInputs(sessionId);
+    }
+    const changed = this.#db.prepare(`${update} RETURNING id`).all(generation, sessionId, generation);
+    if (changed.length === 0) return [];
+    return this.#pendingActorInputs(sessionId, changed.map((row) => row.id))
+      .filter((input) => input.delivery.state === "accepted");
   }
 
   markActorInputAccepted(inputId, sessionId, generation, now = Date.now()) {

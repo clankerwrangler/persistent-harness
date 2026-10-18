@@ -1918,7 +1918,7 @@ export class HarnessSupervisor {
           // Settled readiness belongs to its resident actor, not a later revival.
           // Recheck before startup after skill reconciliation; a fresh durable
           // input/task (or a coalesced explicit wake) supplies its own authority.
-          if (this.store.listPendingActorInputs(sessionId).length || this.store.nextQueuedChildTask(sessionId)
+          if (this.store.hasPendingActorInputs(sessionId) || this.store.nextQueuedChildTask(sessionId)
             || this.store.submittedChildTask(sessionId)) wake.automaticRecord = null;
           else wake.cancelled = true;
         }
@@ -1960,7 +1960,7 @@ export class HarnessSupervisor {
     record.inputDeliveryTail ??= Promise.resolve();
     const operation = record.inputDeliveryTail.then(async () => {
       if (this.#actors.get(sessionId) !== record) return;
-      if (this.store.listPendingActorInputs(sessionId).length === 0) return;
+      if (!this.store.hasPendingActorInputs(sessionId)) return;
       const session = this.store.getSession(sessionId);
       if (!session?.sessionFile) throw new Error("session does not have a canonical Pi transcript");
       let transcript = await this.transcriptReader.read({ sessionFile: session.sessionFile, sessionId });
