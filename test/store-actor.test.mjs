@@ -366,6 +366,23 @@ test("searchable session sources follow family reach and require explicit delete
   store.createChild("root-a", { sessionId: "child-a", sessionFile: "/sessions/child-a.jsonl", actorToken: "c",
     policy: { ...launch("child-a", "task"), cwd: "/workspace", repositoryRoot: null, depth: 1 }, now: 3 });
 
+  const assertHistoryProjection = (callerId, options = {}) => {
+    const expected = store.listSearchableSessions(callerId, options).map((session) => {
+      const copy = structuredClone(session);
+      if (copy.launch) { delete copy.launch.fastMode; delete copy.launch.fastModeRootSessionId; }
+      return copy;
+    });
+    const originalFast = store.getSessionFastModePreference;
+    let fastReads = 0, projected;
+    store.getSessionFastModePreference = function (...args) { fastReads += 1; return originalFast.apply(this, args); };
+    try { projected = store.listSearchableSessions(callerId, { ...options, includeFastMode: false }); }
+    finally { store.getSessionFastModePreference = originalFast; }
+    assert.equal(fastReads, 0, "history metadata does not resolve unused Fast preferences");
+    assert.deepEqual(projected, expected, "only the unused derived Fast fields may be omitted");
+  };
+  assertHistoryProjection("root-a");
+  assertHistoryProjection("child-a", { includeSelf: true });
+
   assert.deepEqual(store.listSearchableSessions("root-a").map((session) => session.sessionId), ["child-a", "root-b"]);
   assert.deepEqual(store.listSearchableSessions("root-a", { includeSelf: true }).map((session) => session.sessionId),
     ["child-a", "root-b", "root-a"]);
@@ -373,6 +390,7 @@ test("searchable session sources follow family reach and require explicit delete
     "same workspace family must see sibling/--workspace-- roots, not only the direct parent");
   store.deleteChild("root-a", "child-a", 4); store.deleteSession("root-b", 5);
   assert.deepEqual(store.listSearchableSessions("root-a"), []);
+  assertHistoryProjection("root-a", { includeDeleted: true });
   const deletedBeforeRepeat = store.listSearchableSessions("root-a", { includeDeleted: true });
   assert.deepEqual(deletedBeforeRepeat.map((session) => session.sessionId), ["root-b", "child-a"]);
   assert(deletedBeforeRepeat.every((session) => session.lifecycle === "deleted" && session.sessionFile));
@@ -381,6 +399,7 @@ test("searchable session sources follow family reach and require explicit delete
 
   const repeatedRootDeletion = store.deleteSession("root-b", 6);
   assert.equal(repeatedRootDeletion.lifecycle, "deleted");
+  assertHistoryProjection("root-a", { includeDeleted: true, includeSelf: true });
   const deletedAfterRepeat = store.listSearchableSessions("root-a", { includeDeleted: true });
   assert.deepEqual(deletedAfterRepeat, deletedBeforeRepeat, "repeat root deletion must not change historical name or lineage");
   assert.equal(store.getSession("root-b").name, repeatedRootDeletion.name);

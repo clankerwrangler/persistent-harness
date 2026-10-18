@@ -38,8 +38,13 @@ test("session history is actor-only, family-scoped, and never starts a transcrip
     cwd: root, repositoryRoot: null, actorToken: "token-a", actorGeneration: 1 });
   t.after(() => actor.stop());
 
+  const originalFast = supervisor.store.getSessionFastModePreference;
+  let fastReads = 0;
+  supervisor.store.getSessionFastModePreference = function (...args) { fastReads += 1; return originalFast.apply(this, args); };
   const listed = await actor.request("session_history", { operation: "list", kind: "any",
     includeDeleted: false, includeCurrent: false, limit: 20 });
+  supervisor.store.getSessionFastModePreference = originalFast;
+  assert.equal(fastReads, 0, "the public metadata path must omit unused Fast ancestry reads");
   assert.deepEqual(listed.results.map((session) => session.sessionId), ["root-b"]);
   const searched = await actor.request("session_history", { operation: "search", query: "bounded",
     kind: "any", includeDeleted: false, includeCurrent: false, roles: ["user", "assistant"], limit: 8,
