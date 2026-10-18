@@ -98,6 +98,17 @@ test("root-output protocol backpressure disconnects only a slow subscriber and s
   await eventually(() => healthyEvents.some((frame) => frame.seq === sharedSeq) && peerEvents.some((frame) => frame.seq === sharedSeq));
   assert.equal(serializations, beforeSharedFrame + 1, "one encoded root frame must be shared by all subscribed clients");
   assert.equal((await peer.request("get_status")).pid, (await healthy.request("get_status")).pid);
+
+  const disconnected = Promise.all([once(healthy, "disconnected"), once(peer, "disconnected")]);
+  const beforeOversize = serializations, healthyCount = healthyEvents.length, peerCount = peerEvents.length;
+  const fallbacks = [];
+  healthy.on("event", frame => { if (frame.event === "frame_truncated") fallbacks.push(frame); });
+  peer.on("event", frame => { if (frame.event === "frame_truncated") fallbacks.push(frame); });
+  projector.publish(countedFrame(nextSeq++, "x".repeat(supervisor.maxFrameBytes)));
+  await disconnected;
+  assert.equal(serializations, beforeOversize + 1, "root-output oversize still encodes only once");
+  assert.equal(healthyEvents.length, healthyCount); assert.equal(peerEvents.length, peerCount);
+  assert.deepEqual(fallbacks, [], "root-output oversize disconnects subscribers instead of sending an ordinary fallback");
 });
 
 test("request-id replay protection stays bounded across long-lived protocol connections", { timeout: 20_000 }, async (t) => {
