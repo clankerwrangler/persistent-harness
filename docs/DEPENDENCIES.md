@@ -16,8 +16,8 @@ export PI_HARNESS_PI_MODULE="$PI_PREFIX/node_modules/@earendil-works/pi-coding-a
 Pi requires Node 22.19 or later; this harness requires Node 24 or later.
 
 Use one matching installed graph, not an SDK from another Pi installation.
-`PI_HARNESS_PI_MODULE` accepts an absolute package-directory path or a declared
-public SDK file path, not a file URL. `PI_HARNESS_PI_COMMAND` accepts a command
+`PI_HARNESS_PI_MODULE` accepts a package-directory path or a declared public SDK
+file path, including `file:` URLs. `PI_HARNESS_PI_COMMAND` accepts a command
 path or a name on `PATH`. Set both to matching artifacts when selecting an
 explicit SDK file.
 
