@@ -15,14 +15,35 @@ export PI_HARNESS_PI_MODULE="$PI_PREFIX/node_modules/@earendil-works/pi-coding-a
 
 Pi requires Node 22.19 or later; this harness requires Node 24 or later.
 
-Use one matching installed graph, not an SDK from another Pi installation. Use absolute file paths for both variables. The harness's session helper expects an SDK file, not a package directory or file URL.
+Use one matching installed graph, not an SDK from another Pi installation.
+`PI_HARNESS_PI_MODULE` accepts an absolute package-directory path or a declared
+public SDK file path, not a file URL. `PI_HARNESS_PI_COMMAND` accepts a command
+path or a name on `PATH`. Set both to matching artifacts when selecting an
+explicit SDK file.
 
 Dependency lookup includes packages directly under the selected outer
 `node_modules` directory as well as nested dependencies inside that graph.
 Resolved real paths cannot escape it. Declared dependencies, exact versions,
 public exports, and one shared `pi-ai` instance remain required.
 
-The optional explicit bundled SDK is an upstream-shipped alternate root artifact, not an npm export-map subpath. It exposes the same public named SDK APIs in this version. The resolver pins its entry SHA-256 to `df1f4c36758e3d339d42c6caebb2fca1d9f415de658d56b7b1fa6a9a808f0aa5`. This entry check is not a whole-install integrity guarantee. `dist/index.js` is also supported; set both command and SDK to their adjacent `dist/cli.js` and `dist/index.js` paths for that graph. A command-only or package-directory resolver chooses the normal public main entry, not the bundle implicitly.
+The optional explicit bundled SDK is an upstream-shipped alternate root artifact, not an npm export-map subpath. It exposes the same public named SDK APIs in this version. The resolver pins its entry SHA-256 to `df1f4c36758e3d339d42c6caebb2fca1d9f415de658d56b7b1fa6a9a808f0aa5`. This entry check is not a whole-install integrity guarantee. `dist/index.js` is also supported; set both command and SDK to their adjacent `dist/cli.js` and `dist/index.js` paths for that graph. An explicitly selected declared root wins, including when that root resolves to
+the bundle pathname. Other selections at that pathname retain the official-byte
+check, including a `./programmatic` alias to it.
+
+A command-only or package-directory selection prefers the declared public
+`./programmatic` entry when present; otherwise it selects the public root. An
+advertised but invalid programmatic export fails instead of falling back to the
+root or a less-specific pattern. The bounded export resolver supports `node`,
+`import`, and `default` conditions, not the full Node export-map algorithm. An
+explicit declared root file keeps that root; an explicit valid programmatic file
+selects that entry. Private files and package-escaping targets are rejected.
+
+`external-pi.mjs` owns graph resolution, SDK selection, imports, and required SDK
+API checks. Session helpers use its SDK-only loader without resolving or importing
+unused auxiliary exports, retaining package, dependency, version, and shared-AI
+gates. Their first load promise caches success or rejection. Only the session
+helper defaults to `pi` on `PATH` when both explicit settings are absent; the
+worker resolver still requires an explicit selection.
 
 Unmodified Pi remains supported through the stateless projection path. The worker
 hosts the public `ExtensionRunner`, `SessionManager`, and `ModelRuntime` APIs.

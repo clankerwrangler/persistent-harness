@@ -47,6 +47,25 @@ bundle test still accepts only official bundled bytes and rejects a custom bundl
 Direct fixture writes must refresh a borrowed public session source before taking
 a no-effects snapshot, just as the coordinator refreshes after a canonical commit.
 
+For a source-built package with a declared `./programmatic` entry, select its
+package directory or matched CLI to exercise automatic entry selection; an
+explicit `dist/index.js` still exercises the root. Resolver fixtures cover both
+choices, invalid declarations, root/bundle overlap, graph fences, and SDK-only
+loading. Session-helper fixtures retain concurrent first use, cached rejection,
+and operation-specific API checks.
+
+Programmatic-entry qualification uses a complete source-bound public package
+graph and the unchanged input-proof RPC assertions with a separately named
+source-declared fixture. It runs template and input-hook cases through both
+package-directory and command-only selection. Pre-bootstrap worker receipts prove
+the selected programmatic path, explicit CLI heap cap, and actual V8 total limit.
+The checks retain authoritative input identity, transformed text and exact images,
+visible delivery, unchanged canonical bytes/inode, and exactly one handled-control
+effect. The stock accepted-runtime fixture and official bundle hashes remain
+unchanged. Public import-work measurements and shared export/extension identities
+use separate processes on that same graph; module/source-byte reductions apply
+to plain unbundled imports, not RAM, latency, or extensions that import the root.
+
 `canonical-retention.test.mjs` checks source-generation invalidation, producing
 selection, append cursors, compact namespace/native facts, complete ordered range
 validation and explicit history. Canonical differential fixtures retain native,
@@ -128,6 +147,14 @@ flat/nested installed layouts exercise the real resolver without executing their
 package bodies. Integrated qualification uses the actual public SDK and CLI from
 one bound package graph, not replacement SDK owners.
 
+`ProgrammaticEntry` checks explicit-root precedence (including a root at the
+bundle pathname), optional programmatic selection, invalid exact declarations,
+private-file rejection, graph gates, alternate-bundle identity, SDK-only scope,
+and cached rejection. Its ten negative configurations must fail their intended
+invariants. TLC checked 184,320 generated states, 153,600 distinct states, and
+depth 4 for the bounded positive configuration. It abstracts export-map matching,
+real paths, hashing, and ESM evaluation; resolver, session-helper, public package,
+and genuine-worker fixtures exercise those boundaries.
 
 TLA+ sources in `specification/` cover bounded scheduler, stream, provider, retry, history, service ownership, and export-dependency assumptions. Obtain Java and `tla2tools.jar` separately. For example:
 

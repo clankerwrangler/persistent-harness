@@ -39,34 +39,40 @@ async function agentPackage(entry) {
   throw new Error("Explicit Pi path is not inside the stock coding-agent package");
 }
 
-function importTarget(value) {
+function importTarget(value, strict = false) {
   if (typeof value === "string") return value;
   if (!value || Array.isArray(value) || typeof value !== "object") return undefined;
   for (const [condition, target] of Object.entries(value)) {
     if (["node", "import", "default"].includes(condition)) {
-      const found = importTarget(target);
-      if (found) return found;
+      const found = importTarget(target, strict);
+      if (found || strict) return found;
     }
   }
 }
 
 // Resolve only declared public exports. No guesses about dist/ file layout.
-async function publicEntry(pkg, subpath = ".") {
+async function publicEntry(pkg, subpath = ".", optional = false) {
   const exports = pkg.manifest.exports;
-  let target = subpath === "." && typeof exports === "string" ? exports : importTarget(exports?.[subpath]);
-  if (!target && exports && typeof exports === "object") {
+  const exact = exports && typeof exports === "object" && Object.hasOwn(exports, subpath);
+  let advertised = Boolean(exact);
+  let target = subpath === "." && typeof exports === "string" ? exports : importTarget(exports?.[subpath], optional);
+  if (!target && !(optional && exact) && exports && typeof exports === "object") {
     const patterns = Object.keys(exports).filter((key) => key.includes("*")).sort((a, b) => b.length - a.length);
     for (const pattern of patterns) {
       const [prefix, suffix] = pattern.split("*");
       if (!subpath.startsWith(prefix) || !subpath.endsWith(suffix)) continue;
       const replacement = subpath.slice(prefix.length, suffix ? -suffix.length : undefined);
-      const template = importTarget(exports[pattern]);
+      advertised = true;
+      const template = importTarget(exports[pattern], optional);
       if (template) { target = template.replaceAll("*", replacement); break; }
+      if (optional) break;
     }
   }
+  if (optional && !advertised) return undefined;
   if (typeof target !== "string" || !target.startsWith("./")) throw new Error(`Missing public export ${pkg.manifest.name}${subpath}`);
   const resolved = await realpath(path.resolve(pkg.directory, target));
   if (!inside(pkg.directory, resolved)) throw new Error("Public Pi export escapes its package");
+  if (!(await stat(resolved)).isFile()) throw new Error("Public Pi export is not a regular file");
   return resolved;
 }
 
@@ -87,7 +93,7 @@ async function dependency(owner, name, graphRoot) {
   throw new Error(`Pi dependency is absent from the selected package graph: ${name}`);
 }
 
-export async function resolveExternalPi({ env = process.env, cwd = process.cwd() } = {}) {
+async function resolveSdkGraph({ env = process.env, cwd = process.cwd() } = {}) {
   const configured = env.PI_HARNESS_PI_MODULE;
   if (!configured && !env.PI_HARNESS_PI_COMMAND) throw new Error("Set PI_HARNESS_PI_MODULE or PI_HARNESS_PI_COMMAND explicitly");
   const entry = configured
@@ -106,19 +112,32 @@ export async function resolveExternalPi({ env = process.env, cwd = process.cwd()
   for (const pkg of [agent, ai, core]) {
     if (pkg.manifest.version !== STOCK_PI_VERSION) throw new Error(`Expected stock Pi ${STOCK_PI_VERSION}: ${pkg.manifest.name}`);
   }
-  let sdk = await publicEntry(agent);
-  if (configured && entry !== agent.directory && entry !== sdk) {
-    // Upstream 0.99.1 ships this alternate build of the same public root SDK.
-    // It is not an export-map subpath: require explicit selection and its official entry bytes.
-    if (entry !== path.join(agent.directory, OFFICIAL_BUNDLE_ENTRY)) throw new Error("Unsupported explicit Pi SDK entry");
-    const digest = createHash("sha256").update(await readFile(entry)).digest("hex");
-    if (digest !== OFFICIAL_BUNDLE_SHA256) throw new Error("Pi bundled SDK entry does not match official stock bytes");
-    sdk = entry;
+  const root = await publicEntry(agent);
+  let sdk = root;
+  if (configured && entry !== agent.directory) {
+    if (entry !== root) {
+      if (entry === path.join(agent.directory, OFFICIAL_BUNDLE_ENTRY)) sdk = entry;
+      else {
+        const programmatic = await publicEntry(agent, "./programmatic", true);
+        if (entry !== programmatic) throw new Error("Unsupported explicit Pi SDK entry");
+        sdk = programmatic;
+      }
+    }
+  } else {
+    sdk = await publicEntry(agent, "./programmatic", true) ?? root;
   }
+  // A declared root takes precedence. Other selections cannot alias around the alternate-bundle guard.
+  if (sdk !== root && sdk === path.join(agent.directory, OFFICIAL_BUNDLE_ENTRY)) {
+    const digest = createHash("sha256").update(await readFile(sdk)).digest("hex");
+    if (digest !== OFFICIAL_BUNDLE_SHA256) throw new Error("Pi bundled SDK entry does not match official stock bytes");
+  }
+  return { version: STOCK_PI_VERSION, packageRoot: agent.directory, sdk, ai, core };
+}
+
+export async function resolveExternalPi(options) {
+  const { ai, core, ...paths } = await resolveSdkGraph(options);
   return {
-    version: STOCK_PI_VERSION,
-    packageRoot: agent.directory,
-    sdk,
+    ...paths,
     api: await publicEntry(ai),
     core: await publicEntry(core),
     responsesApi: await publicEntry(ai, "./api/openai-responses-shared"),
@@ -126,13 +145,28 @@ export async function resolveExternalPi({ env = process.env, cwd = process.cwd()
   };
 }
 
+async function importSdk(entry, sdkOnly = false) {
+  const sdk = await import(pathToFileURL(entry).href);
+  const required = sdkOnly ? ["SessionManager"]
+    : ["createAgentSession", "SessionManager", "ModelRuntime", "ExtensionRunner", "createExtensionRuntime"];
+  for (const name of required) {
+    if (typeof sdk[name] !== "function") throw new Error(sdkOnly
+      ? "Pi SessionManager public API is unavailable" : `Stock Pi public API is unavailable: ${name}`);
+  }
+  return sdk;
+}
+
+// Session helpers need the selected SDK and graph fences, not auxiliary namespace exports.
+export async function loadExternalPiSdk(options) {
+  const paths = await resolveSdkGraph(options);
+  return importSdk(paths.sdk, true);
+}
+
 export async function loadExternalPi(options) {
   const paths = await resolveExternalPi(options);
-  const [sdk, api, core, responsesApi, simpleOptions] = await Promise.all(
-    [paths.sdk, paths.api, paths.core, paths.responsesApi, paths.simpleOptions].map((entry) => import(pathToFileURL(entry).href)),
-  );
-  for (const name of ["createAgentSession", "SessionManager", "ModelRuntime", "ExtensionRunner", "createExtensionRuntime"]) {
-    if (typeof sdk[name] !== "function") throw new Error(`Stock Pi public API is unavailable: ${name}`);
-  }
+  const [sdk, api, core, responsesApi, simpleOptions] = await Promise.all([
+    importSdk(paths.sdk),
+    ...[paths.api, paths.core, paths.responsesApi, paths.simpleOptions].map((entry) => import(pathToFileURL(entry).href)),
+  ]);
   return { sdk, api, core, responsesApi, simpleOptions, paths };
 }

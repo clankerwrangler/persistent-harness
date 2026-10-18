@@ -1,33 +1,15 @@
-import { constants } from "node:fs";
-import { access, link, realpath, rm, unlink, writeFile } from "node:fs/promises";
+import { link, rm, unlink, writeFile } from "node:fs/promises";
 import path from "node:path";
-import { pathToFileURL } from "node:url";
+import { loadExternalPiSdk } from "./external-pi.mjs";
 import { sessionSidecarPaths } from "./session-paths.mjs";
 
 let sessionApiPromise;
 
-async function resolveCommand(command) {
-  if (command.includes(path.sep)) return realpath(command);
-  for (const directory of (process.env.PATH ?? "").split(path.delimiter)) {
-    if (!directory) continue;
-    const candidate = path.join(directory, command);
-    try {
-      await access(candidate, constants.X_OK);
-      return realpath(candidate);
-    } catch {}
-  }
-  throw new Error(`Pi executable was not found: ${command}`);
-}
-
 async function sessionApi() {
-  sessionApiPromise ??= (async () => {
-    const entry = process.env.PI_HARNESS_PI_MODULE
-      ? await realpath(process.env.PI_HARNESS_PI_MODULE)
-      : await resolveCommand(process.env.PI_HARNESS_PI_COMMAND || "pi");
-    const module = await import(pathToFileURL(path.join(path.dirname(entry), "index.js")).href);
-    if (typeof module.SessionManager !== "function") throw new Error("Pi SessionManager public API is unavailable");
-    return module;
-  })();
+  sessionApiPromise ??= loadExternalPiSdk({
+    env: process.env.PI_HARNESS_PI_MODULE || process.env.PI_HARNESS_PI_COMMAND
+      ? process.env : { ...process.env, PI_HARNESS_PI_COMMAND: "pi" },
+  });
   return sessionApiPromise;
 }
 
