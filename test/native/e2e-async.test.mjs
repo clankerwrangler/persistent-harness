@@ -8,6 +8,7 @@ import test from "node:test";
 import { zstdDecompressSync } from "node:zlib";
 import { pathToFileURL } from "node:url";
 import { getHeapStatistics } from "node:v8";
+import { explicitHeapCap } from "../fixtures/node-heap-cap.mjs";
 import { HarnessClient } from "../../src/client.mjs";
 import { HarnessSupervisor } from "../../src/supervisor.mjs";
 import { PiSessionActor } from "../../src/session-actor.mjs";
@@ -69,7 +70,7 @@ function respond(response, id, { calls = [], answer = id, usage = { input_tokens
 
 async function fixture(t, script, { customCompaction = false, nativeAsync = true, modelId = "gpt-6-astra", clmExtension = undefined, retry = undefined } = {}) {
   // Reconstruct only an explicit numeric CLI cap; never forward parent NODE_OPTIONS.
-  const heapCap = process.execArgv.findLast(argument => /^--max-old-space-size=[1-9][0-9]*$/.test(argument));
+  const heapCap = explicitHeapCap();
   const retentionModule = process.env.PI_HARNESS_RETENTION_SDK_MODULE;
   const buildRoot = process.env.PI_HARNESS_NATIVE_ASYNC_BUILD_ROOT;
   const artifacts = process.env.PI_HARNESS_NATIVE_TEST_ARTIFACTS;
