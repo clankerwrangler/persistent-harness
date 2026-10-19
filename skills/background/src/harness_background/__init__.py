@@ -575,8 +575,9 @@ def _read_cmdline(pid: int) -> str:
         return ""
     parts = [part.decode("utf-8", "replace") for part in raw.split(b"\0") if part]
     command = " ".join(parts)
-    if len(command.encode("utf-8")) > MAX_COMMAND_BYTES:
-        command = command.encode("utf-8")[:MAX_COMMAND_BYTES].decode("utf-8", "ignore")
+    encoded = command.encode("utf-8")
+    if len(encoded) > MAX_COMMAND_BYTES:
+        command = encoded[:MAX_COMMAND_BYTES].decode("utf-8", "ignore")
     return command
 
 

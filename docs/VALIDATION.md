@@ -337,6 +337,12 @@ cancellation fence before worker startup, and cleanup after the owned copy drain
 The stock-worker fixture has a controlled delayed-copy cancellation regression;
 normal provisioning/consent and kernel reuse/rebuild assertions remain unchanged.
 
+`BackgroundCommandObservation` checks one UTF-8 encoding per successful adopted
+command read, fresh later reads, and unchanged bounded output. Its `Reread`,
+`Retain`, and `Truncate` controls must fail. The model abstracts byte encoding and
+UTF-8 truncation; the background Python regression checks actual bounded text,
+replacement decoding, metadata, and encoding counts with a private process fixture.
+
 `BackgroundCompletions` checks bounded dispatch ownership, acceptance independent
 of cold owners, durable publication, sent-after-readiness, retry/idempotence,
 owner ordering, safe-checkpoint admission independent of run end, and stop after

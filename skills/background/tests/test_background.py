@@ -202,6 +202,41 @@ class BackgroundTests(unittest.TestCase):
         self.op("stop", selector=adopted["id"])
         self.assertTrue(_alive(proc.pid))
 
+    def test_adopt_reuses_cmdline_encoding_and_keeps_fresh_bounded_text(self):
+        encoded = []
+        def profile(frame, event, method):
+            if (frame.f_code is bg._read_cmdline.__code__ and event == "c_call"
+                    and getattr(method, "__name__", None) == "encode"):
+                encoded.append(method.__self__)
+
+        pid = 424242
+        reads = [b"a" * 100000, ("界" * 21846).encode(), b"\xff" * 24000]
+        identity = {"pid": pid, "process_group": pid, "starttime": "fixture-start"}
+        try:
+            with patch.object(bg, "_pid_exists", return_value=True), \
+                    patch.object(bg, "_capture_identity", return_value=identity), \
+                    patch.object(bg, "_identity_matches", return_value=True), \
+                    patch.object(bg, "_read_cwd", return_value="/fixture"), \
+                    patch.object(bg, "_spawn_adoption_watcher"), \
+                    patch.object(Path, "read_bytes", side_effect=reads), \
+                    patch.object(bg, "_all_jobs", return_value=[]):
+                for index, raw in enumerate(reads):
+                    encoded.clear()
+                    previous = sys.getprofile()
+                    sys.setprofile(profile)
+                    try:
+                        result = bg._execute_operation(operation="adopt", pid=pid, name=f"bounded-{index}")
+                    finally:
+                        sys.setprofile(previous)
+                    self.assertTrue(result["ok"], result)
+                    expected = raw.decode("utf-8", "replace").encode()[:bg.MAX_COMMAND_BYTES].decode("utf-8", "ignore")
+                    self.assertEqual(result["command"], expected)
+                    self.assertEqual(len(encoded), 1)
+                    meta = json.loads((self.store / result["id"] / "meta.json").read_text())
+                    self.assertEqual(meta["command"], expected)
+        finally:
+            bg.shutil.rmtree(self.store, ignore_errors=True)
+
     def test_logs_bound_and_invalid_utf8(self):
         job = self.op("launch", command="true", name="log-job")
         waited = self.op("wait", selector=job["id"], timeout=5)
