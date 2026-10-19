@@ -234,3 +234,55 @@ test("harness JSONL decoder handles a fragmented multi-megabyte image frame line
   for (let offset = 0; offset < encoded.length; offset += 4093) frames = frames.concat(decoder.push(encoded.subarray(offset, offset + 4093)));
   assert.equal(frames.length, 1); assert.equal(frames[0].params.data.length, data.length); decoder.finish();
 });
+
+
+test("stderr keeps its bounded UTF-8 prefix through tails and terminal errors", { timeout: 5000 }, async (t) => {
+  const fixture = String.raw`
+    import readline from "node:readline";
+    readline.createInterface({ input: process.stdin }).on("line", (request) => {
+      const r = JSON.parse(request);
+      const reply = (data) => process.stdout.write(JSON.stringify({ type: "response", id: r.id, success: true, data }) + "\n");
+      if (r.type === "get_state") reply({ sessionId: "stderr", isStreaming: false });
+      else if (r.type === "emit") process.stderr.write(r.text, () => reply({}));
+      else if (r.type === "finish") process.exit(7);
+      else if (r.type !== "wait") reply({});
+    });
+  `;
+  for (const [name, prefix, next, expected] of [
+    ["ASCII unit cap", "x".repeat(65536), "", "x".repeat(65536)],
+    ["multibyte byte cap below unit cap", "€".repeat(21845) + "x", "", "€".repeat(21845) + "x"],
+    ["four-byte cut reaches unit cap", "x".repeat(65535), "🙂", "x".repeat(65535) + "�"],
+    ["three-byte cut stays below unit cap", "€".repeat(21845), "€", "€".repeat(21845) + "�"],
+  ]) {
+    await t.test(name, async (t) => {
+      const actor = new PiSessionActor({
+        command: process.execPath, args: ["--input-type=module", "--eval", fixture], cwd: os.tmpdir(), env: process.env,
+        requestTimeoutMs: 2000, shutdownTimeoutMs: 100,
+      });
+      t.after(() => actor.close());
+      assert.equal(actor.stderr, "");
+      await actor.start();
+      const waitFor = async (value) => {
+        for (let n = 0; n < 100 && actor.stderr !== value; n++) await new Promise((resolve) => setTimeout(resolve, 10));
+        assert.equal(actor.stderr, value);
+      };
+      await actor.request("emit", { text: prefix });
+      await waitFor(prefix);
+      if (next) await actor.request("emit", { text: next });
+      await waitFor(expected);
+      await actor.request("emit", { text: "discarded tail".repeat(100) });
+      const exited = new Promise((resolve) => actor.once("exit", resolve));
+      const pending = assert.rejects(actor.request("wait"), (error) => {
+        assert.equal(error.message, `Pi session actor exited code=7 signal=null\n${expected}`);
+        return true;
+      });
+      actor.send({ type: "finish" });
+      const exit = await exited;
+      await pending;
+      assert.deepEqual(exit, { code: 7, signal: null, expected: false, error: expected });
+      await actor.close();
+      assert.equal(actor.stderr, expected);
+      assert.equal(actor.isRunning, false);
+    });
+  }
+});

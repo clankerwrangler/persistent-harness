@@ -91,6 +91,7 @@ export class PiSessionActor extends EventEmitter {
     child.stderr.setEncoding("utf8");
     child.stdout.on("data", (chunk) => this.#onStdout(chunk));
     child.stderr.on("data", (chunk) => {
+      if (this.#stderr.length >= MAX_STDERR_BYTES) return;
       const available = Math.max(0, MAX_STDERR_BYTES - Buffer.byteLength(this.#stderr));
       if (available > 0) this.#stderr += Buffer.from(chunk).subarray(0, available).toString("utf8");
     });
