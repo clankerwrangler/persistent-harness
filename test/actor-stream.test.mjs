@@ -548,3 +548,86 @@ test("successive prefix rebases preserve source text IDs and do not execute an o
   const final = f.terminal("aborted");
   assert.deepEqual(f.commit(final.final).calls, []);
 });
+
+
+test("owned plans and acknowledged remainders do not recursively revisit frozen values", () => {
+  const c = call("A"), tail = { ...text("tail"), provenance: { nested: [{ value: "owned copy" }] } };
+  const f = fixture([c, tail]);
+  let frozenEnumerations = 0;
+  const values = Object.values;
+  Object.values = value => { if (Object.isFrozen(value)) frozenEnumerations++; return values(value); };
+  let plan, accepted, ack;
+  try {
+    starts(f); f.emit("text_delta", 1, null, { delta: "tail" });
+    plan = f.emit("toolcall_end", 0, Object.freeze(receipt(c))).prefix;
+    accepted = f.p.prepareCommit(Object.freeze({ planId: plan.planId, message: Object.freeze(clone(plan.message)) }));
+    ack = f.commit(accepted);
+  } finally { Object.values = values; }
+  assert.equal(frozenEnumerations, 0);
+  const check = value => {
+    if (value && typeof value === "object") { assert(Object.isFrozen(value)); Object.values(value).forEach(check); }
+  };
+  [plan, accepted, ack].forEach(check);
+  assert.equal(ack.remainder.content[0].text, "tail");
+  assert.equal(Object.isFrozen(tail.provenance.nested[0]), false, "external children are not frozen in place");
+  tail.provenance.nested[0].value = "changed";
+  assert.equal(ack.remainder.content[0].provenance.nested[0].value, "owned copy");
+  f.emit("text_end", 1); const final = f.terminal("stop");
+  assert.equal(f.commit(final.final).remainder, undefined);
+});
+
+test("external shallow freezing never bypasses copy validation at planner boundaries", () => {
+  for (const boundary of ["base", "event", "proof", "prepare", "ack"]) {
+    let getterCalls = 0;
+    const invalid = Object.freeze({ get nested() { getterCalls++; return {}; } });
+    if (boundary === "base") {
+      fault(() => createActorStreamPlanner({ message: Object.freeze({ ...message(), id: "core", extra: invalid }),
+        createMessageId: () => "next", createTextId: () => "text" }), "ERR_STREAM_DATA_TYPE");
+    } else {
+      const f = fixture([call("A")]);
+      if (boundary === "event") fault(() => f.p.consume(Object.freeze({ type: "start", partial: f.raw, extra: invalid })), "ERR_STREAM_DATA_TYPE");
+      else {
+        starts(f);
+        if (boundary === "proof") fault(() => f.emit("toolcall_end", 0,
+          Object.freeze({ ...receipt(call("A")), extra: invalid })), "ERR_STREAM_DATA_TYPE");
+        else {
+          const plan = f.emit("toolcall_end", 0, receipt(call("A"))).prefix;
+          const request = Object.freeze({ planId: plan.planId, entryId: "entry", message: plan.message, extra: invalid });
+          fault(() => boundary === "prepare" ? f.p.prepareCommit(request) : f.p.acknowledge(request), "ERR_STREAM_DATA_TYPE");
+        }
+      }
+      assert.equal(f.entries.length, 0);
+      fault(() => f.emit("start"), "ERR_STREAM_FAILED");
+    }
+    assert.equal(getterCalls, 0, boundary);
+  }
+});
+
+
+test("callback-derived birth subtrees retain frozen traversal and the first getter error", () => {
+  for (const fail of [false, true]) {
+    let sequenceReads = 0, childReads = 0;
+    const child = { value: "external" }, first = new SyntaxError("birth getter first");
+    const external = Object.freeze(fail ? { get child() { childReads++; throw first; } } : { child });
+    const stamp = { version: 1, createdAt: "2026-01-01T00:00:00.000Z",
+      get sequence() { return ++sequenceReads < 3 ? 1 : external; } };
+    const raw = message([text("visible")]);
+    const p = createActorStreamPlanner({ message: { ...message(), id: "core" }, createMessageId: () => "next",
+      createTextId: () => "text", createTextBirth: () => stamp });
+    p.consume({ type: "start", partial: raw });
+    p.consume({ type: "text_start", contentIndex: 0, partial: raw });
+    const delta = () => p.consume({ type: "text_delta", contentIndex: 0, partial: raw, delta: "visible" });
+    if (fail) {
+      assert.throws(delta, error => error === first);
+      assert.equal(childReads, 1);
+      fault(() => p.consume({ type: "start", partial: raw }), "ERR_STREAM_FAILED");
+    } else {
+      const result = delta();
+      assert.equal(Object.isFrozen(child), true, "callback descendant retains original freeze effects");
+      assert.equal(childReads, 0);
+      assert.deepEqual(result.update.message.content[0].harnessBirth.sequence, { child: { value: "external" } });
+      assert.notEqual(result.update.message.content[0].harnessBirth.sequence, external);
+    }
+    assert.equal(sequenceReads, 3);
+  }
+});

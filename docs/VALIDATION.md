@@ -227,6 +227,16 @@ the explicit SDK seam; it does not evaluate a stock SDK, CLI, provider, or worke
 
 `FailedCallProjection` checks immutable canonical evidence, per-identity positive exclusion, admission/result/conflict vetoes, selected-branch and compaction cuts, unchanged outstanding calls, and no fabricated effects. Its owned-commit evidence requires matching message/attempt identity and cannot certify admitted calls. `NoWitness`, `BadOwnedIdentity` and `BadOwnedAdmission` are separate negative controls and must violate their intended invariants. The abstraction does not authenticate correlation strings or prove a two-append filesystem transaction. Canonical differential tests exercise exact direct-child schemas, all call fingerprints, unchanged missing-proof/native guards, full-branch vetoes, edits and late signatures. Real packaged SDK coordinator/retention tests cover failed partial and complete ordinary calls, source and array contexts, cold resume, genuine subsequent inference, no tool replay or fabricated result, and failed append/acknowledgement/hook/ownership boundaries. Adapter and external-compaction-hook tests retain actual transport and serializer assertions.
 
+`ActorStream.freeze.cfg` checks private owned-value deep freezing across pending
+plans, enclosing results and acknowledged remainders. Frozen external envelopes
+still pass through detached data validation; only recursively frozen inert owned
+values skip repeated traversal. The `freezeReread`, `freezeShallow`,
+`freezeExternal`, `freezeValidation` and `freezeBirth` controls must fail their
+work, deep-freeze or first-error invariant. Callback-derived birth subtrees keep
+unconditional recursive freezing, including original getter effects/errors. The finite graph abstracts JavaScript
+descriptors and provider behavior; planner regressions retain external shallow-freeze rejection,
+native proofs, response/encryption checks, hooks and exact acknowledgment.
+
 `ProviderErrorMetadata` checks fixed-field redaction, unknown-value noninterference, unchanged retry/error classification, and final-attempt ownership. Adapter tests cover actual error frames, private payloads and hook exceptions, retry resets, and a produced interrupted suffix carried through the actor stream planner into offline next-request serializers.
 
 `ChildExitDelivery` models atomic generation-bound failure receipts, silent intentional exits, parent availability/deletion, retransmission after restart, and idempotent recipient incorporation. TLC checked 967 generated states, 181 distinct states, and depth 11 with no errors. It abstracts SQLite durability, fixed payload validation, and the existing family-message transport; it does not prove exactly-once inference or explain heap growth. Store and supervisor regressions exercise actual receipt persistence, worker-exit events, privacy, direct-parent routing, restart/redelivery, and acknowledgement. The native integration kills only a verified synthetic child process group and checks automatic parent inference, one canonical receipt, acknowledgement, and no child revival.
