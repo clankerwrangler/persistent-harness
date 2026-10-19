@@ -251,6 +251,14 @@ unconditional recursive freezing, including original getter effects/errors. The 
 descriptors and provider behavior; planner regressions retain external shallow-freeze rejection,
 native proofs, response/encryption checks, hooks and exact acknowledgment.
 
+`NativeSseAccounting` compares reader-local byte counts with pending decoded
+backlog and data values, excluding join newlines. Its `Backlog`, `Join`, `Reset`,
+`Utf8`, `Delimiter` and `Early` controls must fail. The finite decoded-scalar
+model covers both check sites, held CR, EOF, parse/yield order, cancellation,
+release and successive requests; it abstracts the UTF-8 decoder and JSON parser.
+Native adapter regressions retain split UTF-8/BOM, CRLF/EOF, backlog limits,
+first errors, proof/usage handling and reader cleanup.
+
 `ProviderErrorMetadata` checks fixed-field redaction, unknown-value noninterference, unchanged retry/error classification, and final-attempt ownership. Adapter tests cover actual error frames, private payloads and hook exceptions, retry resets, and a produced interrupted suffix carried through the actor stream planner into offline next-request serializers.
 
 `ChildExitDelivery` models atomic generation-bound failure receipts, silent intentional exits, parent availability/deletion, retransmission after restart, and idempotent recipient incorporation. TLC checked 967 generated states, 181 distinct states, and depth 11 with no errors. It abstracts SQLite durability, fixed payload validation, and the existing family-message transport; it does not prove exactly-once inference or explain heap growth. Store and supervisor regressions exercise actual receipt persistence, worker-exit events, privacy, direct-parent routing, restart/redelivery, and acknowledgement. The native integration kills only a verified synthetic child process group and checks automatic parent inference, one canonical receipt, acknowledgement, and no child revival.
