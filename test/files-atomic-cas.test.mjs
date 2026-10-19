@@ -473,3 +473,29 @@ test("files.edit preserves a literal whole-file Docker-name filter", async (t) =
   assert.equal(result.replacements, 1);
   await assertNoTemps(cwd);
 });
+
+test("files.edit partitions each fresh immutable source only once", async (t) => {
+  const { cwd, handlers } = await fixture(t);
+  const target = path.join(cwd, "partitioned.txt");
+  const oldText = "<OLD>";
+  const originalSplit = String.prototype.split;
+  let source;
+  let partitions = 0;
+  t.mock.method(String.prototype, "split", function (...args) {
+    if (String(this) === source && args[0] === oldText) partitions += 1;
+    return Reflect.apply(originalSplit, this, args);
+  });
+
+  for (const [text, replacements] of [["a<OLD>b", 1], ["fresh<OLD>middle<OLD>end", 2]]) {
+    source = text;
+    partitions = 0;
+    await writeFile(target, source);
+    const result = await handlers["files.edit"](
+      { path: "partitioned.txt", oldText, newText: "$&", replaceAll: true }, context(),
+    );
+    assert.equal(partitions, 1, "counting and replacement must share one local partition");
+    assert.equal(result.replacements, replacements);
+    assert.equal(await readFile(target, "utf8"), Reflect.apply(originalSplit, source, [oldText]).join("$&"));
+  }
+  await assertNoTemps(cwd);
+});

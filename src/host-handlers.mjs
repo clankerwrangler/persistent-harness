@@ -903,12 +903,13 @@ export function createHostHandlers({ cwd, getClient, getContext = () => undefine
           } catch {
             throw new Error("existing file is not valid UTF-8; edit was not committed");
           }
-          const occurrences = content.split(oldText).length - 1;
+          const parts = content.split(oldText);
+          const occurrences = parts.length - 1;
           if (occurrences === 0) throw new Error("oldText was not found exactly");
           if (!value.replaceAll && occurrences !== 1) {
             throw new Error(`oldText matched ${occurrences} times; use replace_all=True explicitly`);
           }
-          const updated = content.split(oldText).join(newText);
+          const updated = parts.join(newText);
           if (Buffer.byteLength(updated) > MAX_WRITE_BYTES) throw new Error("edited file exceeds write limit");
           return {
             content: updated,
