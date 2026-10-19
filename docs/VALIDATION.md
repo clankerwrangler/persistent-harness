@@ -193,6 +193,13 @@ java -cp "$TLA2TOOLS" tlc2.TLC -workers 1 -config specification/FirstInputSnapsh
 
 Use each model's matching configuration. Model checks prove only their finite abstraction, not arbitrary provider behavior, filesystem crash atomicity, or remote exactly-once execution. Keep test and model results tied to the source bytes under test.
 
+`GrepLineOwnership` checks synchronous use of completed chunk slices and copied
+fragments across reads, with controls for redundant copies, retained borrowed
+fragments, and delayed decoding. The focused grep checks cover UTF-8 chunk
+boundaries, fresh calls, binary/invalid input, output and source caps, symlink
+swaps, and worker deadlines. Completed slices need no copy before synchronous
+decode or concatenation; unfinished fragments still require their owned copy.
+
 `HostFileEdit` checks one partition per immutable source, fresh partitions for
 later edits, and unchanged UTF-8, missing-match, ambiguity and output-limit error
 precedence. Its `Reread`, `Retain` and `Validation` controls must fail their work,
