@@ -565,7 +565,8 @@ export function createNativeProviderAdapter({ api, responsesApi, modelRuntime, t
               if (nonempty(rawResponseId)) entry.retired.responses.add(rawResponseId);
               for (const id of itemIds.keys()) entry.retired.items.add(id);
               for (const id of callIds.keys()) entry.retired.calls.add(id);
-              entry.chain = { id: output.responseId, template: clone(template(full)), baseline: [...full.input, ...replay(api, model, [output], grammar)] };
+              // full is already JSON-detached after onPayload; this template stays private.
+              entry.chain = { id: output.responseId, template: template(full), baseline: [...full.input, ...replay(api, model, [output], grammar)] };
               if (!options.sessionId || options.cacheRetention === "none" || !nonempty(rawResponseId)) disconnect();
               else {
                 entry.idleTimer = setTimeout(() => { if (connection === entry) disconnect(); }, limits.cacheTtlMs);

@@ -1131,3 +1131,39 @@ test("SSE accounting keeps backlog checks after parsing and always releases the 
     assert.equal(cancelled, 1); assert.equal(released, 1);
   }
 });
+
+
+test("WebSocket template ownership: no second JSON copy and admitted caller detachment", async (t) => {
+  let bodyAlias, sent = 0, templateCopies = 0;
+  const wire = memorySocket((socket) => {
+    const id = `ownership-${++sent}`;
+    bodyAlias.extra.nested.value = "mutated after admission";
+    queueMicrotask(() => socket.emit(complete(id)));
+  });
+  const a = await adapter(t, { WebSocket: wire.WebSocket });
+  const stringify = JSON.stringify;
+  JSON.stringify = function (value, ...args) {
+    if (value?.model === model.id && value.stream === true && !Object.hasOwn(value, "input")) templateCopies++;
+    return stringify(value, ...args);
+  };
+  try {
+    const options = { transport: "websocket-cached", sessionId: "ownership", onPayload(body) {
+      body.extra = { nested: { value: "admitted" } }; bodyAlias = body;
+    } };
+    const firstStream = a.stream(model, context, options);
+    for await (const event of firstStream) bodyAlias.extra.nested.value = "mutated during events";
+    const first = await firstStream.result();
+    assert.equal(first.stopReason, "stop");
+    const next = { ...context, messages: [...context.messages, first, { role: "user", content: "next", timestamp: 2 }] };
+    const second = await a.stream(model, next, options).result();
+    assert.equal(second.stopReason, "stop");
+    assert.equal(wire.requests[1].previous_response_id, "ownership-1");
+    assert.equal(wire.requests[1].extra.nested.value, "admitted");
+    await a.stream(model, next, { ...options, onPayload(body) {
+      body.extra = { nested: { value: "changed template" } }; bodyAlias = body;
+    } }).result();
+    assert.equal(wire.requests[2].previous_response_id, undefined);
+    assert.equal(wire.requests[2].extra.nested.value, "changed template");
+    assert.equal(templateCopies, 0);
+  } finally { JSON.stringify = stringify; }
+});
