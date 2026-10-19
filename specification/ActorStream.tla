@@ -119,7 +119,69 @@ FailedOrLengthNoNative == hookStatus # "success" => hookNative = {}
 NoSourceFailureUpgrade == hookWritten # <<>> /\ hookSourceStatus # "success" => hookStatus # "success"
 AcceptedMessageWritten == hookWritten # <<>> => hookWritten = hookCalls
 HookNativeSourceOrder == \A i,j \in hookNative: i < j => hookCalls[i][1] < hookCalls[j][1]
-Next == IF Scenario = "stream" THEN BaseNext /\ UNCHANGED hookVars ELSE HookNext /\ UNCHANGED vars
-Spec == Init /\ HookInit /\ [][Next]_<<vars,hookVars>>
+
+\* Only the owned fast path receives inert copies; callback birth is separate.
+\* Distinct roots model pending -> enclosing result and remainder -> ack.
+VARIABLES freezeShape, externalFrozen, inputValid, freezePhase, ownedFrozen,
+          freezeWork, freezeError, birthKind, birthReads, birthNestedFrozen, birthError
+freezeVars == <<freezeShape,externalFrozen,inputValid,freezePhase,ownedFrozen,
+                freezeWork,freezeError,birthKind,birthReads,birthNestedFrozen,birthError>>
+FreezeNodes == 1..12
+Children(n) == CASE n = 1 -> {2} [] n = 2 -> {3} [] n = 3 -> {4}
+                [] n = 5 -> {1,6} [] n = 7 -> {8} [] n = 8 -> {9}
+                [] n = 10 -> {7,11} [] n = 11 -> {12} [] OTHER -> {}
+RECURSIVE Reach(_), Walk(_, _)
+Reach(n) == {n} \cup UNION {Reach(c): c \in Children(n)}
+Walk(n, frozenNodes) == IF n \in frozenNodes THEN {}
+                       ELSE {n} \cup UNION {Walk(c, frozenNodes): c \in Children(n)}
+FreezeScenario == Scenario \in {"freeze","freezeReread","freezeShallow",
+                                "freezeExternal","freezeValidation","freezeBirth"}
+FreezeInit == /\ freezeShape \in (IF FreezeScenario THEN {"terminal","prefix","remainder"} ELSE {"terminal"})
+              /\ externalFrozen \in (IF FreezeScenario THEN BOOLEAN ELSE {FALSE})
+              /\ inputValid \in (IF FreezeScenario THEN BOOLEAN ELSE {TRUE})
+              /\ freezePhase = 0 /\ ownedFrozen = {}
+              /\ freezeWork = [n \in FreezeNodes |-> 0] /\ freezeError = FALSE
+              /\ birthKind \in (IF FreezeScenario THEN {"none","inert","shallow","error"} ELSE {"none"})
+              /\ birthReads = 0 /\ birthNestedFrozen = FALSE /\ birthError = "none"
+CopyInput == /\ freezePhase = 0
+             /\ freezeError' = ~inputValid /\ freezePhase' = IF inputValid THEN 1 ELSE 9
+             /\ ownedFrozen' = IF Scenario = "freezeExternal" /\ externalFrozen /\ inputValid THEN {1} ELSE {}
+             /\ UNCHANGED <<freezeShape,externalFrozen,inputValid,freezeWork,birthKind,birthReads,birthNestedFrozen,birthError>>
+\* Callback-derived birth descendants are not certified inert owned values.
+\* Their original traversal (including a first getter error) remains mandatory.
+FreezeBirth == /\ freezePhase = 1
+               /\ LET inspect == ~(Scenario = "freezeBirth" /\ birthKind \in {"shallow","error"})
+                  IN /\ birthReads' = IF birthKind = "none" \/ ~inspect THEN 0 ELSE 1
+                     /\ birthNestedFrozen' = inspect /\ birthKind \in {"inert","shallow"}
+                     /\ birthError' = IF birthKind = "error" THEN (IF inspect THEN "first-getter" ELSE "copy-type") ELSE "none"
+               /\ freezePhase' = IF birthKind = "error" THEN 9 ELSE 2
+               /\ UNCHANGED <<freezeShape,externalFrozen,inputValid,freezeWork,ownedFrozen,freezeError,birthKind>>
+Roots == IF freezeShape = "remainder" THEN <<7,1,5,10>> ELSE <<1,5>>
+FreezeOwned == /\ freezePhase \in 2..(Len(Roots)+1)
+               /\ LET root == Roots[freezePhase-1]
+                      walked == IF Scenario = "freezeReread" THEN Reach(root) ELSE Walk(root, ownedFrozen)
+                      marked == IF Scenario = "freezeShallow" THEN {root} ELSE walked
+                  IN /\ ownedFrozen' = ownedFrozen \cup marked
+                     /\ freezeWork' = [n \in FreezeNodes |-> freezeWork[n] + (IF n \in walked THEN 1 ELSE 0)]
+               /\ freezePhase' = IF freezePhase = Len(Roots)+1 THEN 9 ELSE freezePhase + 1
+               /\ UNCHANGED <<freezeShape,externalFrozen,inputValid,freezeError,birthKind,birthReads,birthNestedFrozen,birthError>>
+SkipValidation == /\ Scenario = "freezeValidation" /\ freezePhase = 0 /\ ~inputValid
+                  /\ freezePhase' = 1 /\ freezeError' = FALSE
+                  /\ UNCHANGED <<freezeShape,externalFrozen,inputValid,ownedFrozen,freezeWork,birthKind,birthReads,birthNestedFrozen,birthError>>
+FreezeNext == CopyInput \/ FreezeBirth \/ FreezeOwned \/ SkipValidation
+OwnedDeep == \A n \in ownedFrozen: Reach(n) \subseteq ownedFrozen
+FreezeOnce == \A n \in FreezeNodes: freezeWork[n] <= 1
+FirstInputError == freezePhase # 0 /\ ~inputValid => freezeError /\ ownedFrozen = {}
+CompleteOutput == freezePhase = 9 /\ inputValid /\ birthError = "none" =>
+                    UNION {Reach(Roots[i]): i \in DOMAIN Roots} \subseteq ownedFrozen
+
+BirthEffects == freezePhase > 1 /\ inputValid =>
+                  CASE birthKind = "error" -> birthError = "first-getter" /\ birthReads = 1
+                    [] birthKind = "shallow" -> birthNestedFrozen /\ birthReads = 1
+                    [] OTHER -> TRUE
+
+Next == IF FreezeScenario THEN FreezeNext /\ UNCHANGED <<vars,hookVars>>
+        ELSE (IF Scenario = "stream" THEN BaseNext /\ UNCHANGED hookVars ELSE HookNext /\ UNCHANGED vars) /\ UNCHANGED freezeVars
+Spec == Init /\ HookInit /\ FreezeInit /\ [][Next]_<<vars,hookVars,freezeVars>>
 
 =============================================================================

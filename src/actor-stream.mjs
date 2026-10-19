@@ -44,8 +44,10 @@ function copy(value) {
   }
   return visit(value, 0);
 }
-function freeze(value) {
-  if (value && typeof value === "object") { for (const v of Object.values(value)) freeze(v); Object.freeze(value); }
+// Owned inputs are inert copies/aggregates; this helper freezes children first.
+// Callback-derived birth subtrees retain unconditional traversal and its effects.
+function freeze(value, owned = true) {
+  if (value && typeof value === "object" && (!owned || !Object.isFrozen(value))) { for (const v of Object.values(value)) freeze(v, owned); Object.freeze(value); }
   return value;
 }
 function zeroUsage() {
@@ -144,7 +146,7 @@ export function createActorStreamPlanner({ message, createMessageId, createTextI
   function observeText(block) {
     if (block.type !== "text" || !block.text.trim() || textBirths.has(block.id)) return;
     const birth = conversationBirth(createTextBirth?.(block.text));
-    if (birth) { textBirths.set(block.id, freeze(birth)); block.harnessBirth = copy(birth); }
+    if (birth) { textBirths.set(block.id, freeze(birth, false)); block.harnessBirth = copy(birth); }
   }
   function envelope(raw, content, stopReason) {
     const result = { ...base, ...raw, id: segmentId, timestamp: base.timestamp, content, stopReason };
