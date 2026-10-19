@@ -1257,7 +1257,7 @@ ${catalog.diagnostics.map((item) => item.error).join("\n")}`);
   pi.on("before_provider_request", (event, ctx) => {
     // A result can settle after the request context was captured. Release the
     // preflight only when this actual payload includes the complete diagnostic.
-    if (namespaceRecovery && namespaceRecovery.kernel === kernel) {
+    if (namespaceRecovery && namespaceRecovery.kernel === kernel && namespaceRecovery.visible !== true) {
       const diagnostic = JSON.stringify(namespaceRecoveryText(namespaceRecovery.report)).slice(1, -1);
       if (JSON.stringify(event.payload).includes(diagnostic)) namespaceRecovery.visible = true;
     }

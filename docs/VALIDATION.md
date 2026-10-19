@@ -250,6 +250,14 @@ native proofs, response/encryption checks, hooks and exact acknowledgment.
 
 `KernelCompletion` checks that failed execution cannot become terminal until the controlled process exits, while successful execution can complete before namespace saving. It abstracts signal delivery and transport errors. `kernel-completion.test.mjs` checks decoder corruption, control-channel failure, queued-call no-replay, and forced close against real Python process exit.
 
+`NamespaceRecoveryLatch` checks complete diagnostic matching, current kernel and
+recovery ownership, fresh session/result/replacement resets, unresolved first-error
+ordering, and sanitizer reachability. Its `Reread`, `Premature`, `Reset`, `Kernel`
+and `Sanitizer` controls must fail. After visibility latches for that recovery,
+serialization-only report/payload getters and errors intentionally disappear;
+unresolved observations and the required Grok sanitizer remain. Extension tests
+use a synthetic kernel prerequisite, not Python execution or provider transport.
+
 `KernelStreamAccounting` compares normalized per-stream capture with maintained
 slice-byte counts, independent limits, discarded-byte totals, progress and callback
 errors, text/MIME order, and fresh collectors. Its bounded configuration checks two
