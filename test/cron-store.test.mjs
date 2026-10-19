@@ -3,6 +3,7 @@ import { mkdtemp, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
+import { DatabaseSync } from "node:sqlite";
 import { CronStore } from "../src/cron-store.mjs";
 import { HarnessStore } from "../src/store.mjs";
 
@@ -14,7 +15,7 @@ async function fixture(t) {
     repositoryRoot: root, name: "Origin", actorToken: "token", launch: {} }, 1);
   const cron = new CronStore(file);
   t.after(async () => { cron.close(); harness.close(); await rm(root, { recursive: true, force: true }); });
-  return { root, cron };
+  return { root, cron, harness };
 }
 
 function jobParams(root, overrides = {}) {
@@ -123,4 +124,70 @@ test("job inspection binds the canonical row and latest status in one bounded re
   const completed = cron.inspectJob(saved.jobId);
   assert.equal(completed.runStatus, "completed"); assert.equal(completed.job.lastStatus, "completed");
   assert.doesNotMatch(JSON.stringify(completed), /SYNTHETIC_PRIVATE_RUN_OUTPUT/);
+});
+
+
+test("active-run existence is session-specific, fresh, and independent of full run payloads", async (t) => {
+  const { root, cron, harness } = await fixture(t);
+  harness.createRoot({ sessionId: "other", cwd: root, name: "Other", actorToken: "synthetic", launch: {} }, 1);
+  const raw = new DatabaseSync(path.join(root, "harness.sqlite")); t.after(() => raw.close());
+  const writer = new CronStore(path.join(root, "harness.sqlite")); t.after(() => writer.close());
+  const originalPrepare = DatabaseSync.prototype.prepare;
+  const probe = (sessionId, expected) => {
+    const selected = [];
+    DatabaseSync.prototype.prepare = function (...args) {
+      const statement = originalPrepare.apply(this, args);
+      return new Proxy(statement, { get(target, key) {
+        const value = Reflect.get(target, key, target);
+        if (typeof value !== "function") return value;
+        return (...values) => {
+          const result = value.apply(target, values);
+          if (key === "get" || key === "all") selected.push(...(key === "all" ? result : result === undefined ? [] : [result]));
+          return result;
+        };
+      } });
+    };
+    try { assert.equal(cron.hasActiveRunForSession(sessionId), expected); }
+    finally { DatabaseSync.prototype.prepare = originalPrepare; }
+    assert(selected.length <= 1, "an existence check materializes at most one row");
+    assert(selected.every(row => Object.keys(row).length === 1 && Object.values(row)[0] === 1), "an existence check selects only a constant");
+  };
+  probe("origin", false); probe("missing", false);
+  const statuses = ["claimed", "running", "completed", "failed", "unknown", "skipped_overlap"];
+  for (const [index, status] of statuses.entries()) {
+    const jobId = `probe-${index}`;
+    writer.createJob(jobParams(root, { jobId, name: jobId }), 10);
+    writer.claimManualRun(jobId, { runId: jobId, scheduledAt: 20 }, 20);
+    // A claimed run can be unassigned; SQL NULL must not match a session.
+    probe("origin", false); probe(null, false);
+    raw.prepare("UPDATE cron_runs SET session_id = 'origin', status = ?, notification_body = ? WHERE id = ?")
+      .run(status, "Synthetic body".repeat(50), jobId);
+    const active = status === "claimed" || status === "running";
+    probe("origin", active); probe("other", false);
+    if (active) {
+      const full = cron.listActiveRunsForSession("origin");
+      assert.equal(full.length, 1); assert.equal(full[0].notificationBody, "Synthetic body".repeat(50));
+      assert.equal(full[0].runId, jobId); assert.equal(full[0].status, status);
+    }
+    raw.prepare("UPDATE cron_runs SET session_id = 'other' WHERE id = ?").run(jobId);
+    probe("origin", false); probe("other", active);
+    if (active) writer.finishRun(jobId, "completed", { output: "Preserved full history" }, 30);
+    probe("other", false);
+  }
+  // Different jobs can have simultaneous active runs for the same session.
+  for (const jobId of ["multiple-a", "multiple-b"]) {
+    writer.createJob(jobParams(root, { jobId, name: jobId }), 40);
+    writer.claimManualRun(jobId, { runId: jobId, scheduledAt: 50 }, 50);
+    writer.markRunRunning(jobId, { executionModeUsed: "origin", sessionId: "origin", inputId: jobId }, 60);
+  }
+  probe("origin", true);
+  assert.equal(cron.listActiveRunsForSession("origin").length, 2);
+  writer.finishRun("multiple-a", "completed", {}, 70); probe("origin", true);
+  writer.finishRun("multiple-b", "failed", { error: "Synthetic failure" }, 80); probe("origin", false);
+});
+
+test("active-run existence retains database errors after close", async (t) => {
+  const { root } = await fixture(t);
+  const closed = new CronStore(path.join(root, "harness.sqlite")); closed.close();
+  assert.throws(() => closed.hasActiveRunForSession("origin"), /not open|closed/i);
 });

@@ -301,7 +301,10 @@ export class CronStore {
     return this.#db.prepare("SELECT * FROM cron_runs WHERE session_id = ? AND status IN ('claimed', 'running') ORDER BY claimed_at, id")
       .all(sessionId).map(mapRun);
   }
-  hasActiveRunForSession(sessionId) { return this.listActiveRunsForSession(sessionId).length > 0; }
+  hasActiveRunForSession(sessionId) {
+    return this.#db.prepare("SELECT 1 FROM cron_runs WHERE session_id = ? AND status IN ('claimed', 'running') LIMIT 1")
+      .get(sessionId) !== undefined;
+  }
   activeRunSessionIds() { return this.#db.prepare("SELECT DISTINCT session_id FROM cron_runs WHERE status IN ('claimed','running') AND session_id IS NOT NULL").all().map(row => row.session_id); }
 
   reportNotification(runId, sessionId, { disposition, body = null }, now = Date.now()) {

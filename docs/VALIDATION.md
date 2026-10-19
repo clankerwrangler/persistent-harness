@@ -145,6 +145,13 @@ non-equivalence between the old sample times; neither version guarantees
 latest-at-commit family state. SQL isolation and runtime allocation are outside
 this finite abstraction.
 
+`CronActiveRunProbe` compares a fresh session-specific active-run existence
+query with the full-list predicate across all run statuses and two observations.
+Its six negative configurations cover wrong-session, null-session, terminal,
+claimed-only, stale-result, and full-payload selection. Store regressions check
+competing-writer freshness, bounded scalar results, unchanged full lists, and
+closed-database errors. The model abstracts SQLite execution and allocation.
+
 `IdleEntryIndexHost` checks deferred versus actual idle dispatch, readiness-wake
 cancellation, token/generation ownership, late sealed-prefix publication, and
 nonblocking admission/close. It separately retains normal RPC shutdown drain;
