@@ -308,3 +308,48 @@ test("shell.run incrementally decodes split UTF-8 and handles invalid bytes dete
   assert.equal(invalid.totalBytes, 1);
   assert.equal(invalid.capturedBytes, 3);
 });
+
+test("files.grep borrows completed slices but copies fragments across reads", async (t) => {
+  const { cwd, handlers } = await fixture(t);
+  const RealWorker = workerThreads.Worker;
+  const copies = [];
+  const wrapped = t.mock.method(workerThreads, "Worker", function (entry, options) {
+    const worker = new RealWorker(`
+      const { parentPort, workerData } = require("node:worker_threads");
+      const from = Buffer.from; let copiedBytes = 0;
+      Buffer.from = function (value, ...args) {
+        if (Buffer.isBuffer(value)) copiedBytes += value.length;
+        return Reflect.apply(from, this, [value, ...args]);
+      };
+      const post = parentPort.postMessage.bind(parentPort);
+      parentPort.postMessage = message => post({ ...message, copiedBytes });
+      import(workerData.entry);
+    `, { ...options, eval: true, workerData: { ...options.workerData, entry: entry.href } });
+    worker.once("message", message => copies.push(message.copiedBytes));
+    return worker;
+  });
+  syncBuiltinESMExports();
+  try {
+    await writeFile(path.join(cwd, "complete.txt"), "first\nsecond\n");
+    const complete = await handlers["files.grep"]({ path: "complete.txt", pattern: ".", limit: 10 }, context());
+    assert.deepEqual(complete.matches.map(match => match.text), ["first", "second"]);
+    assert.equal(copies[0], 0, "synchronous line decoding must not copy completed chunk slices");
+
+    // The first chunk's final fragment must survive reuse by the next read.
+    const prefix = "x".repeat(65_535);
+    await writeFile(path.join(cwd, "split.txt"), `${prefix}界TAIL\nnext\n`);
+    const split = await handlers["files.grep"]({ path: "split.txt", pattern: "TAIL|next", limit: 10 }, context());
+    assert.deepEqual(split.matches.map(match => match.line), [1, 2]);
+    assert.match(split.matches[0].text, /line truncated/);
+    assert.equal(split.matches[1].text, "next");
+    assert.equal(copies[1], 65_536, "only the fragment retained across a read needs a copy");
+
+    await writeFile(path.join(cwd, "complete.txt"), "fresh\n");
+    const fresh = await handlers["files.grep"]({ path: "complete.txt", pattern: ".", limit: 10 }, context());
+    assert.deepEqual(fresh.matches.map(match => match.text), ["fresh"]);
+    assert.equal(copies[2], 0);
+  } finally {
+    wrapped.mock.restore();
+    syncBuiltinESMExports();
+  }
+});

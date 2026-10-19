@@ -127,9 +127,10 @@ async function grep() {
 
     const takeLine = (piece) => {
       let raw;
-      if (lineParts.length === 0) raw = Buffer.from(piece);
+      // Completed slices are consumed synchronously before the chunk is reused.
+      if (lineParts.length === 0) raw = piece;
       else {
-        lineParts.push(Buffer.from(piece));
+        lineParts.push(piece);
         raw = Buffer.concat(lineParts, lineBytes + piece.length);
         lineParts = [];
         lineBytes = 0;
