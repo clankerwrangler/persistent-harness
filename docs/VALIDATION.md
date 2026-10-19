@@ -259,6 +259,13 @@ release and successive requests; it abstracts the UTF-8 decoder and JSON parser.
 Native adapter regressions retain split UTF-8/BOM, CRLF/EOF, backlog limits,
 first errors, proof/usage handling and reader cleanup.
 
+`NativeTemplateOwnership` checks admitted-value detachment, private stored
+templates, fresh requests, continuation guards, terminal publication, and cleanup.
+Its `Borrow`, `Expose`, `Retain`, `Guards`, and `Copy` controls must fail. The
+finite two-request model abstracts JSON and transport behavior. Native WebSocket
+regressions check caller mutations and template changes without a second JSON
+copy; the initial post-hook JSON snapshot remains required.
+
 `ProviderErrorMetadata` checks fixed-field redaction, unknown-value noninterference, unchanged retry/error classification, and final-attempt ownership. Adapter tests cover actual error frames, private payloads and hook exceptions, retry resets, and a produced interrupted suffix carried through the actor stream planner into offline next-request serializers.
 
 `ChildExitDelivery` models atomic generation-bound failure receipts, silent intentional exits, parent availability/deletion, retransmission after restart, and idempotent recipient incorporation. TLC checked 967 generated states, 181 distinct states, and depth 11 with no errors. It abstracts SQLite durability, fixed payload validation, and the existing family-message transport; it does not prove exactly-once inference or explain heap growth. Store and supervisor regressions exercise actual receipt persistence, worker-exit events, privacy, direct-parent routing, restart/redelivery, and acknowledgement. The native integration kills only a verified synthetic child process group and checks automatic parent inference, one canonical receipt, acknowledgement, and no child revival.
