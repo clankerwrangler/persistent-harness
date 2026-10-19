@@ -1,5 +1,9 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { mkdtemp, rm } from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
+import { PythonRuntimeManager } from "../src/python-runtime.mjs";
 
 process.env.PI_HARNESS_ACTOR_ID = "fixture-session";
 process.env.PI_HARNESS_ACTOR_TOKEN = "fixture-token-not-a-credential";
@@ -14,6 +18,7 @@ function fixture() {
     registerTool: (definition) => tools.set(definition.name, definition),
     registerCommand() {}, registerMessageRenderer() {}, events: { on() {} },
     on: (name, handler) => hooks.set(name, handler),
+    getCommands: () => [],
   }, owner);
   return { tools, hooks, owner };
 }
@@ -158,4 +163,63 @@ test("ordinary preflight and compaction keep the existing path without starting 
   assert.equal(await hooks.get("tool_call")({ toolName: "ipython" }, ctx), undefined);
   assert.deepEqual(await owner.prepareCompaction({ customInstructions: "keep caller instructions" }, ctx), { customInstructions: "keep caller instructions" });
   assert.deepEqual(hooks.get("before_provider_request")({ payload: { model: "ordinary" } }, ctx), { model: "ordinary" });
+});
+
+
+test("namespace recovery visibility latches only after the complete diagnostic and resets for a new kernel", async t => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), "namespace-latch-"));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const enabled = process.env.PI_HARNESS_NATIVE_ASYNC;
+  process.env.PI_HARNESS_NATIVE_ASYNC = "1";
+  t.after(() => { if (enabled === undefined) delete process.env.PI_HARNESS_NATIVE_ASYNC;
+    else process.env.PI_HARNESS_NATIVE_ASYNC = enabled; });
+  let activeKernel, reportThrows = false;
+  const reportError = new SyntaxError("report getter"), payloadError = new SyntaxError("payload getter");
+  const skipped = { get name() { if (reportThrows) throw reportError; return "fixture"; } };
+  t.mock.method(PythonRuntimeManager.prototype, "launch", async () => {
+    activeKernel = { isRunning: true, async close() {}, snapshotStats: {} };
+    return { kernel: activeKernel, ready: { restore: { found: true, skipped: [skipped] } } };
+  });
+  const { hooks } = fixture();
+  const ctx = { cwd: directory, model: astra, ui: { setStatus() {}, notify() {} },
+    sessionManager: { getBranch: () => [], getSessionId: () => "fixture-session",
+      getSessionFile: () => path.join(directory, "session.jsonl") } };
+  const gate = () => hooks.get("tool_call")({ toolName: "ipython" }, ctx);
+  const payload = value => hooks.get("before_provider_request")({ payload: value }, ctx);
+  const initial = await gate();
+  assert.equal(initial.block, true);
+  const diagnostic = initial.reason.slice(initial.reason.indexOf("\n\n") + 2);
+  payload({ text: "missing" }); assert.equal((await gate()).block, true);
+  payload({ text: diagnostic.slice(0, -1) }); assert.equal((await gate()).block, true);
+  let payloadReads = 0;
+  const throwing = { get text() { payloadReads++; throw payloadError; } };
+  reportThrows = true;
+  assert.throws(() => payload(throwing), error => error === reportError);
+  assert.equal(payloadReads, 0, "unresolved report errors precede payload observations");
+  reportThrows = false;
+  assert.throws(() => payload(throwing), error => error === payloadError);
+  assert.equal(payloadReads, 1);
+  payload({ text: diagnostic }); assert.equal(await gate(), undefined);
+  reportThrows = true;
+  assert.equal(payload(throwing), throwing, "latched diagnostic and serialization-only errors disappear");
+  assert.equal(payloadReads, 1);
+  const cyclic = {}; cyclic.self = cyclic;
+  assert.equal(payload(cyclic), cyclic);
+  let jsonReads = 0;
+  const customJSON = { toJSON() { jsonReads++; throw payloadError; } };
+  assert.equal(payload(customJSON), customJSON); assert.equal(jsonReads, 0);
+  const grok = { model: { provider: "grok-cli" } };
+  const emptyTools = { tool_choice: "none", toolChoice: "none" };
+  assert.equal(hooks.get("before_provider_request")({ payload: emptyTools }, grok), emptyTools);
+  assert.deepEqual(emptyTools, {}, "the required sanitizer still edits each latched request");
+  const tools = { tools: [{ name: "fixture" }], tool_choice: "auto" };
+  assert.equal(hooks.get("before_provider_request")({ payload: tools }, grok), tools);
+  assert.equal(tools.tool_choice, "auto");
+  const badTools = Object.defineProperty({}, "tools", { get() { throw payloadError; } });
+  assert.throws(() => hooks.get("before_provider_request")({ payload: badTools }, grok), error => error === payloadError);
+  reportThrows = false; activeKernel.isRunning = false;
+  assert.equal((await gate()).block, true);
+  assert.throws(() => payload(throwing), error => error === payloadError, "replacement kernels require a fresh diagnostic");
+  await hooks.get("session_shutdown")();
+  assert.equal(payload(throwing), throwing, "shutdown clears the recovery owner");
 });
