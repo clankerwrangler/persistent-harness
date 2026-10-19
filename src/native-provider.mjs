@@ -185,26 +185,33 @@ async function* sse(response, signal, maxFrameBytes) {
   const reader = response.body.getReader();
   const decoder = new TextDecoder("utf-8", { fatal: true });
   let buffer = "", data = [];
+  let bufferBytes = 0, dataBytes = 0;
   const abort = () => { void reader.cancel().catch(() => {}); };
   signal.addEventListener("abort", abort, { once: true });
   try {
     while (true) {
       const { value, done } = await wait(reader.read(), signal);
-      buffer += done ? decoder.decode() : decoder.decode(value, { stream: true });
-      if (done) buffer += "\n\n";
+      const decoded = done ? decoder.decode() : decoder.decode(value, { stream: true });
+      buffer += decoded; bufferBytes += Buffer.byteLength(decoded);
+      if (done) { buffer += "\n\n"; bufferBytes += 2; }
       let match;
       while ((match = /\r\n|\r|\n/.exec(buffer))) {
         // Keep a trailing CR until the next chunk to recognize CRLF correctly.
         if (!done && match[0] === "\r" && match.index === buffer.length - 1) break;
         const line = buffer.slice(0, match.index);
         buffer = buffer.slice(match.index + match[0].length);
+        bufferBytes -= Buffer.byteLength(line) + match[0].length;
         if (line === "") {
-          const text = data.join("\n"); data = [];
+          const text = data.join("\n"); data = []; dataBytes = 0;
           if (text && text !== "[DONE]") yield parse(text);
-        } else if (line.startsWith("data:")) data.push(line.slice(5).replace(/^ /, ""));
-        if (Buffer.byteLength(buffer) + data.reduce((size, part) => size + Buffer.byteLength(part), 0) > maxFrameBytes) fail("provider_frame_limit");
+        } else if (line.startsWith("data:")) {
+          const part = line.slice(5).replace(/^ /, "");
+          data.push(part); dataBytes += Buffer.byteLength(part);
+        }
+        // Count pending backlog and data values, not the newlines inserted by join.
+        if (bufferBytes + dataBytes > maxFrameBytes) fail("provider_frame_limit");
       }
-      if (Buffer.byteLength(buffer) > maxFrameBytes) fail("provider_frame_limit");
+      if (bufferBytes > maxFrameBytes) fail("provider_frame_limit");
       if (done) break;
     }
   } finally {

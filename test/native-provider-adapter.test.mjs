@@ -1055,3 +1055,79 @@ for (const failure of ["eof", "json", "api", "hook", "abort", "internal-abort", 
     assert(view.diagnostics.some(d => d.code === "ORDINARY_ASSISTANT_NOT_REPLAYABLE"));
   }
 });
+
+
+test("SSE accounting measures each data value once and starts fresh on the next request", async t => {
+  const count = 64, original = Buffer.byteLength;
+  let spaces = 0;
+  Buffer.byteLength = function (value, ...args) {
+    if (value === " ") spaces++;
+    return original.call(this, value, ...args);
+  };
+  try {
+    const a = await adapter(t, { fetch: async () => new Response("data:  \n".repeat(count) + encoded([complete()])) });
+    for (let request = 0; request < 2; request++) {
+      const before = spaces;
+      const result = await a.stream(model, context, { transport: "sse" }).result();
+      assert.equal(result.stopReason, "stop", result.errorMessage);
+      assert.equal(spaces - before, count);
+    }
+  } finally { Buffer.byteLength = original; }
+});
+
+test("SSE accounting excludes join newlines and resets data between frames", async t => {
+  const raw = JSON.stringify(complete()), prefix = "data:  \n";
+  const values = [prefix, prefix, prefix, prefix, `data: ${raw}\n\n`];
+  const maximum = Buffer.byteLength(raw) + 5; // Four data spaces plus the pending blank-line LF.
+  const a = await adapter(t, { maxFrameBytes: maximum, fetch: async () => new Response(new ReadableStream({
+    start(controller) { for (const text of values) controller.enqueue(new TextEncoder().encode(text)); controller.close(); },
+  })) });
+  const result = await a.stream(model, context, { transport: "sse" }).result();
+  assert.equal(result.stopReason, "stop", result.errorMessage);
+  const b = await adapter(t, { maxFrameBytes: maximum, fetch: async () => new Response(new ReadableStream({
+    start(controller) {
+      for (const event of [{ type: "ignored" }, { type: "ignored" }, complete()])
+        controller.enqueue(new TextEncoder().encode(`data: ${JSON.stringify(event)}\n\n`));
+      controller.close();
+    },
+  })) });
+  assert.equal((await b.stream(model, context, { transport: "sse" }).result()).stopReason, "stop");
+});
+
+test("SSE accounting retains UTF-8/BOM, CRLF splits, EOF and native proof/usage", async t => {
+  const item = callItem({ arguments: '{"code":"é😀"}' });
+  for (const delimiter of ["\n", "\r", "\r\n"]) {
+    const bytes = new TextEncoder().encode("\uFEFF: ignored" + delimiter + encoded(frames(item), delimiter).trimEnd());
+    const a = await adapter(t, { fetch: async () => new Response(new ReadableStream({
+      start(controller) { for (const byte of bytes) controller.enqueue(Uint8Array.of(byte)); controller.close(); },
+    })) });
+    const { events, message } = await collect(a.stream(model, context, { transport: "sse" }));
+    assert.equal(message.stopReason, "toolUse", message.errorMessage);
+    const end = events.find(event => event.type === "toolcall_end");
+    assert.equal(a.nativeCompletion(end).call.arguments.code, "é😀");
+    assert.equal(a.nativeCompletion(copied(end)), null);
+    assert.equal(message.usage.totalTokens, 112);
+  }
+});
+
+test("SSE accounting keeps backlog checks after parsing and always releases the reader", async t => {
+  for (const [chunks, maximum, expected] of [
+    [[":x\n" + "z".repeat(5)], 5, "provider_stream_incomplete"],
+    [[":x\n" + "z".repeat(5)], 4, "provider_frame_limit"],
+    [["z".repeat(5)], 4, "provider_frame_limit"],
+    [["data: {\n", "\n" + "z".repeat(20)], 10, "invalid_provider_json"],
+    [[Uint8Array.of(0xc3)], 100, "provider_request_failed"],
+  ]) {
+    let next = 0, cancelled = 0, released = 0;
+    const a = await adapter(t, { maxFrameBytes: maximum, fetch: async () => ({ ok: true, status: 200, headers: new Headers(),
+      body: { getReader: () => ({ async read() {
+        if (next === chunks.length) return { done: true };
+        const chunk = chunks[next++];
+        return { done: false, value: typeof chunk === "string" ? new TextEncoder().encode(chunk) : chunk };
+      }, async cancel() { cancelled++; }, releaseLock() { released++; } }) },
+    }) });
+    const result = await a.stream(model, context, { transport: "sse" }).result();
+    assert.equal(result.errorMessage, expected);
+    assert.equal(cancelled, 1); assert.equal(released, 1);
+  }
+});
