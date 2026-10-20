@@ -391,11 +391,15 @@ replacement decoding, metadata, and encoding counts with a private process fixtu
 `BackgroundCompletions` checks bounded dispatch ownership, acceptance independent
 of cold owners, durable publication, sent-after-readiness, retry/idempotence,
 owner ordering, safe-checkpoint admission independent of run end, and stop after
-dispatch drain. It abstracts
-filesystem polling and process startup latency. Background notifier/supervisor
-regressions hold startup across later scans, verify same-owner and unrelated-owner
-progress, reject startup then recover without duplicate canonical entries, and
-check bounded dispatch and stop drain. The paired WebUI real-worker browser case
+dispatch drain. Its `Scan.cfg` projection checks scan-start ownership across a
+stale notification read, marker publication, and dispatch retirement, including
+retry and fair completion. The `Scan.IgnoreOwners` control must fail. The model
+abstracts filesystem polling and process startup latency. Background
+notifier/supervisor regressions hold startup across later scans, verify same-owner
+and unrelated-owner progress, reject startup then recover without duplicate
+canonical entries, and check bounded dispatch and stop drain. The stale-read
+regression holds genuine notification absence through marker-rename
+acknowledgement and owner retirement. The paired WebUI real-worker browser case
 checks live queued rows without reload, model-request receipt before an older
 held Python call finishes, exact promotion, and retained-state completion without
 replay. Legacy pending/completed receipts keep their original identity/digest.

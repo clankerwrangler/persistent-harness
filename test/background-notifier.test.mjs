@@ -1,4 +1,6 @@
 import assert from "node:assert/strict";
+import fsPromises from "node:fs/promises";
+import { syncBuiltinESMExports } from "node:module";
 import { execFile, spawn } from "node:child_process";
 import { once } from "node:events";
 import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
@@ -437,18 +439,57 @@ test("fair discovery reaches jobs beyond retained history without stale activity
 
 test("slow completion dispatch ownership stays bounded without losing later jobs", async t => {
   const directory = await mkdtemp(path.join(os.tmpdir(), "background-notifier-dispatch-limit-"));
-  t.after(() => rm(directory, { recursive: true, force: true }));
-  const gate = Promise.withResolvers(); t.after(() => gate.resolve());
+  const gate = Promise.withResolvers(), releaseRead = Promise.withResolvers();
+  const deliveries = []; let monitor, scanOwners, heldId, renameAcknowledged = false;
+  const originalOpen = fsPromises.open, originalRename = fsPromises.rename;
+  const open = t.mock.method(fsPromises, "open", async (file, ...args) => {
+    try { return await originalOpen(file, ...args); }
+    catch (error) {
+      const id = path.basename(path.dirname(file));
+      if (error.code === "ENOENT" && path.basename(file) === "notification.json" && scanOwners?.has(id) && !heldId) {
+        heldId = id;
+        // Return a genuine earlier absence only after that dispatch's sent marker
+        // and live ownership have retired, while this scan is still awaiting I/O.
+        await releaseRead.promise;
+      }
+      throw error;
+    }
+  });
+  const rename = t.mock.method(fsPromises, "rename", async (source, target) => {
+    const result = await originalRename(source, target);
+    if (heldId && target === path.join(directory, heldId, "notification.json")) renameAcknowledged = true;
+    return result;
+  });
+  syncBuiltinESMExports();
+  t.after(async () => {
+    gate.resolve(); releaseRead.resolve();
+    try { await monitor?.stop(); }
+    finally {
+      try { open.mock.restore(); rename.mock.restore(); syncBuiltinESMExports(); }
+      finally { await rm(directory, { recursive: true, force: true }); }
+    }
+  });
   for (let i = 0; i < 130; i++) await createJob(directory, `bg-${i.toString(16).padStart(12, "0")}`);
-  const deliveries = [];
-  const monitor = new BackgroundCompletionMonitor({ directory, intervalMs: 100, dispatch: async job => {
+  monitor = new BackgroundCompletionMonitor({ directory, intervalMs: 100, dispatch: async job => {
     deliveries.push(job.id); await gate.promise;
   } });
-  monitor.start(); t.after(() => monitor.stop());
+  monitor.start();
   await eventually(() => deliveries.length === 128);
+  scanOwners = new Set(deliveries);
+  await eventually(() => heldId !== undefined);
   await new Promise(resolve => setTimeout(resolve, 220));
   assert.equal(deliveries.length, 128, "in-flight dispatches share the existing 128-job bound");
-  gate.resolve(); await eventually(() => deliveries.length === 130);
+  gate.resolve();
+  await eventually(() => renameAcknowledged);
+  // The real successful rename has acknowledged publication. Drain its known
+  // markNotification/dispatch-finally microtasks before returning the stale read.
+  await new Promise(setImmediate); releaseRead.resolve();
+  await eventually(() => deliveries.length === 130).catch(error => {
+    const duplicates = deliveries.filter((id, index) => deliveries.indexOf(id) !== index);
+    error.message += `; dispatches=${deliveries.length}, unique=${new Set(deliveries).size}, duplicateIds=${JSON.stringify(duplicates)}`;
+    throw error;
+  });
   await monitor.stop(); assert.equal(new Set(deliveries).size, 130);
+  t.diagnostic(JSON.stringify({ dispatches: deliveries.length, unique: new Set(deliveries).size, heldId }));
   for (const id of deliveries) assert.equal(JSON.parse(await readFile(path.join(directory, id, "notification.json"), "utf8")).state, "sent");
 });
