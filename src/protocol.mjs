@@ -7,6 +7,20 @@ export const PROTOCOL_VERSION = 2;
 export const ACTOR_INPUT_COMMAND = "persistent-harness-input";
 export const ACTOR_INPUT_MESSAGE_TYPE = "persistent-harness-input";
 
+const classes = new Set(["prompt_preparation", "request_preparation", "compaction_failed", "turn_failed"]);
+const boundaries = new Set(["before_provider_dispatch", "provider_dispatch_unknown", "tool_effects_possible"]);
+
+export function normalizeTurnFailure(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)
+    || Object.keys(value).some(key => !["version", "turnId", "failureClass", "dispatchBoundary"].includes(key))
+    || value.version !== 1 || typeof value.turnId !== "string"
+    || !/^[a-zA-Z0-9-]{1,128}$/.test(value.turnId)
+    || !classes.has(value.failureClass) || !boundaries.has(value.dispatchBoundary)) {
+    throw new Error("invalid actor turn failure receipt");
+  }
+  return { version: 1, turnId: value.turnId, failureClass: value.failureClass, dispatchBoundary: value.dispatchBoundary };
+}
+
 export function actorInputPrompt(inputId) {
   return `/${ACTOR_INPUT_COMMAND} ${encodeURIComponent(string(inputId, "inputId", 128))}`;
 }
@@ -45,7 +59,7 @@ export const MAX_USER_INPUT_BYTES = 32 * 1024;
 
 const requestTypes = new Set([
   "register_actor", "register_client", "heartbeat",
-  "set_session_name", "update_activity", "update_progress_heading", "record_progress_entry", "record_agent_message_entry", "record_child_creation_entry", "set_skill_manifest", "record_usage", "record_context_usage",
+  "set_session_name", "record_actor_turn_failure", "update_activity", "update_progress_heading", "record_progress_entry", "record_agent_message_entry", "record_child_creation_entry", "set_skill_manifest", "record_usage", "record_context_usage",
   "get_actor_input", "accept_actor_input", "record_input_delivery", "flush_actor_inputs",
   "get_roster", "send_message", "ack_message", "spawn_child", "list_children", "session_history", "cron_job",
   "request_attention", "resolve_attention", "list_notifications", "get_notification", "read_notification", "claim_notification_delivery", "record_notification_delivery",
@@ -383,6 +397,10 @@ const validators = new Map([
       leaseId: string(p.leaseId, "params.leaseId", 128), status: p.status }; }],
   ["register_actor", actorRegistration], ["register_client", clientRegistration],
   ["set_session_name", (p) => { const value = record(p, "params"); exact(value, new Set(["name"]), "params"); return { name: value.name == null ? null : string(value.name, "params.name", 256) }; }],
+  ["record_actor_turn_failure", p => {
+    try { return normalizeTurnFailure(p); }
+    catch { throw new ProtocolError("invalid_request", "invalid actor turn failure receipt"); }
+  }],
   ["update_activity", (p) => { const value = record(p, "params"); exact(value, new Set(["streaming"]), "params"); return { streaming: bool(value.streaming, "params.streaming") }; }],
   ["update_progress_heading", progressHeading], ["record_progress_entry", progressEntry], ["record_agent_message_entry", agentMessageEntry], ["record_child_creation_entry", childCreationEntry],
   ["set_skill_manifest", (p) => { const value = record(p, "params"); exact(value, new Set(["skills"]), "params"); return { skills: array(value.skills, "params.skills", 128).map((item, index) => skill(item, `params.skills[${index}]`)) }; }],

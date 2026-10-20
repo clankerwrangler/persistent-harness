@@ -750,6 +750,11 @@ export class HarnessSupervisor {
     this.#requireActor(state);
     if (["spawn_child", "send_message", "revive_child"].includes(type)) this.store.assertSessionAvailable(state.sessionId);
     if (type === "set_session_name") { const session = this.store.setSessionName(state.sessionId, params.name); this.#broadcastNavigator("name_changed"); return { session }; }
+    if (type === "record_actor_turn_failure") {
+      this.store.recordActorTurnFailure(state.sessionId, state.generation, params);
+      this.#retryChildExitMessages();
+      return { recorded: true };
+    }
     if (type === "update_activity") { const session = this.store.setActorActivity(state.sessionId, state.generation, params.streaming); this.#observeNotifications(state.sessionId); this.#syncPassivationTimers(); this.#broadcastNavigator("activity_changed"); return { session }; }
     if (type === "update_progress_heading") return this.#updateProgressHeading(state, params);
     if (type === "record_progress_entry") {

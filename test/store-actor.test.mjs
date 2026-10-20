@@ -762,3 +762,46 @@ test("skill grant context reads raw local identity fields freshly without full s
   for (const id of ["root", "child", "grandchild"]) { assert.equal(read(id).lifecycle, "deleted"); assert.deepEqual(read(id), select(store.getSession(id))); }
   assert.equal(read("still-absent"), undefined);
 });
+
+
+test("resident abnormal turns share durable lifecycle receipts without replaying child work", async t => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), "harness-child-turn-store-"));
+  const databasePath = path.join(dir, "store.sqlite"); let store = new HarnessStore(databasePath);
+  t.after(async () => { store.close(); await rm(dir, { recursive: true, force: true }); });
+  store.createRoot({ sessionId: "parent", sessionFile: "/parent.jsonl", cwd: dir, name: "PRIVATE PARENT", actorToken: "p", launch: {} });
+  for (const id of ["child", "other"]) store.createChild("parent", { sessionId: id, sessionFile: `/${id}.jsonl`,
+    actorToken: id, policy: { name: `PRIVATE CHILD ${id}`, depth: 1, cwd: dir, prompt: "SECRET INPUT" } });
+  store.markActorStarted("child", 1); store.setActorActivity("child", 1, true);
+  const report = { version: 1, turnId: "turn-1", failureClass: "request_preparation", dispatchBoundary: "before_provider_dispatch" };
+  const injection = new DatabaseSync(databasePath);
+  injection.exec("CREATE TRIGGER deny_turn_receipt BEFORE INSERT ON messages BEGIN SELECT RAISE(ABORT, 'synthetic receipt failure'); END");
+  assert.throws(() => store.recordActorTurnFailure("child", 1, report), /synthetic receipt failure/);
+  assert.equal(store.listMessages().length, 0);
+  injection.exec("DROP TRIGGER deny_turn_receipt"); injection.close();
+  store.close(); store = new HarnessStore(databasePath);
+  store.recordActorTurnFailure("child", 1, report); store.recordActorTurnFailure("child", 1, report);
+  const message = store.listPendingChildExitMessages()[0];
+  assert(message.messageId.length <= 128); assert.equal(message.senderId, "child"); assert.equal(message.targetId, "parent");
+  assert.match(message.body, /direct child child.*request_preparation.*before provider dispatch.*extension effects/);
+  assert.doesNotMatch(JSON.stringify(message), /PRIVATE|SECRET/);
+  assert.equal(store.getSession("child").lifecycle, "resident"); assert.equal(store.getSession("child").activity, "working");
+  assert.equal(store.nextQueuedChildTask("child").prompt, "SECRET INPUT");
+  assert.deepEqual(store.listMessagesAwaitingSenderEntry("child"), []);
+  assert.equal(store.listMessages().length, 1);
+  store.markMessageDelivered(message.messageId, "parent");
+  store.close(); store = new HarnessStore(databasePath);
+  assert.equal(store.getMessage(message.messageId).state, "delivered");
+  store.acknowledgeMessage(message.messageId, "parent");
+  store.markActorLifecycle("child", 1, "passivated"); store.prepareActorRevival("child", "new-token");
+  store.recordActorTurnFailure("child", 2, report);
+  assert.equal(store.listMessages().length, 1); assert.equal(store.getMessage(message.messageId).state, "acknowledged");
+  for (const [turnId, dispatchBoundary] of [["turn-2", "provider_dispatch_unknown"], ["turn-3", "tool_effects_possible"]]) {
+    store.recordActorTurnFailure("child", 2, { ...report, turnId, dispatchBoundary });
+  }
+  const pending = store.listPendingChildExitMessages(); assert.equal(pending.length, 2);
+  assert(pending.some(item => /Provider dispatch was attempted.*unknown/.test(item.body)));
+  assert(pending.some(item => /Tool execution was admitted or started.*external effects/.test(item.body)));
+  assert.throws(() => store.recordActorTurnFailure("child", 1, report), /stale/);
+  store.recordActorTurnFailure("parent", 1, report); assert.equal(store.listMessages().length, 3);
+  store.deleteSession("parent"); assert.equal(store.listPendingChildExitMessages().length, 0);
+});

@@ -1,3 +1,4 @@
+import { TURN_FAILURE_ENTRY_TYPE, TURN_FAILURE_ACCEPTED_TYPE, pendingTurnFailureJournal, TurnFailureReporter } from "./child-turn-failure.mjs";
 import { sanitizePresentationText } from "./presentation-directive.mjs";
 import { randomUUID } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
@@ -470,6 +471,7 @@ export default function persistentHarnessExtension(pi, owner = null) {
   if (owner) owner.memoryDiagnostics = () => kernelPromise || kernelRestartPromise
     ? Promise.resolve({ state: "unavailable-busy" })
     : kernel?.memoryDiagnostics() ?? Promise.resolve({ state: "unavailable-not-running" });
+  let turnFailureReporter;
   let currentManifest;
   let lastRestoreReport;
   let namespaceRecovery;
@@ -1059,11 +1061,16 @@ ${catalog.diagnostics.map((item) => item.error).join("\n")}`);
     kernel = undefined;
     currentManifest = undefined;
     namespaceRecovery = undefined;
+    turnFailureReporter?.close();
     if (client) await client.stop();
     activeContext = ctx;
     registerPythonTool(ctx.model);
     enforceHarnessTools(ctx.model);
     const manager = ctx.sessionManager, headers = sessionEntryHeaders(manager);
+    const failureJournal = pendingTurnFailureJournal(headers, id => manager.getEntry(id));
+    turnFailureReporter = new TurnFailureReporter({ client: () => client, acceptedThrough: failureJournal.acceptedThrough,
+      onRecorded: async (_report, journal) => { await appendHistoryEntry(manager, TURN_FAILURE_ACCEPTED_TYPE, { version: 1, ...journal }); } });
+    for (const pending of failureJournal.pending) turnFailureReporter.remember(pending.report, pending.journal);
     knownDeliveredIds = new Set(headers.filter(header => header.type === "custom_message"
       && header.customType === INCOMING_MESSAGE_TYPE && typeof header.messageId === "string").map(header => header.messageId));
     persistedDeliveredIds = new Set(knownDeliveredIds);
@@ -1100,6 +1107,7 @@ ${catalog.diagnostics.map((item) => item.error).join("\n")}`);
         const shortId = client?.connectedSession?.shortId;
         ctx.ui.setStatus(STATUS_KEY, shortId ? `harness ${shortId}` : "harness connected");
         restoreTransientProgress();
+        void turnFailureReporter.flush();
       } else if (state === "connecting") {
         ctx.ui.setStatus(STATUS_KEY, "harness connecting");
       } else if (state === "superseded") {
@@ -1147,6 +1155,7 @@ ${catalog.diagnostics.map((item) => item.error).join("\n")}`);
       throw new Error("supervisor registration did not provide a valid RLM depth");
     }
     actorDepth = registered.session.depth;
+    await turnFailureReporter.flush();
     await actorInputs.flush();
     await flushUsageEntries();
     await flushContextUsage();
@@ -1269,6 +1278,13 @@ ${catalog.diagnostics.map((item) => item.error).join("\n")}`);
     await flushContextUsage();
   });
 
+  if (owner) owner.reportTurnFailure = async (report, entryId) => {
+    const header = sessionEntryHeaders(activeContext.sessionManager).findLast(entry => entry.id === entryId);
+    if (header?.type !== "custom" || header.customType !== TURN_FAILURE_ENTRY_TYPE) throw new Error("turn failure journal entry is unavailable");
+    turnFailureReporter.remember(report, { entryId, position: header.position });
+    await turnFailureReporter.flush();
+  };
+
   if (owner) owner.afterCommit = async () => {
     await actorInputs.flush();
     await flushAcknowledgements();
@@ -1278,6 +1294,7 @@ ${catalog.diagnostics.map((item) => item.error).join("\n")}`);
   };
 
   pi.on("session_shutdown", async () => {
+    turnFailureReporter?.close();
     const activeClient = client;
     const activeKernel = kernel;
     const activeRestart = kernelRestartPromise;

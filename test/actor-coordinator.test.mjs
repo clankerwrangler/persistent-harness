@@ -5,6 +5,7 @@ import os from "node:os";
 import path from "node:path";
 import { createAgentStartPromptCapture } from "../src/actor-prompt.mjs";
 import { projectCanonicalContext, ORDINARY_NON_ADMISSION_CUSTOM_TYPE, registerCanonicalSessionManager } from "../src/canonical-context.mjs";
+import { TURN_FAILURE_ENTRY_TYPE } from "../src/child-turn-failure.mjs";
 import { ActorCoordinator } from "../src/actor-coordinator.mjs";
 import { createCompactionDriver, createCompactionPreparationCapture } from "../src/actor-compaction.mjs";
 import { projectVisibleMessage } from "../src/conversation-projection.mjs";
@@ -193,9 +194,11 @@ test("automatic compaction failure commits a visible error and a later user inpu
   assert.equal(errors.length, 1);
   assert.equal(errors[0].message.errorMessage, "Conversation compaction failed: fixture summary unavailable");
   assert.equal(projectVisibleMessage(errors[0]).text,
-    "This turn stopped because the conversation summary failed. Send another message to retry.");
+    "This turn stopped because the conversation summary failed. Inspect saved progress before continuing.");
   assert.equal(f.events.filter(event => event.type === "message_end" && event.message.stopReason === "error").length, 1);
   assert.equal(f.requests.length, 1); assert.equal(attempts, 1, "failure must not automatically loop");
+  const report = f.manager.getEntries().find(entry => entry.customType === TURN_FAILURE_ENTRY_TYPE).data;
+  assert.equal(report.failureClass, "compaction_failed"); assert.equal(report.dispatchBoundary, "provider_dispatch_unknown");
   await f.coor.submit("try again"); await wait(f.coor.waitForIdle(), "retry input did not recover");
   assert.equal(f.requests.length, 2); assert.equal(f.coor.failure, null);
 });
@@ -336,11 +339,17 @@ for (const stage of ["idle-prompt", "nested-prompt", "request", "neutral-prompt"
   const errors = messages().filter(m => m.stopReason === "error");
   assert.equal(errors.length, 1); assert.equal(errors[0].stopReason, "error");
   assert.equal(errors[0].errorMessage, `${stage === "request" ? "Request" : "Prompt"} preparation failed: 503 injected local preparation`);
-  assert.match(projectVisibleMessage(f.manager.getBranch().find(e => e.message === errors[0])).text, /request preparation failed/);
+  assert.equal(projectVisibleMessage(f.manager.getBranch().find(e => e.message === errors[0])).text,
+    "This turn stopped during request preparation. Inspect saved progress before continuing.");
   assert.equal(f.events.filter(e => e.type === "message_end" && e.message.stopReason === "error").length, 1);
   assert.equal(f.coor.failure.code, "ERR_LOCAL_PREPARATION"); assert.equal(f.coor.failedAttempt, null);
   assert.equal(f.coor.flight, null); assert.equal(f.coor.running, false); assert.equal(f.coor.drivePromise, null);
   assert.equal(f.requests.length, 0); assert.equal(f.runs(), 0);
+  const reports = f.manager.getEntries().filter(e => e.customType === TURN_FAILURE_ENTRY_TYPE);
+  assert.equal(reports.length, 1);
+  assert.equal(reports[0].data.failureClass, stage === "request" ? "request_preparation" : "prompt_preparation");
+  assert.equal(reports[0].data.dispatchBoundary, "before_provider_dispatch");
+  assert.doesNotMatch(JSON.stringify(reports[0].data), /503|injected|FAULT|TAIL/);
   assert(!f.events.some(e => e.type === "auto_retry_start"));
   assert(!f.manager.getBranch().some(e => e.customType === "persistent-harness.inference-retry-v1"));
   assert.deepEqual(f.coor.queue.map(item => item.message), stage === "neutral-prompt" ? [] : ["TAIL"]);
@@ -354,6 +363,29 @@ for (const stage of ["idle-prompt", "nested-prompt", "request", "neutral-prompt"
   assert.equal(messages().filter(m => m.role === "user" && m.content === "TAIL").length, stage === "neutral-prompt" ? 0 : 1);
   assert.equal(f.manager.getBranch().filter(e => e.customType === "fixture.preparation-effect").length, stage === "request" ? 0 : 1);
   assert.equal(messages().filter(m => m.stopReason === "error").length, 1);
+});
+
+
+test("preparation failure after a real tool effect journals one sanitized report even if admission fails", async t => {
+  let prepared = 0, reports = 0;
+  const f = await fixture(t, { persistent: true, retry: { enabled: false }, prepareRequest: () => {
+    if (++prepared === 2) throw new Error("SECRET preparation after real effect");
+  } });
+  f.coor.lifecycle.reportTurnFailure = async () => { reports++; throw new Error("receipt transport unavailable"); };
+  await f.coor.submit("START"); await wait(f.toolStarted.promise, "tool did not start");
+  f.held.resolve(); await wait(f.coor.waitForIdle(), "failed turn did not settle");
+  const entries = f.manager.getEntries().filter(e => e.customType === TURN_FAILURE_ENTRY_TYPE);
+  assert.equal(f.runs(), 1); assert.equal(f.requests.length, 1); assert.equal(reports, 1);
+  assert.equal(entries.length, 1); assert.equal(entries[0].data.dispatchBoundary, "tool_effects_possible");
+  assert.equal(entries[0].data.failureClass, "request_preparation");
+  assert.doesNotMatch(JSON.stringify(entries[0].data), /SECRET|START|transport/);
+  assert.match(f.coor.failure.message, /SECRET preparation/);
+  assert.equal(f.coor.running, false);
+  const saved = (await readFile(f.manager.getSessionFile(), "utf8")).trim().split("\n").map(line => JSON.parse(line));
+  assert.deepEqual(saved.find(e => e.customType === TURN_FAILURE_ENTRY_TYPE).data, entries[0].data);
+  await f.coor.submit("LATER"); await wait(f.coor.waitForIdle(), "later explicit input did not settle");
+  assert.equal(f.requests.length, 2); assert.equal(f.runs(), 1);
+  assert.equal(f.manager.getEntries().filter(e => e.customType === TURN_FAILURE_ENTRY_TYPE).length, 1);
 });
 
 test("admission during a local error commit starts a new run, not the failed inference", async t => {
@@ -382,6 +414,7 @@ test("abort during request preparation retains cancellation classification", asy
   assert.equal(f.requests.length, 0);
   assert.deepEqual(f.manager.getBranch().filter(e => e.message?.role === "assistant").map(e => e.message.stopReason), ["aborted"]);
   assert.notEqual(f.coor.failure?.code, "ERR_LOCAL_PREPARATION");
+  assert(!f.manager.getEntries().some(e => e.customType === TURN_FAILURE_ENTRY_TYPE));
 });
 
 for (const recovery of ["retry", "overflow"]) test(`local preparation failure inside ${recovery} recovery cannot become another provider retry`, async t => {
@@ -396,8 +429,9 @@ for (const recovery of ["retry", "overflow"]) test(`local preparation failure in
   await f.coor.submit("START"); await wait(f.coor.waitForIdle(), "recovery failure did not settle");
   assert.equal(f.requests.length, 1); assert.equal(prepared, 2); assert.equal(summaries, recovery === "overflow" ? 1 : 0);
   const errors = f.manager.getBranch().filter(e => e.message?.stopReason === "error");
-  assert.equal(errors.length, 2); assert.match(errors[1].message.content[0].text, /request preparation failed/);
+  assert.equal(errors.length, 2); assert.match(errors[1].message.content[0].text, /request preparation/);
   assert.equal(f.coor.failure.code, "ERR_LOCAL_PREPARATION"); assert.equal(f.coor.failedAttempt, null);
+  assert.equal(f.manager.getEntries().find(e => e.customType === TURN_FAILURE_ENTRY_TYPE).data.dispatchBoundary, "provider_dispatch_unknown");
   await f.coor.submit("LATER"); await wait(f.coor.waitForIdle(), "later input did not recover");
   assert.equal(f.requests.length, 2); assert.equal(f.coor.failure, null);
 });
@@ -425,6 +459,7 @@ test("transient failed inference retries with a fresh queued steering snapshot",
   const records = f.manager.getBranch().filter(e => e.type === "custom" && e.customType === "persistent-harness.inference-retry-v1");
   assert.equal(records.length, 2); assert(records.every(e => e.data.observations.admittedCount === 0 && e.data.decision.retry));
   assert(records[1].data.snapshotVersion > records[0].data.snapshotVersion);
+  assert(!f.manager.getEntries().some(e => e.customType === TURN_FAILURE_ENTRY_TYPE));
 });
 test("abort cancels retry delay before another provider request", async t => {
   const f = await fixture(t, { retry: { enabled: true, maxRetries: 2, baseDelayMs: 1000 },
@@ -433,6 +468,7 @@ test("abort cancels retry delay before another provider request", async t => {
   while (!f.events.some(e => e.type === "auto_retry_start")) await new Promise(resolve => setTimeout(resolve, 1));
   await wait(f.coor.abort(), "abort did not drain retry");
   assert.equal(f.requests.length, 1); assert.equal(f.coor.isBusy, false);
+  assert(!f.manager.getEntries().some(e => e.customType === TURN_FAILURE_ENTRY_TYPE));
 });
 
 
@@ -636,6 +672,8 @@ test("denied overflow terminalizes original failure once without recovery marker
   const entries = f.manager.getEntries();
   assert.equal(entries.filter(e => e.type === "custom" && /compaction-recovery|inference-retry/.test(e.customType)).length, 0);
   assert.equal(entries.filter(e => e.type === "compaction").length, 0);
+  const report = entries.find(e => e.customType === TURN_FAILURE_ENTRY_TYPE).data;
+  assert.equal(report.failureClass, "turn_failed"); assert.equal(report.dispatchBoundary, "provider_dispatch_unknown");
   const errors = entries.filter(e => e.type === "message" && e.message.role === "assistant" && e.message.stopReason === "error");
   assert.equal(errors.length, 1); assert.equal(errors[0].message.errorMessage, "context_length_exceeded");
   assert.deepEqual(entries.filter(e => e.type === "message" && e.message.role === "user").map(e => e.message.id), ["original-id"]);
@@ -680,7 +718,7 @@ test("a failed canonical append leaves already-published text visible and report
   assert.equal(f.events.filter(event => event.type === "message_update" && event.assistantMessageEvent?.type === "text_delta").length, 1);
   assert.match(JSON.stringify(f.events), /synthetic text commit failure/);
   assert.deepEqual(f.manager.getEntries().filter(entry => entry.type === "custom").map(entry => entry.customType),
-    ["persistent-harness.inference-retry-v1"], "only the existing failure decision is recorded; no metadata write or repair");
+    ["persistent-harness.inference-retry-v1", TURN_FAILURE_ENTRY_TYPE], "the failure decision and terminal receipt do not repair uncommitted text");
   assert(!f.manager.getBranch().some(entry => entry.message?.id === attempted.id), "uncommitted text is not claimed durable");
 });
 

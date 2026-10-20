@@ -270,6 +270,19 @@ copy; the initial post-hook JSON snapshot remains required.
 
 `ChildExitDelivery` models atomic generation-bound failure receipts, silent intentional exits, parent availability/deletion, retransmission after restart, and idempotent recipient incorporation. TLC checked 967 generated states, 181 distinct states, and depth 11 with no errors. It abstracts SQLite durability, fixed payload validation, and the existing family-message transport; it does not prove exactly-once inference or explain heap growth. Store and supervisor regressions exercise actual receipt persistence, worker-exit events, privacy, direct-parent routing, restart/redelivery, and acknowledgement. The native integration kills only a verified synthetic child process group and checks automatic parent inference, one canonical receipt, acknowledgement, and no child revival.
 
+`ChildTurnFailure` checks the resident failed-turn producer feeding that same
+lifecycle queue. TLC checked 1,294 generated states, 408 distinct states, and depth
+16 with no errors; `NoJournal` fails the terminal-journal invariant at depth 2,
+and `IgnoreAdmitted` fails the effect-boundary invariant at depth 5.
+The model covers durable pending reports, the ordered acceptance frontier, lost
+report/ACK retries, explicit new input, and conservative provider/tool-effect
+boundaries, including an admitted task that dispatches after failure. It abstracts
+canonical journal durability and the authenticated receipt RPC. Focused coordinator,
+relay, store, and supervisor tests check sanitized markers, admission failure,
+restart/reconnect, sparse pending reconstruction, per-run deduplication,
+parent-only delivery, and preservation of cancellation, successful retry, error
+state/details, and real tool results.
+
 `SnapshotRootAliases` checks first successful root admission, original source
 serialization attempts, eligible healthy restore ownership, and independent
 salvage when group metadata is invalid. Its eight invariants cover exact trusted

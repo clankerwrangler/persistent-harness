@@ -1693,6 +1693,7 @@ test("abnormal child exit durably queues a sanitized direct-parent message", asy
   };
   let supervisor = new HarnessSupervisor(options);
   await supervisor.start(); t.after(async () => { await supervisor.stop(); await rm(root, { recursive: true, force: true }); });
+  await writeFile(path.join(root, "parent.jsonl"), JSON.stringify({ type: "session", version: 3, id: "exit-parent", cwd: root, timestamp: new Date().toISOString() }) + "\n");
   supervisor.store.createRoot({ sessionId: "exit-parent", sessionFile: path.join(root,"parent.jsonl"), cwd: root,
     name: "private-parent-name", actorToken: "parent-token", launch: {} });
   supervisor.store.markActorLifecycle("exit-parent", 1, "stopped");
@@ -1748,6 +1749,65 @@ test("abnormal child exit durably queues a sanitized direct-parent message", asy
   await new Promise(resolve => setTimeout(resolve,1500));
   assert.equal(second.events.length,1);
   assert.equal(supervisor.store.listMessages().length,1);
+});
+
+test("resident failed child turns notify only the parent through the durable lifecycle queue", async t => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "harness-child-turn-"));
+  const skillsPath = path.join(root, "skills"); await mkdir(skillsPath);
+  const actors = new Map();
+  const supervisor = new HarnessSupervisor({ socketPath: path.join(root, "run/sock"),
+    databasePath: path.join(root, "store.sqlite"), pidPath: path.join(root, "run/pid"), skillsPath,
+    actorInactivityMs: 0, notificationTickMs: 20, runtimeProvisioner: async () => ({}),
+    actorFactory: options => { const actor = new FakePiActor(options); actors.set(options.session.sessionId, actor); return actor; },
+    processIdentityFactory: async pid => ({ version: 1, pid, processGroup: pid, startTime: "fake", ownerToken: "fake" }),
+    processTerminator: async () => ({ terminated: true }) });
+  await supervisor.start(); t.after(async () => { await supervisor.stop(); await rm(root, { recursive: true, force: true }); });
+  await writeFile(path.join(root, "parent.jsonl"), JSON.stringify({ type: "session", version: 3, id: "turn-parent", cwd: root, timestamp: new Date().toISOString() }) + "\n");
+  supervisor.store.createRoot({ sessionId: "turn-parent", sessionFile: path.join(root, "parent.jsonl"), cwd: root,
+    name: "PRIVATE PARENT", actorToken: "parent-token", launch: {} });
+  supervisor.store.markActorLifecycle("turn-parent", 1, "stopped");
+  supervisor.store.createChild("turn-parent", { sessionId: "turn-child", sessionFile: path.join(root, "child.jsonl"),
+    actorToken: "child-token", policy: { cwd: root, depth: 1, name: "PRIVATE CHILD", prompt: "SECRET INPUT" } });
+  const browser = new HarnessClient({ socketPath: supervisor.socketPath, heartbeatMs: 0 });
+  await browser.start({ registrationType: "register_client", clientInstanceId: "turn-client" }); t.after(() => browser.stop());
+  await browser.request("revive_session", { sessionId: "turn-child" });
+  const actor = await eventually(() => actors.get("turn-child"));
+  await eventually(() => supervisor.store.submittedChildTask("turn-child"));
+  const launch = supervisor.store.getActorLaunch("turn-child");
+  const child = new HarnessClient({ socketPath: supervisor.socketPath, heartbeatMs: 0 });
+  await child.start({ registrationType: "register_actor", sessionId: launch.sessionId, sessionFile: launch.sessionFile,
+    cwd: launch.cwd, repositoryRoot: launch.repositoryRoot, actorToken: launch.actorToken, actorGeneration: launch.actorGeneration });
+  t.after(() => child.stop());
+  const report = { version: 1, turnId: "failed-run", failureClass: "request_preparation", dispatchBoundary: "before_provider_dispatch" };
+  await assert.rejects(browser.request("record_actor_turn_failure", report));
+  actor.emit("event", { type: "agent_start" });
+  actor.emit("event", { type: "message_end", message: { role: "assistant", stopReason: "error", content: [], errorMessage: "SECRET PREPARATION ERROR" } });
+  assert.deepEqual(await child.request("record_actor_turn_failure", report), { recorded: true });
+  actor.emit("event", { type: "agent_settled" });
+  assert.equal(supervisor.store.getSession("turn-child").lifecycle, "resident");
+  assert.equal(supervisor.store.getSession("turn-child").lastError, "SECRET PREPARATION ERROR");
+  assert.equal(supervisor.store.getSession("turn-child").activity, "idle");
+  assert.equal(supervisor.store.submittedChildTask("turn-child"), undefined);
+  assert.equal(actor.submits.length, 1, "the initial task was not replayed");
+  const receipt = supervisor.store.listPendingMessages("turn-parent")[0];
+  assert(receipt); assert.equal(supervisor.store.listMessages().length, 1);
+  assert.doesNotMatch(JSON.stringify(receipt), /PRIVATE|SECRET/);
+  assert.equal(supervisor.store.getSession("turn-parent").lifecycle, "stopped");
+  supervisor.store.markActorLifecycle("turn-parent", 1, "passivated");
+  await eventually(() => supervisor.store.getSession("turn-parent").lifecycle === "resident", 6000);
+  const parentLaunch = supervisor.store.getActorLaunch("turn-parent");
+  const parent = new HarnessClient({ socketPath: supervisor.socketPath, heartbeatMs: 0 }), delivered = [];
+  parent.on("event", frame => { if (frame.event === "message_available") delivered.push(frame.data.message); });
+  await parent.start({ registrationType: "register_actor", sessionId: parentLaunch.sessionId, sessionFile: parentLaunch.sessionFile,
+    cwd: parentLaunch.cwd, repositoryRoot: parentLaunch.repositoryRoot, actorToken: parentLaunch.actorToken, actorGeneration: parentLaunch.actorGeneration });
+  t.after(() => parent.stop());
+  await eventually(() => delivered.length);
+  assert.equal(delivered[0].senderName, "Harness lifecycle"); assert.equal(delivered[0].messageId, receipt.messageId);
+  assert.match(delivered[0].body, /request_preparation.*before provider dispatch/);
+  await parent.request("ack_message", { messageId: receipt.messageId });
+  await child.request("record_actor_turn_failure", report);
+  assert.equal(supervisor.store.listMessages().length, 1); assert.equal(supervisor.store.getMessage(receipt.messageId).state, "acknowledged");
+  assert.equal(actor.submits.length, 1); assert.equal(actor.isRunning, true);
 });
 
 class FastPiActor extends FakePiActor {
