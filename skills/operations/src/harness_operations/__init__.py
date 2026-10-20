@@ -4,6 +4,11 @@ from _persistent_harness import SkillResult, host_request
 INSTRUCTIONS_PATH = __harness_instructions_path__ if "__harness_instructions_path__" in globals() else None
 
 
+def memory() -> SkillResult:
+    from ._memory import collect
+    return SkillResult(collect())
+
+
 def status() -> SkillResult:
     return SkillResult(host_request("operations.status", {}))
 
