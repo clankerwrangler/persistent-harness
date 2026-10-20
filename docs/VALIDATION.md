@@ -270,6 +270,16 @@ copy; the initial post-hook JSON snapshot remains required.
 
 `ChildExitDelivery` models atomic generation-bound failure receipts, silent intentional exits, parent availability/deletion, retransmission after restart, and idempotent recipient incorporation. TLC checked 967 generated states, 181 distinct states, and depth 11 with no errors. It abstracts SQLite durability, fixed payload validation, and the existing family-message transport; it does not prove exactly-once inference or explain heap growth. Store and supervisor regressions exercise actual receipt persistence, worker-exit events, privacy, direct-parent routing, restart/redelivery, and acknowledgement. The native integration kills only a verified synthetic child process group and checks automatic parent inference, one canonical receipt, acknowledgement, and no child revival.
 
+`SnapshotRootAliases` checks first successful root admission, original source
+serialization attempts, eligible healthy restore ownership, and independent
+salvage when group metadata is invalid. Its eight invariants cover exact trusted
+root grouping, no false merge, protected/unhealthy exclusion, decoded-owner
+selection, and no malformed-group checkpoint attribution. The finite model does
+not cover descendant sharing or Python/FD behavior. Snapshot durability and
+failure fixtures exercise real serialization, fresh ordinary/durable workers,
+independent corruption salvage, legacy restore, and the original payload and
+manifest capacities.
+
 `KernelCompletion` checks that failed execution cannot become terminal until the controlled process exits, while successful execution can complete before namespace saving. It abstracts signal delivery and transport errors. `kernel-completion.test.mjs` checks decoder corruption, control-channel failure, queued-call no-replay, and forced close against real Python process exit.
 
 `NamespaceRecoveryLatch` checks complete diagnostic matching, current kernel and
