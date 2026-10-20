@@ -1200,7 +1200,7 @@ function projectManagedSource(manager, mode, stringCodeUnits) {
 }
 
 function createProjectedSource(manager, sdkSource, descriptors, stringCodeUnits, estimator, profiles) {
-  const read = index => {
+  const read = (index, budget) => {
     sdkSource.validate();
     requireThat(Number.isSafeInteger(index) && index >= 0 && index < descriptors.length, "ERR_CONTEXT_SOURCE_PROJECTION");
     const item = descriptors[index], message = copyData(sdkSource.read(item.index), { stringCodeUnits });
@@ -1230,11 +1230,22 @@ function createProjectedSource(manager, sdkSource, descriptors, stringCodeUnits,
     if (item.omitted.length) message.content = message.content.filter(block => block.type !== "toolCall" || !item.omitted.includes(block.id));
     sdkSource.validate();
     if (estimator && !profiles.has(item.key)) profiles.set(item.key, copyData(estimator([message])));
-    return copyData(message, { stringCodeUnits });
+    return copyData(message, { stringCodeUnits, budget });
   };
   const contributions = Object.freeze(descriptors.map(item => Object.freeze({ key: item.key, role: item.role })));
-  const source = Object.freeze({ length: descriptors.length, contributions, read,
-    readAll: () => { sdkSource.validate(); return copyData(descriptors.map((_, index) => read(index)), { stringCodeUnits }); },
+  const source = Object.freeze({ length: descriptors.length, contributions, read: index => read(index),
+    readAll: () => {
+      sdkSource.validate();
+      // Each final message copy is already detached. Include the array root and
+      // slot keys in their shared budget instead of copying the whole view again.
+      requireThat(descriptors.length + 2 <= CANONICAL_CONTEXT_LIMITS.nodes, "ERR_CONTEXT_DATA_LIMIT");
+      const budget = { nodes: 1, depth: 1, codeUnits: 0 };
+      return descriptors.map((_, index) => {
+        budget.codeUnits += String(index).length;
+        requireThat(budget.codeUnits <= stringCodeUnits, "ERR_CONTEXT_DATA_LIMIT");
+        return read(index, budget);
+      });
+    },
     currentSystemMessage: () => sdkSource.currentSystemMessage(), validate: () => sdkSource.validate(),
     estimateContextTokens: estimator ? () => {
       sdkSource.validate();
