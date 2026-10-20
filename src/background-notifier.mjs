@@ -221,12 +221,15 @@ export class BackgroundCompletionMonitor {
   async #runScan() {
     if (this.#stopped || this.#scanPromise) return this.#scanPromise;
     const operation = (async () => {
+      // A pending read can outlive an earlier dispatch's marker publication and
+      // retirement. Its snapshot cannot redispatch work owned at scan start.
+      const scanOwners = new Set(this.#inFlight.keys());
       const jobs = await this.#scanJobs();
       if (this.#stopped) return;
       this.#publishActiveJobs(jobs);
       for (const { completed: job } of jobs) {
         if (!job) continue;
-        if (this.#stopped || job.notificationState || this.#inFlight.has(job.id) || this.#inFlight.size >= MAX_JOBS) continue;
+        if (this.#stopped || job.notificationState || scanOwners.has(job.id) || this.#inFlight.has(job.id) || this.#inFlight.size >= MAX_JOBS) continue;
         const delivery = Promise.resolve().then(async () => {
           try {
             const result = await this.#dispatch({ ...job, message: backgroundCompletionMessage(job) });
