@@ -1,6 +1,9 @@
 import { createHash } from "node:crypto";
 import { access, chmod, lstat, mkdir, readFile, readdir, readlink, rename, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
+import { prepareSkillArtifact, verifySkillArtifact } from "./skill-artifacts.mjs";
+
+const artifactSkillCache = new Map();
 
 const SKILL_NAME = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
 const PYTHON_IDENTIFIER = /^[A-Za-z_][A-Za-z0-9_]*$/;
@@ -28,7 +31,8 @@ async function hashDirectory(directory, loadedFiles) {
       digest.update(`${entry.isDirectory() ? "d" : entry.isSymbolicLink() ? "l" : "f"}:${relative}\0`);
       if (entry.isDirectory()) await visit(fullPath, relative);
       else if (entry.isSymbolicLink()) digest.update(await readlink(fullPath));
-      else digest.update(loadedFiles.get(fullPath) ?? await readFile(fullPath));
+      else if (entry.isFile()) digest.update(loadedFiles.get(fullPath) ?? await readFile(fullPath));
+      else throw new Error("unsupported skill entry type");
       digest.update("\0");
     }
   }
@@ -206,6 +210,9 @@ async function exists(filePath) {
 async function loadSkill(command) {
   const commandPath = command.path ?? command.sourceInfo?.path;
   const skillPath = path.resolve(commandPath);
+  const artifact = await verifySkillArtifact(skillPath);
+  const cachedArtifact = artifactSkillCache.get(skillPath);
+  if (artifact && cachedArtifact?.fingerprint === artifact.fingerprint) return cloneSkill(cachedArtifact.skill);
   const contentBytes = await readFile(skillPath);
   const content = contentBytes.toString("utf8");
   const loadedFiles = new Map([[skillPath, contentBytes]]);
@@ -236,10 +243,10 @@ async function loadSkill(command) {
   if (!PYTHON_IDENTIFIER.test(alias) || PYTHON_KEYWORDS.has(alias)) {
     throw new Error(`${skillPath}: derived alias ${alias} is not a valid Python identifier`);
   }
-  const contentHash = path.basename(skillPath) === "SKILL.md"
+  const contentHash = artifact?.sourceContentHash ?? (path.basename(skillPath) === "SKILL.md"
     ? await hashDirectory(skillDir, loadedFiles)
-    : sha256(content);
-  return {
+    : sha256(content));
+  const skill = {
     id: markdown.name,
     description: markdown.description,
     alias,
@@ -250,6 +257,29 @@ async function loadSkill(command) {
     version: python?.version ?? `sha256:${contentHash}`,
     python,
   };
+  if (artifact) {
+    artifactSkillCache.set(skillPath, { fingerprint: artifact.fingerprint, skill: cloneSkill(skill) });
+    while (artifactSkillCache.size > 256) artifactSkillCache.delete(artifactSkillCache.keys().next().value);
+  }
+  return skill;
+}
+
+// Call at catalog preparation, before a worker generation is admitted. The
+// returned paths, not mutable discovery paths, belong in its existing grant.
+export async function materializeSkills(skills, { artifactRoot }) {
+  const frozen = [];
+  for (const skill of skills) {
+    if (await verifySkillArtifact(skill.skillPath)) { frozen.push(cloneSkill(skill)); continue; }
+    const artifact = await prepareSkillArtifact(skill, { artifactRoot, verifyTree: async skillPath => {
+      const captured = await loadSkill({ path: skillPath });
+      if (captured.id !== skill.id || captured.alias !== skill.alias || captured.version !== skill.version
+        || captured.contentHash !== skill.contentHash || Boolean(captured.python) !== Boolean(skill.python)) {
+        throw new Error("SKILL_ARTIFACT_SOURCE_CHANGED");
+      }
+    } });
+    frozen.push(await loadSkill({ path: artifact.skillPath }));
+  }
+  return frozen;
 }
 
 export async function verifyManifest(manifest) {

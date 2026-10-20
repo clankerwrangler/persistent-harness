@@ -39,14 +39,14 @@ import { normalizeProgressHeading } from "./progress-projection.mjs";
 import { PresentationDirectiveFilter, sanitizePresentationText } from "./presentation-directive.mjs";
 import { RootOutputProjector } from "./root-output-projector.mjs";
 import { buildPiSessionContext, createPiSession } from "./pi-session.mjs";
-import { sessionSidecarPaths } from "./session-paths.mjs";
+import { sessionSidecarPaths, publishActorGenerationSkillGrant } from "./session-paths.mjs";
 import { SessionHistoryIndex } from "./session-history-index.mjs";
 import { retryIntentForRequest, KERNEL_RELOAD_COMMAND, retryBranchMessage, SESSION_ACTION_TIMEOUT_MS } from "./session-actions.mjs";
 import { DEFAULT_PROMPT_PREFLIGHT_TIMEOUT_MS, PiSessionActor } from "./session-actor.mjs";
 import { VisibleTranscriptReader } from "./visible-transcript-reader.mjs";
 import { HarnessStore } from "./store.mjs";
 import { PythonRuntimeManager, runtimeVersions } from "./python-runtime.mjs";
-import { discoverSkills, discoverSkillsFromDirectory, skillCatalogForSkills } from "./skills.mjs";
+import { discoverSkills, discoverSkillsFromDirectory, materializeSkills, skillCatalogForSkills } from "./skills.mjs";
 import { defaultRootName, resolveRootTitle, firstCompletedTitleTurn } from "./root-title.mjs";
 import { createRootTitleGenerator } from "./root-title-generator.mjs";
 
@@ -439,6 +439,7 @@ export class HarnessSupervisor {
     this.actorExtensionPath = path.resolve(actorExtensionPath);
     this.actorExtensionPaths = [...new Set(actorExtensionPaths.map((item) => path.resolve(item)))].filter((item) => item !== this.actorExtensionPath);
     this.skillsPath = path.resolve(skillsPath);
+    this.skillArtifactRoot = path.join(path.dirname(path.resolve(databasePath)), "skill-artifacts");
     this.runtimeDir = path.resolve(runtimeDir);
     this.runtimeProvisioner = runtimeProvisioner ?? ((skills, { approved = false, onProgress = () => {} } = {}) => new PythonRuntimeManager({ runtimeDir: this.runtimeDir }).ensure({
       skills,
@@ -1573,6 +1574,7 @@ export class HarnessSupervisor {
   async #discoverSkillRuntimePlan() {
     const catalog = await discoverSkillsFromDirectory(this.skillsPath);
     if (catalog.diagnostics.length) throw requestFailure("invalid_skill_catalog", catalog.diagnostics.map((item) => item.error).join("; "));
+    catalog.skills = await materializeSkills(catalog.skills, { artifactRoot: this.skillArtifactRoot });
     const skills = skillCatalogForSkills(catalog.skills);
     const fingerprint = skillCatalogFingerprint(skills);
     const dependencies = [...new Set(catalog.skills.flatMap((skill) => skill.python?.dependencies ?? []))].sort();
@@ -1651,6 +1653,7 @@ export class HarnessSupervisor {
     try {
       const catalog = await discoverSkillsFromDirectory(this.skillsPath);
       if (catalog.diagnostics.length) throw new Error(catalog.diagnostics.map((item) => item.error).join("; "));
+      catalog.skills = await materializeSkills(catalog.skills, { artifactRoot: this.skillArtifactRoot });
       const skills = skillCatalogForSkills(catalog.skills);
       if (previous && !sameSkillCatalog(previous.skills, skills)) await this.#assertSkillRuntimeReady(catalog.skills);
       this.#skillCatalogDiagnostic = undefined;
@@ -1867,12 +1870,12 @@ export class HarnessSupervisor {
     if (!session.sessionFile) throw new Error(`session ${session.sessionId} has no canonical Pi session file`);
     args.push("--session", session.sessionFile); return args;
   }
-  #actorEnv(session, compileCache) {
+  #actorEnv(session, compileCache, generationSkillGrantPath) {
     const env = { ...process.env, PI_HARNESS_WORKER_EVENTS: "supervised-source", PI_HARNESS_SOCKET: this.socketPath, PI_HARNESS_AUTO_START: "0", PI_HARNESS_ACTOR_ID: session.sessionId, PI_HARNESS_ACTOR_TOKEN: session.actorToken, PI_HARNESS_ACTOR_GENERATION: String(session.actorGeneration) };
     delete env.PI_SESSION_ID; delete env.PI_SESSION_FILE;
     delete env.PI_HARNESS_ACTOR_COMPILE_CACHE;
     if (compileCache) env.PI_HARNESS_ACTOR_COMPILE_CACHE = compileCache.directory;
-    env.PI_HARNESS_ACTOR_SKILL_GRANT = sessionSidecarPaths(session.sessionFile).skillGrantPath;
+    env.PI_HARNESS_ACTOR_SKILL_GRANT = generationSkillGrantPath;
     return env;
   }
   async #launchActor(sessionId, check) {
@@ -1890,7 +1893,9 @@ export class HarnessSupervisor {
     const compileCache = await (this.#actorCompileCache ??= createActorCompileCache());
     check();
     const session = this.store.getActorLaunch(sessionId); if (!session || session.lifecycle !== "starting" || this.store.isSessionDeleting(sessionId)) return;
-    const worker = this.actorFactory({ command: process.execPath, args: [STOCK_ACTOR_WORKER, ...this.#actorArgs(session)], cwd: session.cwd, env: { ...this.#actorEnv(session, compileCache), PI_HARNESS_PI_COMMAND: this.piCommand }, startupTimeoutMs: this.actorStartupTimeoutMs, promptPreflightTimeoutMs: this.actorPromptPreflightTimeoutMs,
+    const generationSkillGrantPath = await publishActorGenerationSkillGrant(session, skillGrant);
+    check();
+    const worker = this.actorFactory({ command: process.execPath, args: [STOCK_ACTOR_WORKER, ...this.#actorArgs(session)], cwd: session.cwd, env: { ...this.#actorEnv(session, compileCache, generationSkillGrantPath), PI_HARNESS_PI_COMMAND: this.piCommand }, startupTimeoutMs: this.actorStartupTimeoutMs, promptPreflightTimeoutMs: this.actorPromptPreflightTimeoutMs,
       shutdownTimeoutMs: this.actorShutdownTimeoutMs, session });
     const record = { worker, generation: session.actorGeneration, rootOutputSession: Object.freeze({ sessionId: session.sessionId, kind: session.kind, depth: session.depth }), expectedLifecycle: null, exitError: null, eventSeq: 0, eventRing: [], eventRingBytes: 0, progressSummary: undefined, progressTurnId: null,
       skillGrantFingerprint: skillGrant.fingerprint, skillGrantSkills: skillGrant.skills, skillRefreshPending: false,
