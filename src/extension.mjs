@@ -1,8 +1,8 @@
 import { TURN_FAILURE_ENTRY_TYPE, TURN_FAILURE_ACCEPTED_TYPE, pendingTurnFailureJournal, TurnFailureReporter } from "./child-turn-failure.mjs";
 import { sanitizePresentationText } from "./presentation-directive.mjs";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
-import { readFile, realpath } from "node:fs/promises";
+import { lstat, readFile, realpath } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -17,7 +17,7 @@ import { PythonKernel } from "./kernel.mjs";
 import { PythonRuntimeManager } from "./python-runtime.mjs";
 import { PROGRESS_ENTRY_TYPE, ProgressHeadingTracker } from "./progress-projection.mjs";
 import { discoverSkills, manifestForSkills, writeManifestAtomic } from "./skills.mjs";
-import { sessionSidecarPaths } from "./session-paths.mjs";
+import { sessionSidecarPaths, actorGenerationGrantIdentity } from "./session-paths.mjs";
 import { applyRetryBranch, KERNEL_RELOAD_COMMAND } from "./session-actions.mjs";
 import { inputIdForEntry, resolveActorInputAssociation } from "./conversation-projection.mjs";
 import { projectAssistantUsageEntry, projectContextUsage } from "./session-telemetry.mjs";
@@ -41,13 +41,21 @@ const ACTOR_SKILL_GRANT_PATH = process.env.PI_HARNESS_ACTOR_SKILL_GRANT || null;
 let actorGrantPromise;
 async function actorSkillGrant() {
   if (!ACTOR_SKILL_GRANT_PATH) return null;
-  actorGrantPromise ??= readFile(ACTOR_SKILL_GRANT_PATH, "utf8").then((content) => {
+  actorGrantPromise ??= (async () => {
+    const identity = actorGenerationGrantIdentity(ACTOR_SKILL_GRANT_PATH);
+    const stat = await lstat(ACTOR_SKILL_GRANT_PATH);
+    if (!stat.isFile() || stat.size > 1024 * 1024 || (stat.mode & 0o277)) throw new Error("invalid actor generation grant file");
+    const content = await readFile(ACTOR_SKILL_GRANT_PATH, "utf8");
+    if (identity.generation !== ACTOR_GENERATION || createHash("sha256").update(content).digest("hex") !== identity.digest) {
+      throw new Error("actor generation skill grant identity mismatch");
+    }
     const grant = JSON.parse(content);
+    if (grant.sessionId !== ACTOR_ID || grant.actorGeneration !== ACTOR_GENERATION) throw new Error("actor generation skill grant binding mismatch");
     if (grant?.version !== 1 || !Array.isArray(grant.skills) || !Array.isArray(grant.capabilities)) {
       throw new Error("invalid actor skill grant");
     }
     return grant;
-  });
+  })();
   return actorGrantPromise;
 }
 
@@ -642,7 +650,9 @@ export default function persistentHarnessExtension(pi, owner = null) {
 
   async function resolveSkillManifest(_ctx) {
     const grant = await actorSkillGrant();
-    const catalog = await discoverSkills(pi.getCommands());
+    const catalog = await discoverSkills(grant
+      ? grant.skills.map(skill => ({ source: "skill", path: skill.skillPath }))
+      : pi.getCommands());
     if (catalog.diagnostics.length) {
       throw new Error(`Invalid skill package:
 ${catalog.diagnostics.map((item) => item.error).join("\n")}`);
@@ -1343,6 +1353,7 @@ export const extensionInternals = {
   projectNamespaceRecovery,
   namespaceRecoveryText,
   skillPrompt,
+  applyActorSkillGrant,
   appendedSessionEntries,
   incomingSendOptions,
   incomingCustomPayload,

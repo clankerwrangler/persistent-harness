@@ -69,10 +69,15 @@ effort; other Python threads can mutate history independently.
 - `harness/harness.sqlite`: durable supervision, inputs, schedules, and telemetry.
 - `harness/supervisor.pid`: supervised process ownership metadata.
 - `harness/kernel-runtime/`: managed interpreter and dependency environments.
+- `harness/skill-artifacts/`: private verified skill trees shared by content-addressed version; an explicit database path places this directory beside that database.
 - `harness/entry-index-cache/`: optional private derived entry indexes for supported SDKs and explicit sessions; canonical transcripts remain authoritative.
 - Pi's cwd-scoped `sessions/` tree: canonical JSONL transcripts.
 
-Session sidecars derive from the exact canonical filename: `.skill-manifest.json`, `.skill-grant.json`, `.capabilities.json`, and `.kernel-state/`. Do not move a transcript independently of its associated state. Derived indexes do not replace the canonical transcript.
+Session sidecars derive from the exact canonical filename: `.skill-manifest.json`, `.skill-grant.json`, `.capabilities.json`, `.generation-<generation>-<sha256>.skill-grant.json`, and `.kernel-state/`. Do not move a transcript independently of its associated state. Derived indexes do not replace the canonical transcript.
+
+The desired `.skill-grant.json` follows catalog reconciliation. Each worker reads a separate private, create-only generation snapshot with an exact-byte digest. Its skill paths select verified immutable copies, so source edits do not change an admitted generation's lazy imports. Existing idle refresh and revocation boundaries still determine when a replacement generation takes the current catalog. The source `contentHash` keeps its original meaning; the artifact path has a distinct verified materialized identity covering skill-owned runtime bytes, including `build/` and `dist/`.
+
+Active generations and saved kernel manifests retain their artifact versions. There is no automatic artifact garbage collection. Artifact directories are private, not a same-user isolation boundary; content verification and no-overwrite publication own continuity. Managed environments use manifest source paths rather than the retired harness-owned `persistent-harness-skills.pth`; unrelated `.pth` customization remains unchanged.
 
 The supervisor CLI accepts explicit `--socket`, `--db`, and `--pid` paths for isolated instances. Back up the complete selected agent state under a controlled stop, including database sidecars and transcript/kernel files. Do not treat a partial copy of active files as a consistent recovery point.
 

@@ -189,6 +189,15 @@ export class PythonRuntimeManager {
     return { ...candidate, versions };
   }
 
+  async #removeManagedSkillSources(environmentDir) {
+    // Only the harness-owned shim is retired. Manifest PYTHONPATH is already
+    // authoritative; unrelated site customization and override envs stay intact.
+    const pythonMinor = PYTHON_VERSION.split(".").slice(0, 2).join(".");
+    try {
+      await unlink(path.join(environmentDir, "lib", `python${pythonMinor}`, "site-packages", "persistent-harness-skills.pth"));
+    } catch (error) { if (error?.code !== "ENOENT") throw error; }
+  }
+
   async #findCompatibleCompleted(dependencies, validate, isRuntimeRejection) {
     const environmentsDir = path.join(this.runtimeDir, "environments");
     let entries;
@@ -205,6 +214,7 @@ export class PythonRuntimeManager {
         if (record?.version !== 1 || JSON.stringify(record.environmentSpec?.dependencies ?? []) !== JSON.stringify(dependencies)) continue;
         assertManagedVersions(record.versions ?? {});
       } catch { continue; }
+      await this.#removeManagedSkillSources(environmentDir);
       try {
         return await validate({ pythonPath: path.join(environmentDir, "bin", "python"),
           managed: true, environmentId: record.environmentId ?? entry.name, compatible: true });
@@ -240,6 +250,7 @@ export class PythonRuntimeManager {
     const completePath = path.join(environmentDir, "runtime.json");
     const useCompleted = async () => {
       if (!await exists(completePath)) return undefined;
+      await this.#removeManagedSkillSources(environmentDir);
       try {
         return await validate({ pythonPath, managed: true, environmentId });
       } catch (error) {
@@ -305,9 +316,6 @@ export class PythonRuntimeManager {
       `ipython==${IPYTHON_VERSION}`, `dill==${DILL_VERSION}`, ...dependencies,
       "--cache-dir", cacheDir, "--no-config", "--no-progress",
     ], { onProgress });
-    const sitePackages = (await run(pythonPath, ["-c", "import site; print(site.getsitepackages()[0])"])).stdout.trim();
-    const skillSources = skills.flatMap((skill) => skill.python ? [skill.python.srcPath] : []);
-    await writeFile(path.join(sitePackages, "persistent-harness-skills.pth"), `${skillSources.join("\n")}\n`, { mode: 0o600 });
     return validate({ pythonPath, managed: true, environmentId }, async (versions) => {
       const record = { version: 1, environmentId, environmentSpec, versions };
       const temporary = `${completePath}.${process.pid}.tmp`;
