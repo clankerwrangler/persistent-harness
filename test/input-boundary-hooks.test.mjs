@@ -15,8 +15,8 @@ delete process.env.PI_HARNESS_ACTOR_SKILL_GRANT;
 process.env.PI_CODING_AGENT_DIR = directory;
 const { default: extension } = await import("../src/extension.mjs");
 
-async function fixture(t, flush, acknowledge = () => ({})) {
-  const hooks = new Map(), commands = new Map(), sent = [], requests = [], trace = [], entries = [];
+async function fixture(t, flush, acknowledge = () => ({}), initialEntries = []) {
+  const hooks = new Map(), commands = new Map(), sent = [], requests = [], trace = [], entries = [...initialEntries];
   const owner = {};
   let client;
   t.mock.method(HarnessClient.prototype, "start", async function () { client = this; return { session: { depth: 1 } }; });
@@ -25,6 +25,7 @@ async function fixture(t, flush, acknowledge = () => ({})) {
   t.mock.method(HarnessClient.prototype, "request", async (type, params) => {
     requests.push({ type, params });
     if (type === "ack_message") return acknowledge(params.messageId);
+    if (type === "record_actor_turn_failure") return { recorded: true };
     if (type === "flush_actor_inputs") { trace.push("flush"); return flush(); }
     if (type === "get_actor_input") return { input: { inputId: "cron", sessionId: "boundary-fixture", state: "queued",
       source: "cron", origin: { jobId: "job", runId: "run" }, acceptedAt: 10, message: "scheduled work", behavior: "auto" } };
@@ -167,4 +168,23 @@ test("request preparation samples the canonical Fast preference and rejects miss
   assert.equal(off.fastMode, false); assert.equal(on.fastMode, true);
   fastMode = undefined;
   await assert.rejects(f.owner.prepareRequest(request, f.ctx), /inference preferences are unavailable/);
+});
+
+
+test("canonical failed-turn markers are restored at registration without any input or work replay", async t => {
+  const report = { version: 1, turnId: "retained-turn", failureClass: "request_preparation", dispatchBoundary: "before_provider_dispatch" };
+  const journal = { type: "custom", id: "failure-marker", customType: "persistent-harness.turn-failure-v1", data: report };
+  const f = await fixture(t, () => ({ fastMode: false }), undefined, [journal,
+    { ...journal, id: "unknown-version", data: { ...report, version: 2 } }]);
+  assert.deepEqual(f.requests.filter(item => item.type === "record_actor_turn_failure").map(item => item.params), [report]);
+  assert.equal(f.sent.length, 0); assert.equal(f.entries.length, 3);
+  f.entries.push({ ...journal, id: "new-failure-marker", data: { ...report, turnId: "new-failure" } });
+  await f.owner.reportTurnFailure({ ...report, turnId: "new-failure" }, "new-failure-marker");
+  assert.equal(f.requests.filter(item => item.type === "record_actor_turn_failure").length, 2);
+  assert.equal(f.sent.length, 0);
+  await f.hooks.get("session_start")({}, f.ctx);
+  assert.deepEqual(f.requests.filter(item => item.type === "record_actor_turn_failure").map(item => item.params.turnId),
+    ["retained-turn", "new-failure"]);
+  assert.equal(f.sent.length, 0); assert.equal(f.entries.length, 5);
+  await f.hooks.get("session_shutdown")();
 });

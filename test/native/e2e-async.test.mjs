@@ -1001,6 +1001,69 @@ test("abnormal real child exit wakes its parent with one canonical sanitized rec
   assert.equal(f.supervisor.store.getSession(child.sessionId).lifecycle, "error");
 });
 
+test("resident real child preparation failure wakes its parent without provider or work replay", { timeout: 120_000 }, async t => {
+  const wake = deferred();
+  const f = await fixture(t, body => {
+    const last = body.input.at(-1);
+    if (last?.role === "user" && text(last).includes("SPAWN_PREPARATION_PROBE")) {
+      return { calls: [{ id: "spawn-preparation-probe", code: "await rlm('CHILD_PREPARATION_CONTROL', name='private-preparation-name', model='openai-codex/gpt-6-astra')" }] };
+    }
+    if (last?.role === "user" && text(last).includes("Harness lifecycle report")) {
+      wake.resolve(last); return { answer: "PREPARATION_FAILURE_RECEIVED_WITHOUT_REPLAY" };
+    }
+    return { answer: "SYNTHETIC_PARENT_SETTLED" };
+  });
+  // Reject one synthetic child's real authenticated request-preparation cutoff.
+  // The genuine coordinator/extension must journal and report the stopped turn.
+  const preference = f.supervisor.store.getSessionFastMode.bind(f.supervisor.store);
+  let rejectedChild = null, rejections = 0;
+  t.mock.method(f.supervisor.store, "getSessionFastMode", sessionId => {
+    if (!rejectedChild && f.supervisor.store.getSession(sessionId)?.kind === "child") {
+      rejectedChild = sessionId; rejections++;
+      throw new Error("PRIVATE_PREPARATION_CANARY synthetic preference rejection");
+    }
+    return preference(sessionId);
+  });
+  await submitAndSettle(f, "SPAWN_PREPARATION_PROBE");
+  const received = await bounded(wake.promise, "automatic parent wake after resident preparation failure");
+  assert.doesNotMatch(text(received), /PRIVATE_PREPARATION_CANARY|private-preparation-name|CHILD_PREPARATION_CONTROL/);
+  assert.match(text(received), /request_preparation.*before provider dispatch.*extension effects/);
+  const deadline = Date.now() + 30_000;
+  while (true) {
+    const stopped = f.supervisor.store.getSession(rejectedChild);
+    if (stopped?.lastError && stopped.lifecycle === "resident" && stopped.activity === "idle") break;
+    if (Date.now() >= deadline) throw new Error("resident child error did not settle");
+    await new Promise(resolve => setTimeout(resolve, 10));
+  }
+  const child = f.supervisor.store.getSession(rejectedChild), generation = child.actorGeneration;
+  assert.equal(child.lifecycle, "resident"); assert.equal(child.activity, "idle");
+  assert.match(child.lastError, /Request preparation failed:.*PRIVATE_PREPARATION_CANARY/);
+  assert.equal(f.supervisor.store.submittedChildTask(rejectedChild), undefined);
+  assert.equal(f.supervisor.store.nextQueuedChildTask(rejectedChild), undefined);
+  const entries = (await f.client.request("get_actor_entries", { sessionId: rejectedChild, since: null })).entries;
+  const failures = entries.filter(entry => entry.customType === "persistent-harness.turn-failure-v1");
+  const accepted = entries.filter(entry => entry.customType === "persistent-harness.turn-failure-accepted-v1");
+  assert.equal(failures.length, 1); assert.equal(accepted.length, 1);
+  assert.equal(accepted[0].data.entryId, failures[0].id);
+  assert.equal(failures[0].data.failureClass, "request_preparation");
+  assert.equal(failures[0].data.dispatchBoundary, "before_provider_dispatch");
+  assert.doesNotMatch(text(failures), /PRIVATE_PREPARATION_CANARY|CHILD_PREPARATION_CONTROL/);
+  assert.equal(entries.filter(entry => entry.message?.role === "user").length, 1);
+  assert.equal(entries.filter(entry => entry.message?.stopReason === "error").length, 1);
+  assert.match(text(entries.find(entry => entry.message?.stopReason === "error").message.content), /Inspect saved progress before continuing/);
+  const messages = f.supervisor.store.listMessages().filter(message => message.childExitGeneration != null);
+  assert.equal(messages.length, 1); assert.equal(messages[0].senderId, rejectedChild); assert.equal(messages[0].targetId, f.sessionId);
+  await f.log.wait(event => event.type === "message_end" && text(event.message).includes("PREPARATION_FAILURE_RECEIVED_WITHOUT_REPLAY"), "parent receipt answer");
+  assert.equal(f.supervisor.store.getMessage(messages[0].messageId).state, "acknowledged");
+  const parentEntries = await f.entries();
+  assert.equal(parentEntries.filter(entry => entry.customType === "persistent-harness.agent-message-v1" && entry.data.messageId === messages[0].messageId).length, 1);
+  assert.equal(parentEntries.filter(entry => entry.type === "custom_message" && entry.details?.messageId === messages[0].messageId).length, 1);
+  assert.equal(f.supervisor.store.getSession(rejectedChild).actorGeneration, generation);
+  assert.equal(f.supervisor.store.getSession(rejectedChild).lifecycle, "resident");
+  assert.equal(rejections, 1);
+  assert(!f.requests.some(body => body.input.some(item => item.role === "user" && text(item).includes("CHILD_PREPARATION_CONTROL"))), "the failed child's provider was never dispatched");
+});
+
 for (const [nativeAsync, modelId] of [[true, "gpt-6-astra"], [false, "gpt-6-astra"], [true, "gpt-6.1-sol"]]) test(`Fast persists and samples each actual native-flag=${nativeAsync} ${modelId} request without aborting streaming`, { timeout: 120_000 }, async t => {
   const entered = deferred(), release = deferred(); t.after(() => release.resolve());
   const f = await fixture(t, (_body, index) => index === 1 ? { writeResponse: async (response, id) => {

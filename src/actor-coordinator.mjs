@@ -6,6 +6,7 @@ import { createActorStreamPlanner } from "./actor-stream.mjs";
 import { evaluateInferenceRetry } from "./inference-retry.mjs";
 import { fastModeOptions, streamSessionRequest, supportsFastMode } from "./fast-mode.mjs";
 import { randomUUID } from "node:crypto";
+import { TURN_FAILURE_ENTRY_TYPE } from "./child-turn-failure.mjs";
 import { readFile } from "node:fs/promises";
 import { isDeepStrictEqual } from "node:util";
 import { createOrdinaryNonAdmissionWitness, ORDINARY_NON_ADMISSION_CUSTOM_TYPE, projectCanonicalBranch, projectCanonicalContext, projectCanonicalSource, refreshCanonicalSessionContext, sessionContextInput, sessionBranchHeaders, sessionCallIssuer } from "./canonical-context.mjs";
@@ -37,6 +38,7 @@ class LocalPreparationError extends Error {
   constructor(stage, cause) {
     super(`${stage} preparation failed: ${cause instanceof Error ? cause.message : String(cause)}`, { cause });
     this.code = "ERR_LOCAL_PREPARATION";
+    this.failureClass = stage === "Prompt" ? "prompt_preparation" : "request_preparation";
   }
 }
 
@@ -58,6 +60,8 @@ export class ActorCoordinator {
     this.continueNative = false; this.naturalStop = true; this.failure = null; this.turnIndex = 0;
     this.waiters = new Set(); this.recoveryDone = false; this.currentPrompt = session.systemPrompt; this.runPrompt = session.systemPrompt; this.serviceMutation = false;
     this.pendingInference = null;
+    this.runId = null; this.runFailure = null; this.runFailureReport = null; this.runFailureEntryId = null;
+    this.runProviderStarted = false; this.runToolDispatched = false;
     this.failedAttempt = null; this.retryAttemptNumber = 1; this.retrying = false; this.overflowRecoveryAttempted = false;
     this.steeringMode = "all"; this.followUpMode = "all"; this.contextUsage = undefined;
     this.compactionHistoryBarrier = null; this.runPromptOptions = undefined;
@@ -280,12 +284,15 @@ export class ActorCoordinator {
     if (this.closed || this.drivePromise) return;
     this.drivePromise = Promise.resolve().then(() => this.drive()).catch(async error => {
       this.failure = error;
+      if (error instanceof LocalPreparationError) this.runFailure = error.failureClass;
+      else if (!this.stopping && !this.controller?.signal.aborted) this.runFailure ??= "turn_failed";
       if (!(error instanceof LocalPreparationError)) return;
       // One owner terminalizes both idle and nested delivery. Stop this run even
       // if a new admission clears failure while the terminal commit is pending.
       this.failedAttempt = null; this.continueNative = false; this.stopping = true;
       this.controller?.abort();
-      const message = this.assistant([{ type: "text", text: "This turn stopped because request preparation failed. Send another message to retry." }], zeroUsage(), "error");
+      this.journalTurnFailure();
+      const message = this.assistant([{ type: "text", text: "This turn stopped during request preparation. Inspect saved progress before continuing." }], zeroUsage(), "error");
       message.errorMessage = error.message;
       try { await this.commit(message); }
       catch (commitError) { this.failure = new AggregateError([error, commitError], `${error.message}; terminal commit failed: ${commitError.message}`); }
@@ -381,6 +388,8 @@ export class ActorCoordinator {
     if (!this.running) {
       if (!this.queue.some(item => item.behavior !== "next_turn")) return;
       this.controller = new AbortController(); this.runPrompt = this.session.systemPrompt; this.runPromptOptions = undefined; this.running = true; this.stopping = false; this.turnIndex = 0; this.retryAttemptNumber = 1; this.failedAttempt = null; this.overflowRecoveryAttempted = false;
+      this.runId = randomUUID(); this.runFailure = null; this.runFailureReport = null; this.runFailureEntryId = null;
+      this.runProviderStarted = false; this.runToolDispatched = false;
       await this.emit({ type: "agent_start" }); await this.recover();
       await this.maybeAutoCompact();
     }
@@ -590,6 +599,7 @@ export class ActorCoordinator {
       const toolSchemas = tools.map(({ name, description, parameters, async: native, constrainedSampling }) => ({ name, description, parameters,
         ...(native ? { async: true } : {}), ...(constrainedSampling ? { constrainedSampling } : {}) }));
       const context = { systemPrompt: this.currentPrompt, messages: this.sdk.convertToLlm(renderUserLocations(messages)), tools: toolSchemas };
+      this.runProviderStarted = true;
       const stream = useNative ? this.nativeAdapter.stream(this.session.model, context, options) : streamSessionRequest(this.models, this.session.model, context, options, this);
       for await (const event of stream) {
         live();
@@ -674,6 +684,7 @@ export class ActorCoordinator {
         const blocked = await this.runner.emitToolCall({ type: "tool_call", toolCallId: call.id, toolName: call.name, input: args });
         if (blocked?.block) throw new Error(blocked.reason ?? "Tool execution blocked");
         if (attempt) attempt.dispatchedCount++;
+        this.runToolDispatched = true;
         this.onTiming({ phase: "tool_dispatch", at: performance.now(), toolCallId: call.id });
         result = await this.sdk.wrapRegisteredTool(registered, this.runner).execute(call.id, args, executionController.signal,
           partialResult => { void this.emit({ type: "tool_execution_update", toolCallId: call.id, toolName: call.name, args, partialResult }).catch(error => this.fail(error)); });
@@ -698,14 +709,31 @@ export class ActorCoordinator {
     this.toolTail = run.catch(error => this.fail(error)).finally(() => { this.tasks.delete(call.id); this.wake(); });
     task.promise = this.toolTail;
   }
+  journalTurnFailure() {
+    if (!this.runId || this.runFailureReport || !this.runFailure) return;
+    // An admitted task may be paused in an awaited hook before its dispatch
+    // counter advances. Freeze a conservative boundary while such work remains.
+    const report = { version: 1, turnId: this.runId, failureClass: this.runFailure,
+      dispatchBoundary: this.runToolDispatched || this.tasks.size > 0 ? "tool_effects_possible"
+        : this.runProviderStarted ? "provider_dispatch_unknown" : "before_provider_dispatch" };
+    this.runFailureEntryId = this.manager.appendCustomEntry(TURN_FAILURE_ENTRY_TYPE, report);
+    this.runFailureReport = report;
+  }
   async settle() {
     if (this.tasks.size || this.flight || !this.running) return;
     await this.commitTail;
     await this.applyPendingInference();
+    if (this.failure && !this.stopping) this.runFailure ??= "turn_failed";
+    this.journalTurnFailure();
     // Tasks can commit after abort or an earlier turn_end. Once all run work is
     // fenced, no later turn can consume these originals; canonical clones remain.
     // Release before asynchronous end hooks, including when a hook rejects.
     this.completedResults.length = 0;
+    if (this.runFailureReport) {
+      // A lost report/ACK leaves the canonical marker available on registration.
+      // Reporting failure must not replace the original error or replay the turn.
+      try { await this.lifecycle.reportTurnFailure?.(this.runFailureReport, this.runFailureEntryId); } catch {}
+    }
     if (this.contextMode === "source" && this.eventMode === "supervised-source") {
       await this.runner.emitAgentEndSource(this.manager.buildSessionSource());
       await this.publish({ type: "agent_end" });
@@ -741,12 +769,14 @@ export class ActorCoordinator {
     const controller = automatic && previous && !previous.signal.aborted ? previous : new AbortController();
     this.controller = controller; this.compacting = true;
     const historyBarrier = this.compactionHistoryBarrier = Promise.withResolvers();
+    if (automatic) this.runProviderStarted = true;
     try { return await this.compactionDriver({ ...options, customInstructions, automatic, coordinator: this, signal: controller.signal }); }
     catch (error) {
       // Automatic compaction runs outside inference's error commit path. Give
       // the failed turn a durable, visible error instead of silently settling.
       if (automatic && !controller.signal.aborted && error?.code !== "ERR_COMPACTION_CANCELLED") {
-        const message = this.assistant([{ type: "text", text: "This turn stopped because the conversation summary failed. Send another message to retry." }], zeroUsage(), "error");
+        this.runFailure = "compaction_failed";
+        const message = this.assistant([{ type: "text", text: "This turn stopped because the conversation summary failed. Inspect saved progress before continuing." }], zeroUsage(), "error");
         message.errorMessage = `Conversation compaction failed: ${error instanceof Error ? error.message : String(error)}`;
         await this.commit(message);
       }

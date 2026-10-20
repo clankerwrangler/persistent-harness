@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
 import { normalizeInputLocation } from "./input-location.mjs";
-import { actorInputDigest } from "./protocol.mjs";
+import { actorInputDigest, normalizeTurnFailure } from "./protocol.mjs";
 import { DatabaseSync } from "node:sqlite";
 import { allocateUniqueRootName, defaultRootName, shortSessionId } from "./root-title.mjs";
 
@@ -798,25 +798,45 @@ export class HarnessStore {
         last_error = ?, updated_at = ? WHERE id = ? AND actor_generation = ? AND lifecycle <> 'deleted'`)
         .run(lifecycle, now, error, now, sessionId, generation);
       if (result.changes !== 1) { this.#db.exec("COMMIT"); return false; }
-      if (reportChildExit && lifecycle === "error") this.#queueChildExit(sessionId, generation, error, now);
+      if (reportChildExit && lifecycle === "error") this.#queueChildFailure(sessionId, generation, error, now);
       this.#refreshAncestors(sessionId, now);
       this.#db.exec("COMMIT");
       return true;
     } catch (failure) { this.#db.exec("ROLLBACK"); throw failure; }
   }
 
-  #queueChildExit(sessionId, generation, error, now) {
+  recordActorTurnFailure(sessionId, generation, value, now = Date.now()) {
+    const report = normalizeTurnFailure(value);
+    const row = this.#sessionRow(sessionId);
+    if (!row || row.actor_generation !== generation || !["starting", "resident"].includes(row.lifecycle)
+      || this.isSessionDeleting(sessionId)) throw new Error("actor generation is stale or unavailable");
+    this.#queueChildFailure(sessionId, generation, null, now, report);
+  }
+
+  #queueChildFailure(sessionId, generation, error, now, turnFailure = null) {
     const child = this.#sessionRow(sessionId);
     const parent = child?.kind === "child" && this.#sessionRow(child.parent_session_id);
     if (!parent || parent.lifecycle === "deleted" || this.isSessionDeleting(parent.id)
       || this.isSessionDeleting(sessionId)) return;
     // This receipt is supervisor-authored, not a fabricated child transcript entry.
-    // Its key is generation-bound; raw stderr and display names never enter delivery.
-    const id = `child-exit:${createHash("sha256").update(sessionId).digest("hex")}:${generation}`;
+    // Exit keys are generation-bound; turn keys survive lost ACKs and revival.
+    // The legacy child_exit_generation column marks both lifecycle receipt kinds.
+    const childKey = createHash("sha256").update(sessionId).digest("hex");
+    const id = turnFailure
+      ? `child-exit:turn:${createHash("sha256").update(sessionId).update("\0").update(turnFailure.turnId).digest("hex")}`
+      : `child-exit:${childKey}:${generation}`;
     const identity = /^[a-zA-Z0-9-]{1,128}$/.test(sessionId) ? sessionId : "[invalid child ID]";
     const failureClass = typeof error === "string" && error.includes("JavaScript heap out of memory")
       ? "heap_exhausted" : "actor_exit";
-    const body = `Harness lifecycle report (supervisor-generated, not child-authored): direct child ${identity}, generation ${generation}, exited unexpectedly. Failure class: ${failureClass}. Completion is unknown. Inspect retained child state and saved artifacts before deciding recovery. No child restart or work replay was requested.`;
+    let body = `Harness lifecycle report (supervisor-generated, not child-authored): direct child ${identity}, generation ${generation}, exited unexpectedly. Failure class: ${failureClass}. Completion is unknown. Inspect retained child state and saved artifacts before deciding recovery. No child restart or work replay was requested.`;
+    if (turnFailure) {
+      const boundary = turnFailure.dispatchBoundary === "before_provider_dispatch"
+        ? "This turn stopped before provider dispatch. Local input or extension effects may already be committed."
+        : turnFailure.dispatchBoundary === "tool_effects_possible"
+          ? "Tool execution was admitted or started in this turn; external effects may already have occurred. Completion is unknown."
+          : "Provider dispatch was attempted in this turn; completion and external effects are unknown.";
+      body = `Harness lifecycle report (supervisor-generated, not child-authored): direct child ${identity}, turn ${turnFailure.turnId}, stopped abnormally. Failure class: ${turnFailure.failureClass}. ${boundary} Inspect retained child state and saved artifacts before deciding recovery. No child restart or work replay was requested.`;
+    }
     this.#db.prepare(`INSERT OR IGNORE INTO messages
       (id, sender_id, target_id, relationship, delivery_mode, body, state, attempt_count, accepted_at, queued_at, child_exit_generation)
       VALUES (?, ?, ?, 'parent', 'auto', ?, 'queued', 0, ?, ?, ?)`)

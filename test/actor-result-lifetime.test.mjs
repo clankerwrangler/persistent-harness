@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { setImmediate as tick } from "node:timers/promises";
 import { ActorToolDispatch } from "../src/actor-tool-dispatch.mjs";
+import { TURN_FAILURE_ENTRY_TYPE } from "../src/child-turn-failure.mjs";
 import { ActorCoordinator } from "../src/actor-coordinator.mjs";
 
 const gate = () => Promise.withResolvers();
@@ -69,7 +70,8 @@ async function fixture(t) {
         receipts.set(event, { native: true, complete: true, responseId: message.responseId,
           callId: call.providerCallId, itemId: call.providerItemId, call: structuredClone(call) });
         yield event;
-        await (current.mode.startsWith("late") ? current.started.promise : current.committed.promise);
+        await (current.mode === "prepare-race" ? current.hookEntered.promise
+          : current.mode.startsWith("late") ? current.started.promise : current.committed.promise);
         if (current.mode === "abort") {
           if (!options.signal.aborted) await new Promise(resolve => options.signal.addEventListener("abort", resolve, { once: true }));
           message.stopReason = "aborted"; message.errorMessage = "request_aborted";
@@ -187,6 +189,24 @@ test("abort waits for a late native result and its canonical publication fence b
   assert.deepEqual(f.turns.map(turn => turn.ids), [[], []]); assert.equal(f.results().length, 1);
 });
 
+
+test("local preparation journals possible effects before an admitted native task finishes its dispatch hook", { timeout: 10000 }, async t => {
+  const f = await fixture(t), hookEntered = gate(), release = gate();
+  t.after(() => release.resolve());
+  f.coor.runner.emitToolCall = async () => { hookEntered.resolve(); await release.promise; };
+  let preparations = 0;
+  f.coor.lifecycle.prepareRequest = async () => { if (++preparations === 2) throw new Error("SECRET local preparation"); };
+  await f.start("prepare-race", { hookEntered });
+  await hookEntered.promise; await f.coor.submit("steer before pending native dispatch");
+  while (!f.coor.runFailureReport) await tick();
+  assert.equal(f.coor.tasks.size, 1); assert.equal(f.coor.runToolDispatched, false);
+  assert.equal(f.coor.runFailureReport.dispatchBoundary, "tool_effects_possible");
+  release.resolve(); await f.coor.waitForIdle(); settled(f);
+  assert.equal(f.results().length, 1);
+  const reports = f.coor.manager.getEntries().filter(entry => entry.customType === TURN_FAILURE_ENTRY_TYPE);
+  assert.equal(reports.length, 1); assert.equal(reports[0].data.dispatchBoundary, "tool_effects_possible");
+  assert.doesNotMatch(JSON.stringify(reports[0].data), /SECRET|steer/);
+});
 
 test("tool session values stay borrowed through nested drain; exposed arrays survive source release", async () => {
   const { core, sdk } = await (await import("../src/external-pi.mjs")).loadExternalPi();
