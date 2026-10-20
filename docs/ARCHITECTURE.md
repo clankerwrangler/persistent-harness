@@ -41,6 +41,27 @@ skip this optimization. See [Node cache controls](DEPENDENCIES.md#node-compile-c
 
 These are same-user local processes, not a multi-tenant security boundary. The Python and shell capabilities execute with the service account's privileges.
 
+## Python namespace checkpoints
+
+Each eligible top-level binding keeps its own dill serialization, payload file,
+SHA-256 digest, and admission check. Payload limits remain 4 MiB per value and
+16 MiB per snapshot; the manifest reader accepts at most 1 MiB.
+
+Snapshot format version 2 preserves repeated exact top-level source roots,
+including function and class roots. Its fixed-width blob filename is
+`SSSSSS-GGGGGGGGGGGG.dill`: the six-digit decimal saved-entry ordinal and the
+12-digit hexadecimal ordinal of that root's first successfully admitted entry.
+Equal-valued distinct roots are not grouped. Version 1 remains readable with its
+original independent restore semantics.
+
+Restore checks every entry's own descriptor-bound regular-file bytes, size, and
+hash before alias reuse. A group uses its earliest eligible successfully decoded
+entry; a missing, corrupt, protected, or unloadable owner cannot seed it. Invalid
+group metadata reports an error and prevents checkpoint attribution, but safe,
+healthy payloads still restore independently. Every binding retains an independent
+physical payload copy. Sharing within a root remains dill-owned; sharing through
+descendants of different roots or private scopes is still unresolved.
+
 ## Extension prompt preparation
 
 The active runner receives fresh structured `systemPromptOptions` for each user input. Extension handlers can edit those options or return a forced prompt using Pi's public `before_agent_start` contract. A final, read-only observer renders `event.systemPrompt` during its callback. The public resource-loader override places that observer last, following Pi's documented extension load order; it does not retain an event getter or import a private renderer.

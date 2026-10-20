@@ -19,7 +19,7 @@ import types
 from pathlib import Path
 
 PROTOCOL_VERSION = 1
-SNAPSHOT_VERSION = 1
+SNAPSHOT_VERSION = 2
 PER_VARIABLE_LIMIT = 4 * 1024 * 1024
 TOTAL_SNAPSHOT_LIMIT = 16 * 1024 * 1024
 MANIFEST_LIMIT = 1024 * 1024
@@ -437,7 +437,7 @@ def snapshot_reuse_candidates(snapshot_path):
     except Exception:
         return {}
     if (not isinstance(manifest, dict) or type(manifest.get("version")) is not int
-            or manifest["version"] != SNAPSHOT_VERSION or not isinstance(manifest.get("saved"), list)):
+            or manifest["version"] not in (1, SNAPSHOT_VERSION) or not isinstance(manifest.get("saved"), list)):
         return {}
     candidates = {}
     seen = set()
@@ -512,7 +512,7 @@ def validate_snapshot_directory(snapshot_path, *, load_payloads=False):
                 manifest_error = f"manifest has {key_error}"
             elif not isinstance(manifest["version"], int) or isinstance(manifest["version"], bool):
                 manifest_error = "manifest version must be an integer"
-            elif manifest["version"] != SNAPSHOT_VERSION:
+            elif manifest["version"] not in (1, SNAPSHOT_VERSION):
                 manifest_error = "unsupported snapshot version"
             elif not isinstance(manifest["saved"], list):
                 manifest_error = "manifest saved must be an array"
@@ -636,6 +636,7 @@ def validate_snapshot_directory(snapshot_path, *, load_payloads=False):
                 skipped_name_indexes.setdefault(name, []).append(index)
 
         item_errors = [[] for _ in saved_items]
+        root_groups = [None] * len(saved_items)
         name_indexes = {}
         file_indexes = {}
         for index, item in enumerate(saved_items):
@@ -653,10 +654,24 @@ def validate_snapshot_directory(snapshot_path, *, load_payloads=False):
                 item_errors[index].append("name must be a string")
             else:
                 name_indexes.setdefault(name, []).append(index)
-            if not valid_snapshot_basename(file_name):
+            match = (re.fullmatch(r"([0-9]{6})-([0-9a-f]{12})\.dill", file_name)
+                     if manifest["version"] == 2 and isinstance(file_name, str) else None)
+            if match is None and not valid_snapshot_basename(file_name):
                 item_errors[index].append("file must be a safe basename")
             else:
                 file_indexes.setdefault(file_name, []).append(index)
+            if manifest["version"] == 2:
+                # Version 2 uses the fixed-width filename token for the first
+                # admitted source root's ordinal. Owner bytes may be unavailable;
+                # each healthy backup can become the restore group's first value.
+                group = int(match[2], 16) if match else index + 1
+                owner = saved_items[group] if group <= index else None
+                if (match is None or int(match[1]) != index or group > index
+                        or not isinstance(owner, dict)
+                        or owner.get("file") != f"{group:06d}-{group:012x}.dill"):
+                    errors.append({"name": str(name), "reason": "invalid root group filename"})
+                else:
+                    root_groups[index] = group
             if not non_negative_integer(byte_count):
                 item_errors[index].append("bytes must be a non-negative integer")
             elif byte_count > PER_VARIABLE_LIMIT:
@@ -710,7 +725,8 @@ def validate_snapshot_directory(snapshot_path, *, load_payloads=False):
                     expected_bytes=item["bytes"],
                     expected_hash=item["sha256"],
                 )
-                entries.append({"item": item, "payload": payload if load_payloads else None})
+                entries.append({"item": item, "payload": payload if load_payloads else None,
+                                "root": root_groups[index]})
                 validated_total += item["bytes"]
             except Exception as error:
                 errors.append({"name": item["name"], "reason": f"{type(error).__name__}: {error}"})
@@ -831,6 +847,7 @@ def save_snapshot(snapshot_path, namespace, protected_names, *, namespace_checkp
     previous = target.with_name(f"{target.name}.previous")
     prior_entries = snapshot_reuse_candidates(target)
     saved = []
+    roots = {}
     skipped = []
     total = 0
     stats = {
@@ -867,7 +884,11 @@ def save_snapshot(snapshot_path, namespace, protected_names, *, namespace_checkp
                 continue
             stats["serializedVariables"] += 1
             digest = hashlib.sha256(payload).hexdigest()
-            blob_name = f"{len(saved):06d}-{hashlib.sha256(name.encode()).hexdigest()[:12]}.dill"
+            # Keep a strong identity guard: reducers can mutate the namespace,
+            # and an id alone could be reused by a later, distinct source root.
+            owner = roots.get(id(value))
+            group = owner[1] if owner is not None and owner[0] is value else len(saved)
+            blob_name = f"{len(saved):06d}-{group:012x}.dill"
             blob_path = temporary / blob_name
             prior = prior_entries.get(name)
             reused = False
@@ -886,6 +907,8 @@ def save_snapshot(snapshot_path, namespace, protected_names, *, namespace_checkp
                 "bytes": len(payload),
                 "sha256": digest,
             })
+            if owner is None or owner[0] is not value:
+                roots[id(value)] = (value, group)
             total += len(payload)
         if durable:
             # Finish all writes and links before syncing so the filesystem can
@@ -952,6 +975,7 @@ def save_snapshot(snapshot_path, namespace, protected_names, *, namespace_checkp
 def restore_validated_snapshot(validation, namespace, protected_names):
     restored = []
     skipped = [*validation["skipped"], *validation["errors"]]
+    roots = {}
     for entry in validation["entries"]:
         item = entry["item"]
         name = item["name"]
@@ -959,7 +983,11 @@ def restore_validated_snapshot(validation, namespace, protected_names):
             skipped.append({"name": name, "reason": "protected runtime name"})
             continue
         try:
-            namespace[name] = dill.loads(entry["payload"])
+            group = entry.get("root")
+            value = roots[group] if group in roots else dill.loads(entry["payload"])
+            namespace[name] = value
+            if group is not None:
+                roots[group] = value
             restored.append(name)
         except Exception as error:
             skipped.append({"name": name, "reason": f"{type(error).__name__}: {error}"})
