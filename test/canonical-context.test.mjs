@@ -1422,3 +1422,29 @@ test("owned omission checks every indexed full/component alias, including multi-
     assert.deepEqual(project(entries, "ordinary").diagnostics.map(d => d.code), ["UNADMITTED_CALL_OMITTED"]);
   }
 });
+
+
+test("canonical source keys preserve typed digest bytes across primitive and container values", () => {
+  const messages = [
+    { role: "user", content: "", timestamp: 0, probe: undefined },
+    { role: "user", content: "plain", timestamp: 1, probe: [-0, 0, undefined, null, true, false] },
+    { role: "user", content: '"\\\n\t\r\b\u0000\u2028\u2029é😀\ud800\udfff', timestamp: 2 },
+    { role: "user", content: [{ type: "text", text: "ordered" }], timestamp: 3,
+      probe: { z: 2, a: 1, "10": "ten", "2": "two", nested: { x: undefined, y: null } } },
+    { role: "user", content: "public-".repeat(1024), timestamp: 4,
+      probe: Object.assign(Object.create(null), { last: "x", first: "y" }) },
+  ];
+  const expected = [
+    "0:dab90171498999591e90c16c9e4da45b3ce927c8c931d84faf7cab9e1731c865",
+    "0:c2f498a8d14019ba27be90b164720d10d5f17b167eb50aba34355ddff55e2d13",
+    "0:b162db9f7768cbb57a6aa5943293eb3da40d0315a728b98ffc1b4c4e0558f551",
+    "0:1be11ce3bd89796d1be02673f07b2e9d83a12a08109de0f326ab4dfb003747ea",
+    "0:226289ad1f4f49d79e00e5ab986fbc7e5871a3be6814c0bbf906e6caf1dc6a4f",
+  ];
+  const key = message => projectCanonicalSource(input(chain([message]), "ordinary")).source.contributions[0].key;
+  assert.deepEqual(messages.map(key), expected);
+  assert.equal(key({ ...messages[3], probe: { nested: { y: null, x: undefined }, "2": "two", "10": "ten", a: 1, z: 2 } }), expected[3]);
+  assert.notEqual(key({ ...messages[1], probe: [0, 0, undefined, null, true, false] }), expected[1]);
+  assert.notEqual(key({ ...messages[1], probe: [0, -0, undefined, null, true, false] }), expected[1]);
+  assert.throws(() => key({ ...messages[1], probe: [, undefined] }), { code: "ERR_CONTEXT_DATA_TYPE" });
+});

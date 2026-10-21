@@ -1,12 +1,14 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
 import http from "node:http";
 import { once } from "node:events";
 import { zstdDecompressSync } from "node:zlib";
 import { findPackageJSON } from "node:module";
 import { readFile } from "node:fs/promises";
 import WebSocket, { WebSocketServer } from "ws";
-import { pathToFileURL } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { loadExternalPi } from "../src/external-pi.mjs";
 import { createNativeProviderAdapter } from "../src/native-provider.mjs";
 import { createActorStreamPlanner } from "../src/actor-stream.mjs";
@@ -210,6 +212,13 @@ async function websocketFixture(t, handler) {
   return { a, selected, requests, connections: () => connectionCount };
 }
 const send = (socket, raw) => raw.forEach((event) => socket.send(JSON.stringify(event)));
+
+test("idle WebSocket keeps continuation state without completed caller contexts", { timeout: 30000 }, async () => {
+  const { stdout } = await promisify(execFile)(process.execPath,
+    ["--expose-gc", fileURLToPath(new URL("./fixtures/native-idle-owner.mjs", import.meta.url)), paths.sdk],
+    { timeout: 20000, maxBuffer: 64 * 1024 });
+  assert.equal(stdout.trim(), "native idle caller ownership passed");
+});
 
 test("WebSocket loopback: exact raw provenance, reused chain delta, changed-prefix full replay", { timeout: 10000 }, async (t) => {
   const f = await websocketFixture(t, ({ socket, count }) => send(socket, count === 1 ? frames() : [created(`resp_${count}`), complete(`resp_${count}`)]));

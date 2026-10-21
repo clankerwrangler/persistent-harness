@@ -280,6 +280,11 @@ export function createNativeProviderAdapter({ api, responsesApi, modelRuntime, t
   let active, closed = false, connection;
   const disconnect = () => { clearTimeout(connection?.idleTimer); connection?.inbox.close(); connection = undefined; };
   const limits = { maxFrameBytes: 16 * 1024 * 1024, maxQueuedBytes: 32 * 1024 * 1024, connectTimeoutMs: 15000, cacheTtlMs: 300000, maxSocketAgeMs: 3300000, ...transportOptions };
+  // Create the expiry closure outside the request's lexical scope.
+  const armIdle = (entry) => {
+    entry.idleTimer = setTimeout(() => { if (connection === entry) disconnect(); }, limits.cacheTtlMs);
+    entry.idleTimer.unref?.();
+  };
   function stream(model, context, options = {}) {
     const events = api.createAssistantMessageEventStream();
     const output = message(model);
@@ -568,10 +573,7 @@ export function createNativeProviderAdapter({ api, responsesApi, modelRuntime, t
               // full is already JSON-detached after onPayload; this template stays private.
               entry.chain = { id: output.responseId, template: template(full), baseline: [...full.input, ...replay(api, model, [output], grammar)] };
               if (!options.sessionId || options.cacheRetention === "none" || !nonempty(rawResponseId)) disconnect();
-              else {
-                entry.idleTimer = setTimeout(() => { if (connection === entry) disconnect(); }, limits.cacheTtlMs);
-                entry.idleTimer.unref?.();
-              }
+              else armIdle(entry);
               // The completed parser generation is retired; the idle inbox cannot emit events.
               retire();
               break;

@@ -660,7 +660,11 @@ function valueDigest(value) {
     if (item === null) { hash.update("null;"); return; }
     const type = typeof item;
     hash.update(`${type}:`);
-    if (type !== "object") { hash.update(type === "number" && Object.is(item, -0) ? "-0;" : `${JSON.stringify(item)};`); return; }
+    if (type !== "object") {
+      hash.update(type === "number" && Object.is(item, -0) ? "-0" : `${JSON.stringify(item)}`);
+      hash.update(";");
+      return;
+    }
     hash.update(Array.isArray(item) ? `array:${item.length}:` : "object:");
     for (const key of Object.keys(item).sort()) { hash.update(`${JSON.stringify(key)}:`); visit(item[key]); }
     hash.update(";");
