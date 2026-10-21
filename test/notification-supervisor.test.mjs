@@ -2,6 +2,45 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { fixture, delay, eventually } from "./fixtures/notification-supervisor.mjs";
 
+test("fixture close joins concurrent startup retirement before publishing stopped state", { timeout: 10_000 }, async t => {
+  const launchRead = Promise.withResolvers(), releaseLaunch = Promise.withResolvers(),
+    closeEntered = Promise.withResolvers(), releaseClose = Promise.withResolvers();
+  t.after(() => { releaseLaunch.resolve(); releaseClose.resolve(); });
+  const f = await fixture(t);
+  const started = f.supervisor.store.markActorStarted.bind(f.supervisor.store);
+  f.supervisor.store.markActorStarted = (...args) => {
+    const result = started(...args);
+    if (args[1] === 1) f.supervisor.store.createActorInput(args[0], { inputId: "startup-close-overlap", message: "Synthetic pending input" });
+    return result;
+  };
+  const read = f.supervisor.transcriptReader.read.bind(f.supervisor.transcriptReader);
+  f.supervisor.transcriptReader.read = async params => {
+    if (f.supervisor.store.getSessionActorState(params.sessionId).actorGeneration === 1) {
+      launchRead.resolve(); await releaseLaunch.promise;
+    }
+    return read(params);
+  };
+  const actor = await f.actor(), sessionId = actor.session.sessionId;
+  await launchRead.promise;
+  const disconnect = actor.connection.stop.bind(actor.connection), close = actor.close.bind(actor);
+  let closes = 0, exits = 0;
+  actor.connection.stop = async () => { closeEntered.resolve(); await releaseClose.promise; return disconnect(); };
+  actor.close = () => { closes += 1; return close(); };
+  actor.on("exit", () => { exits += 1; });
+  const stopping = f.client.request("stop_session", { sessionId });
+  await closeEntered.promise;
+  releaseLaunch.resolve();
+  await eventually(() => closes === 2);
+  assert.equal(exits, 0, "the first close still owns its asynchronous disconnect");
+  releaseClose.resolve(); await stopping;
+  assert.equal(exits, 1);
+  assert.equal(f.supervisor.store.getSessionActorState(sessionId).lifecycle, "stopped",
+    "startup cleanup must not remove the actor before its exit publishes stopped state");
+  await f.client.request("submit_input", { sessionId, message: "Synthetic later input", behavior: "auto", clientRequestId: "after-close" });
+  const revived = await eventually(() => f.actors.get(sessionId) !== actor && f.actors.get(sessionId)?.isRunning && f.actors.get(sessionId));
+  assert.equal(revived.session.actorGeneration, 2);
+});
+
 test("root-only explicit attention is durable, idempotent, read != resolved, and expiry cannot reopen", async t => {
   const f = await fixture(t); const root = await f.actor(); const child = await f.actor(root.session.sessionId);
   const request = { key: "decision-1", title: "Choose a target", body: "Which target should I use?", expiresIn: 10 };

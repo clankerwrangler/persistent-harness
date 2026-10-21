@@ -13,6 +13,7 @@ export async function eventually(predicate, timeout = 3000) {
   throw new Error("condition not reached");
 }
 class Actor extends EventEmitter {
+  #closePromise;
   constructor(options) { super(); Object.assign(this, options); this.pid = process.pid; this.isRunning = false; this.streaming = false; this.sent = []; }
   state() { return { sessionId: this.session.sessionId, sessionFile: this.session.sessionFile, isStreaming: this.streaming,
     model: this.session.launch?.model?.resolved ?? null, thinkingLevel: this.session.launch?.thinking?.resolved ?? "off" }; }
@@ -35,7 +36,14 @@ class Actor extends EventEmitter {
   }
   async submit() { return {}; }
   send(frame) { this.sent.push(frame); }
-  async close() { if (!this.isRunning) return; this.isRunning = false; await this.connection.stop(); this.emit("exit", { code: 0, expected: true }); }
+  async close() {
+    // Like PiSessionActor, concurrent callers join shutdown through the exit event.
+    if (this.#closePromise) return this.#closePromise;
+    if (!this.isRunning) return;
+    this.isRunning = false;
+    this.#closePromise = (async () => { await this.connection.stop(); this.emit("exit", { code: 0, expected: true }); })();
+    return this.#closePromise;
+  }
 }
 export async function fixture(t, options = {}) {
   const dir = await mkdtemp(path.join(os.tmpdir(), "notification-supervisor-"));
