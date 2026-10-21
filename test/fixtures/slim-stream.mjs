@@ -77,7 +77,7 @@ export async function slimFixture(t, name, script, { models = ["gpt-6-astra"], m
   await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
   process.env.HARNESS_FAKE_NATIVE_BASE_URL = `http://127.0.0.1:${server.address().port}`;
   const socketPath = path.join(directory, "run", "supervisor.sock");
-  supervisor = new HarnessSupervisor({ socketPath, databasePath: path.join(directory, "state", "harness.sqlite"),
+  supervisor = new HarnessSupervisor({ socketPath, backgroundJobsDirectory: path.join(agentDir, "state", "background-jobs"), databasePath: path.join(directory, "state", "harness.sqlite"),
     pidPath: path.join(directory, "run", "supervisor.pid"), actorInactivityMs: 0,
     actorExtensionPaths: [path.join(import.meta.dirname, "fake-native-codex-provider.ts")],
     actorFactory(options) { const actor = new PiSessionActor(options); actor.on("event", (event) => {

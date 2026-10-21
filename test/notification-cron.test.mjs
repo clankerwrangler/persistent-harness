@@ -121,7 +121,8 @@ for (const intent of ["result", "conditional"]) test(`delegated ${intent} cron d
   messages = [{ id: "scheduled", role: "scheduled_job", text: "task" }, { id: "interim", role: "assistant", text: "I delegated the check, still working" }];
   root.busy(); grandchild.busy(); root.idle(); await delay(180);
   assert.equal(cron.getRun(run.runId).status, "running"); assert.equal((await f.client.request("list_notifications")).notifications.length, 0);
-  grandchild.idle(); await delay(20); root.busy();
+  // Keep the delegated handoff active while the parent consumes its result.
+  grandchild.idle(); root.busy(); await delay(20);
   messages.push({ id: "final", role: "assistant", text: "The genuine final result" });
   if (intent === "conditional") {
     child.busy(); // Explicit readiness is independent of unrelated live family work.
