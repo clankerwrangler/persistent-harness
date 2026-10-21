@@ -17,11 +17,14 @@ async function until(predicate) {
 class Actor extends EventEmitter {
   constructor(options, supervisor) { super(); this.session = options.session; this.supervisor = supervisor;
     this.pid = process.pid; this.isRunning = false; this.streaming = false; this.preparations = []; this.cancellations = [];
-    this.commandPath = options.args[options.args.indexOf("--extension") + 1]; }
+    this.commandPath = options.args[options.args.indexOf("--extension") + 1];
+    this.args = options.args; this.reductions = []; this.memoryCancellations = []; }
   state() { return { sessionId: this.session.sessionId, sessionFile: this.session.sessionFile,
     isStreaming: this.streaming, model: null, thinkingLevel: "off" }; }
   async start() { this.isRunning = true; return this.state(); }
   request(type, params = {}) {
+    if (type === "reduce_idle_memory") { const gate = Promise.withResolvers(); this.reductions.push({ token: params.token, gate }); return gate.promise; }
+    if (type === "cancel_idle_memory") { this.memoryCancellations.push(params.token); return Promise.resolve(true); }
     if (type === "prepare_entry_index") { const gate = Promise.withResolvers(); this.preparations.push({ token: params.token, gate }); return gate.promise; }
     if (type === "cancel_entry_index") { this.cancellations.push(params.token); return Promise.resolve(true); }
     if (type === "compact") { this.compactEntered = true; return this.compactHold ?? Promise.resolve({}); }
@@ -50,6 +53,7 @@ async function fixture(t, options = {}) {
   await supervisor.start();
   const client = new HarnessClient({ socketPath: supervisor.socketPath, heartbeatMs: 0 }); const connections = [];
   t.after(async () => { for (const actor of actors) for (const prep of actor.preparations) prep.gate.resolve(true);
+    for (const actor of actors) for (const reduction of actor.reductions) reduction.gate.resolve(false);
     for (const connection of connections) await connection.stop(); await client.stop(); await supervisor.stop();
     await rm(root, { recursive: true, force: true }); assert.deepEqual(errors, []); });
   await client.start({ registrationType: "register_client", clientInstanceId: "entry-index-fixture" });
@@ -306,4 +310,103 @@ test("own-idle expiry callback rereads quiet time even without a rescheduling ev
   assert.equal(f.supervisor.store.getSession(f.id).quietSince, fresh);
   f.actor.emit("event", { type: "compaction_end" });
   await until(() => f.supervisor.store.getSession(f.id).lifecycle === "passivated");
+});
+
+async function flushIdle() { for (let i = 0; i < 30; i++) await tick(); }
+async function flushedUntil(predicate) {
+  // The injected Date/timers own idle age, not real filesystem/readiness time.
+  const deadline = performance.now() + 2500;
+  while (performance.now() < deadline) { if (predicate()) return; await tick(); }
+  assert.fail("expected injected-clock idle boundary did not complete");
+}
+async function idleMemoryClock(t, f) {
+  t.mock.timers.enable({ apis: ["setTimeout", "Date"], now: Date.now() });
+  const count = f.actor.preparations.length;
+  f.actor.activity("agent_start"); f.actor.activity("agent_settled");
+  await flushedUntil(() => f.actor.preparations.length > count);
+  for (const prep of f.actor.preparations) prep.gate.resolve(true);
+  await flushIdle();
+}
+
+test("one own-idle timer gives the reducer 30s, attempts once, and does not await GC at passivation", async t => {
+  const f = await fixture(t, { actorInactivityMs: 90_000 }); await idleMemoryClock(t, f);
+  assert.equal(f.actor.args[0], "--expose-gc", "only managed actor launch opts in");
+  const quiet = f.supervisor.store.getSession(f.id).quietSince;
+  t.mock.timers.tick(29_999); await flushIdle(); assert.equal(f.actor.reductions.length, 0);
+  t.mock.timers.tick(1); await flushIdle(); assert.equal(f.actor.reductions.length, 1);
+  t.mock.timers.tick(30_000); await flushIdle(); assert.equal(f.actor.reductions.length, 1); assert.equal(f.actor.isRunning, true);
+  assert.equal(f.supervisor.store.getSession(f.id).quietSince, quiet);
+  t.mock.timers.tick(30_000); await flushIdle();
+  assert.equal(f.supervisor.store.getSession(f.id).lifecycle, "passivated", "unresolved GC cannot retime or hold the old expiry");
+});
+
+test("disabled passivation still reduces once without stopping or a zero-delay loop", async t => {
+  const f = await fixture(t); await idleMemoryClock(t, f);
+  t.mock.timers.tick(30_000); await flushIdle(); assert.equal(f.actor.reductions.length, 1);
+  f.actor.reductions[0].gate.resolve(true); await flushIdle();
+  t.mock.timers.tick(600_000); await flushIdle();
+  assert.equal(f.actor.reductions.length, 1); assert.equal(f.actor.isRunning, true);
+  assert.equal(f.supervisor.store.getSession(f.id).lifecycle, "resident");
+});
+
+test("held preparation skips only the optional attempt for that quiet interval", async t => {
+  const f = await fixture(t); await idleMemoryClock(t, f);
+  const count = f.actor.preparations.length;
+  f.actor.activity("agent_start"); f.actor.activity("agent_settled");
+  await flushedUntil(() => f.actor.preparations.length > count);
+  t.mock.timers.tick(30_000); await flushIdle(); assert.equal(f.actor.reductions.length, 0);
+  for (const prep of f.actor.preparations) prep.gate.resolve(true); await flushIdle();
+  t.mock.timers.tick(60_000); await flushIdle(); assert.equal(f.actor.reductions.length, 0, "index overlap consumed only this optional attempt");
+});
+
+test("own work interrupts the reduction grace but never resets the passivation age", async t => {
+  const f = await fixture(t, { actorInactivityMs: 90_000 }); await idleMemoryClock(t, f);
+  const quiet = f.supervisor.store.getSession(f.id).quietSince;
+  t.mock.timers.tick(20_000); f.actor.emit("event", { type: "tool_execution_start", toolCallId: "hold" });
+  t.mock.timers.tick(20_000); f.actor.emit("event", { type: "tool_execution_end", toolCallId: "hold" }); await flushIdle();
+  for (const prep of f.actor.preparations) prep.gate.resolve(true); await flushIdle();
+  t.mock.timers.tick(29_999); await flushIdle(); assert.equal(f.actor.reductions.length, 0);
+  t.mock.timers.tick(1); await flushIdle(); assert.equal(f.actor.reductions.length, 1);
+  assert.equal(f.supervisor.store.getSession(f.id).quietSince, quiet);
+  t.mock.timers.tick(20_000); await flushIdle(); assert.equal(f.actor.isRunning, false);
+});
+
+test("GC completion cannot delay input/stop or clear a fresh generation's cancellation owner", async t => {
+  const f = await fixture(t); await idleMemoryClock(t, f);
+  t.mock.timers.tick(30_000); await flushIdle(); const old = f.actor.reductions[0]; assert(old);
+  const receipt = await f.client.request("submit_input", { sessionId: f.id, message: "input during optional GC", behavior: "auto" });
+  assert.equal(receipt.accepted, true); assert(f.actor.memoryCancellations.includes(old.token));
+  await f.client.request("stop_session", { sessionId: f.id });
+  await f.client.request("revive_session", { sessionId: f.id });
+  await flushedUntil(() => f.actors.length === 2 && f.actors[1].isRunning
+    && f.supervisor.store.getSession(f.id).lifecycle === "resident" && f.supervisor.status().capacity.starting === 0);
+  const next = f.actors.at(-1); assert.notEqual(next, f.actor);
+  const count = next.preparations.length;
+  next.activity("agent_start"); next.activity("agent_settled");
+  await flushedUntil(() => next.preparations.length > count);
+  for (const prep of next.preparations) prep.gate.resolve(true); await flushIdle();
+  t.mock.timers.tick(30_000); await flushIdle(); const successor = next.reductions[0]; assert(successor);
+  old.gate.resolve(true); await flushIdle();
+  await f.client.request("submit_input", { sessionId: f.id, message: "fresh generation input", behavior: "auto" });
+  assert(next.memoryCancellations.includes(successor.token));
+});
+
+test("new input before the grace cancels its old schedule without consuming the quiet interval", async t => {
+  const f = await fixture(t); await idleMemoryClock(t, f);
+  const quiet = f.supervisor.store.getSession(f.id).quietSince;
+  t.mock.timers.tick(20_000);
+  const receipt = await f.client.request("submit_input", { sessionId: f.id, message: "/handled-fixture", behavior: "auto" });
+  await flushedUntil(() => f.supervisor.store.getActorInput(receipt.inputId, f.id)?.outcome === "handled");
+  await flushIdle(); for (const prep of f.actor.preparations) prep.gate.resolve(true); await flushIdle();
+  assert.equal(f.supervisor.store.getSession(f.id).quietSince, quiet);
+  t.mock.timers.tick(29_999); await flushIdle(); assert.equal(f.actor.reductions.length, 0);
+  t.mock.timers.tick(1); await flushIdle(); assert.equal(f.actor.reductions.length, 1);
+});
+
+test("a passivation deadline before the memory grace stops normally without a GC request", async t => {
+  const f = await fixture(t, { actorInactivityMs: 15_000 }); await idleMemoryClock(t, f);
+  t.mock.timers.tick(15_000); await flushIdle();
+  assert.equal(f.supervisor.store.getSession(f.id).lifecycle, "passivated");
+  assert.equal(f.actor.reductions.length, 0);
+  t.mock.timers.tick(30_000); await flushIdle(); assert.equal(f.actor.reductions.length, 0);
 });
