@@ -7,7 +7,7 @@ import test from "node:test";
 import { HarnessClient } from "../src/client.mjs";
 import { assistantMessageParts } from "../src/conversation-projection.mjs";
 import { PiRpcLineDecoder } from "../src/session-actor.mjs";
-import { HarnessSupervisor } from "../src/supervisor.mjs";
+import { HarnessSupervisor } from "./fixtures/isolated-supervisor.mjs";
 
 class Actor extends EventEmitter {
   constructor(options) { super(); this.session = options.session; this.pid = process.pid; this.isRunning = false; }

@@ -5,7 +5,7 @@ import os from "node:os";
 import path from "node:path";
 import { zstdDecompressSync } from "node:zlib";
 import { HarnessClient } from "../../src/client.mjs";
-import { HarnessSupervisor } from "../../src/supervisor.mjs";
+import { HarnessSupervisor } from "./isolated-supervisor.mjs";
 import { PiSessionActor } from "../../src/session-actor.mjs";
 import { assistantMessageParts } from "../../src/conversation-projection.mjs";
 import { PythonRuntimeManager } from "../../src/python-runtime.mjs";

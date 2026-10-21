@@ -5,7 +5,7 @@ import path from "node:path";
 import test from "node:test";
 import { HarnessClient } from "../src/client.mjs";
 import { createHostHandlers } from "../src/host-handlers.mjs";
-import { HarnessSupervisor } from "../src/supervisor.mjs";
+import { HarnessSupervisor } from "./fixtures/isolated-supervisor.mjs";
 
 test("operations usage succeeds through host RPC with bounded sanitized recent aggregates", async (t) => {
   const root = await mkdtemp(path.join(os.tmpdir(), "harness-usage-observability-"));

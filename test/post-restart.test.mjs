@@ -28,11 +28,13 @@ test("restart worker environment drops actor authority but retains ordinary conf
   const sanitized = sanitizedRestartEnvironment({
     PATH: "/bin", PI_HARNESS_ACTOR_ID: "s", PI_HARNESS_ACTOR_TOKEN: "secret",
     PI_HARNESS_ACTOR_GENERATION: "2", PI_HARNESS_ACTOR_SKILL_GRANT: "/grant",
+    PI_HARNESS_ROOT_SESSION_ID: "root", PI_HARNESS_SCRATCH_DIRECTORY: "/scratch/root", PI_HARNESS_SCRATCH_ROOT: "/scratch",
     PI_SESSION_ID: "pi", PI_SESSION_FILE: "/session", PI_HARNESS_ACTOR_EXTENSIONS: "[]",
   });
   assert.equal(sanitized.PATH, "/bin");
   assert.equal(sanitized.PI_HARNESS_ACTOR_EXTENSIONS, "[]");
-  for (const key of ["PI_HARNESS_ACTOR_ID", "PI_HARNESS_ACTOR_TOKEN", "PI_HARNESS_ACTOR_GENERATION", "PI_HARNESS_ACTOR_SKILL_GRANT", "PI_SESSION_ID", "PI_SESSION_FILE"]) {
+  assert.equal(sanitized.PI_HARNESS_SCRATCH_ROOT, "/scratch");
+  for (const key of ["PI_HARNESS_ACTOR_ID", "PI_HARNESS_ACTOR_TOKEN", "PI_HARNESS_ACTOR_GENERATION", "PI_HARNESS_ACTOR_SKILL_GRANT", "PI_HARNESS_ROOT_SESSION_ID", "PI_HARNESS_SCRATCH_DIRECTORY", "PI_SESSION_ID", "PI_SESSION_FILE"]) {
     assert.equal(sanitized[key], undefined);
   }
 });

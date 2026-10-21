@@ -4,7 +4,7 @@ import { randomUUID } from "node:crypto";
 import os from "node:os";
 import path from "node:path";
 import { HarnessClient } from "../../src/client.mjs";
-import { HarnessSupervisor } from "../../src/supervisor.mjs";
+import { HarnessSupervisor } from "./isolated-supervisor.mjs";
 import { ACTOR_INPUT_COMMAND } from "../../src/protocol.mjs";
 export const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
 export async function eventually(predicate, timeout = 3000) {

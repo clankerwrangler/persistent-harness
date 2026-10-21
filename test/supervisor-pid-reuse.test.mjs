@@ -7,7 +7,7 @@ import path from "node:path";
 import test from "node:test";
 import { acquireStartLock } from "../bin/harness-supervisor.mjs";
 import { controlRequest } from "../src/control.mjs";
-import { HarnessSupervisor, supervisorInternals } from "../src/supervisor.mjs";
+import { HarnessSupervisor, supervisorInternals } from "./fixtures/isolated-supervisor.mjs";
 
 const supervisorBin = path.resolve(import.meta.dirname, "..", "bin", "harness-supervisor.mjs");
 const LIVE_HARNESS_DIR = path.resolve(os.homedir(), ".pi", "agent", "harness");

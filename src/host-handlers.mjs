@@ -692,7 +692,7 @@ function killProcessTree(rootPid) {
   try { process.kill(rootPid, "SIGKILL"); } catch {}
 }
 
-async function runShell(payload, { cwd, signal, onProgress = () => {} }) {
+async function runShell(payload, { cwd, scratch, signal, onProgress = () => {} }) {
   const value = requireRecord(payload, "shell.run payload");
   const command = requireString(value.command, "command", { maxBytes: 64 * 1024 });
   const commandCwd = value.cwd === null || value.cwd === undefined ? cwd : resolvePath(cwd, value.cwd);
@@ -708,6 +708,8 @@ async function runShell(payload, { cwd, signal, onProgress = () => {} }) {
   return new Promise((resolve, reject) => {
     const child = spawn("/usr/bin/perl", ["-e", SHELL_SUBREAPER, "--", "/bin/bash", "-lc", command], {
       cwd: commandCwd,
+      env: { ...process.env, ...(scratch ? { PI_HARNESS_ROOT_SESSION_ID: scratch.rootSessionId,
+        PI_HARNESS_SCRATCH_DIRECTORY: scratch.directory } : {}) },
       stdio: ["ignore", "pipe", "pipe"],
       detached: false,
     });
@@ -846,7 +848,7 @@ export function projectManagedSession(value) {
   return result;
 }
 
-export function createHostHandlers({ cwd, getClient, getContext = () => undefined, getManifest = () => undefined, getKernel = () => undefined, getKernelRestore = () => undefined, recordAgentMessage = () => {}, recordChildCreation = () => {}, restartKernel = () => { throw new Error("kernel restart is unavailable"); } }) {
+export function createHostHandlers({ cwd, scratch = null, getClient, getContext = () => undefined, getManifest = () => undefined, getKernel = () => undefined, getKernelRestore = () => undefined, recordAgentMessage = () => {}, recordChildCreation = () => {}, restartKernel = () => { throw new Error("kernel restart is unavailable"); } }) {
   return {
     async "files.read"(payload) {
       const value = requireRecord(payload, "files.read payload");
@@ -970,7 +972,7 @@ export function createHostHandlers({ cwd, getClient, getContext = () => undefine
       };
     },
 
-    "shell.run": (payload, context) => runShell(payload, { cwd, ...context }),
+    "shell.run": (payload, context) => runShell(payload, { cwd, scratch, ...context }),
 
     "kernel.status"() {
       const kernel = getKernel();

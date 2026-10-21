@@ -75,7 +75,7 @@ export function parseRestartArgs(argv, env = process.env) {
 
 export function sanitizedRestartEnvironment(env = process.env) {
   const result = { ...env };
-  for (const name of ["PI_HARNESS_ACTOR_ID", "PI_HARNESS_ACTOR_TOKEN", "PI_HARNESS_ACTOR_GENERATION", "PI_HARNESS_ACTOR_SKILL_GRANT", "PI_HARNESS_RESTART_WORKER", "PI_SESSION_ID", "PI_SESSION_FILE"]) delete result[name];
+  for (const name of ["PI_HARNESS_ACTOR_ID", "PI_HARNESS_ACTOR_TOKEN", "PI_HARNESS_ACTOR_GENERATION", "PI_HARNESS_ACTOR_SKILL_GRANT", "PI_HARNESS_ROOT_SESSION_ID", "PI_HARNESS_SCRATCH_DIRECTORY", "PI_HARNESS_RESTART_WORKER", "PI_SESSION_ID", "PI_SESSION_FILE"]) delete result[name];
   return result;
 }
 

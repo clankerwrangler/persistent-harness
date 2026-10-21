@@ -6,7 +6,7 @@ import path from "node:path";
 import { spawn } from "node:child_process";
 import test from "node:test";
 import { controlRequest } from "../src/control.mjs";
-import { HarnessSupervisor } from "../src/supervisor.mjs";
+import { HarnessSupervisor } from "./fixtures/isolated-supervisor.mjs";
 import { PROTOCOL_VERSION } from "../src/protocol.mjs";
 
 const packageRoot = path.resolve(import.meta.dirname, ".."), installBin = path.join(packageRoot, "bin", "install.mjs");

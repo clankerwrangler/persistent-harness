@@ -10,7 +10,7 @@ import test from "node:test";
 import { PythonKernel } from "../src/kernel.mjs";
 import { SDKWorker } from "../src/sdk-worker.mjs";
 import { HarnessClient } from "../src/client.mjs";
-import { HarnessSupervisor } from "../src/supervisor.mjs";
+import { HarnessSupervisor } from "./fixtures/isolated-supervisor.mjs";
 import { validateRequest, PROTOCOL_VERSION } from "../src/protocol.mjs";
 
 const pause = (ms) => new Promise(resolve => setTimeout(resolve, ms));

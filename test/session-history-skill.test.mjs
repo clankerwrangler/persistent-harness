@@ -4,7 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { setTimeout as sleep } from "node:timers/promises";
-import { HarnessSupervisor } from "../src/supervisor.mjs";
+import { HarnessSupervisor } from "./fixtures/isolated-supervisor.mjs";
 import { HarnessClient } from "../src/client.mjs";
 import { SessionHistoryIndex } from "../src/session-history-index.mjs";
 import { createHostHandlers } from "../src/host-handlers.mjs";

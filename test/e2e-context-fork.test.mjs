@@ -9,7 +9,7 @@ import test from "node:test";
 import { HarnessClient } from "../src/client.mjs";
 import { verifyOwnedProcessIdentity } from "../src/process-ownership.mjs";
 import { sessionSidecarPaths } from "../src/session-paths.mjs";
-import { HarnessSupervisor } from "../src/supervisor.mjs";
+import { HarnessSupervisor } from "./fixtures/isolated-supervisor.mjs";
 
 const FORK_TYPE = "persistent-harness.context-fork-v1";
 const PARENT_FACT = "PARENT_FACT_e6d4173c";

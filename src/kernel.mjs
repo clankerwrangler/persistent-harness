@@ -178,6 +178,7 @@ export class PythonKernel {
     stateDir,
     manifest,
     hostHandlers,
+    scratch = null,
     maxOutputBytes = 64 * 1024,
     shutdownTimeoutMs = 1500,
     killTimeoutMs = 1000,
@@ -191,6 +192,7 @@ export class PythonKernel {
     this.stateDir = stateDir;
     this.manifest = manifest;
     this.hostHandlers = hostHandlers;
+    this.scratch = scratch;
     this.maxOutputBytes = maxOutputBytes;
     this.shutdownTimeoutMs = shutdownTimeoutMs;
     this.killTimeoutMs = killTimeoutMs;
@@ -241,6 +243,7 @@ export class PythonKernel {
     await writeFile(this.configPath, `${JSON.stringify({
       version: 1,
       manifest: this.manifest,
+      scratch: this.scratch,
       snapshotPath: this.snapshotPath,
       maxOutputFrameBytes: KERNEL_FRAME_BYTES,
       expectedVersions: this.expectedVersions,
@@ -257,6 +260,8 @@ export class PythonKernel {
       cwd: this.cwd,
       env: {
         ...process.env,
+        ...(this.scratch ? { PI_HARNESS_ROOT_SESSION_ID: this.scratch.rootSessionId,
+          PI_HARNESS_SCRATCH_DIRECTORY: this.scratch.directory } : {}),
         PYTHONDONTWRITEBYTECODE: "1",
         PYTHONUNBUFFERED: "1",
         PYTHONPATH: [...pythonPaths, process.env.PYTHONPATH].filter(Boolean).join(path.delimiter),

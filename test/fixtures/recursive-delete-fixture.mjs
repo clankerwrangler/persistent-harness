@@ -4,7 +4,7 @@ import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { HarnessClient } from "../../src/client.mjs";
-import { HarnessSupervisor } from "../../src/supervisor.mjs";
+import { HarnessSupervisor } from "./isolated-supervisor.mjs";
 
 export async function until(probe, timeout = 5000) {
   const deadline = Date.now() + timeout;
@@ -12,7 +12,7 @@ export async function until(probe, timeout = 5000) {
   throw new Error("recursive deletion fixture timed out");
 }
 class Actor extends EventEmitter {
-  constructor(options, fixture) { super(); this.session = options.session; this.fixture = fixture; this.pid = process.pid; this.isRunning = false; this.submits = []; }
+  constructor(options, fixture) { super(); this.session = options.session; this.env = options.env; this.fixture = fixture; this.pid = process.pid; this.isRunning = false; this.submits = []; }
   state() { return { sessionId: this.session.sessionId, sessionFile: this.session.sessionFile, model: null, thinkingLevel: "off", isStreaming: false }; }
   async start() { this.isRunning = true; await this.fixture.startGate?.(this); return this.state(); }
   async request(type) { if (type === "get_state") return this.state(); if (type === "get_entries") return { entries: [], leafId: null }; throw new Error(`unexpected ${type}`); }

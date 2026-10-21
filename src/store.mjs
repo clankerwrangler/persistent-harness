@@ -211,6 +211,7 @@ const CURRENT_SCHEMA = `
     actor_pid INTEGER,
     actor_identity_json TEXT,
     launch_json TEXT,
+    scratch_json TEXT,
     quiet_since INTEGER,
     last_error TEXT,
     created_at INTEGER NOT NULL,
@@ -369,6 +370,7 @@ export class HarnessStore {
     if (!sessionColumns.has("actor_token") || !sessionColumns.has("actor_generation") || !inputTable) {
       throw new Error("unreleased split-architecture database is unsupported; preserve session files, then recreate harness.sqlite");
     }
+    if (!sessionColumns.has("scratch_json")) this.#db.exec("ALTER TABLE sessions ADD COLUMN scratch_json TEXT");
     // Full parent edges serve active counts and deletion through tombstones.
     this.#db.exec("CREATE INDEX IF NOT EXISTS sessions_parent ON sessions(parent_session_id, lifecycle, id)");
     let inputColumns = new Set(this.#db.prepare("PRAGMA table_info(actor_inputs)").all().map((row) => row.name));
@@ -439,6 +441,46 @@ export class HarnessStore {
         this.#db.exec("COMMIT");
       } catch (error) { this.#db.exec("ROLLBACK"); throw error; }
     }
+  }
+
+  getSessionRoot(sessionId) {
+    const seen = new Set();
+    let id = sessionId, expectedDepth = null;
+    for (let hops = 0; hops <= MAX_NAVIGATOR_ANCESTOR_DEPTH; hops += 1) {
+      const row = this.#sessionRow(id);
+      if (!row || seen.has(id) || !Number.isSafeInteger(row.depth) || row.depth < 0
+        || row.depth > MAX_NAVIGATOR_ANCESTOR_DEPTH || (expectedDepth !== null && row.depth !== expectedDepth)) break;
+      seen.add(id);
+      if (row.kind === "root" && row.depth === 0 && row.parent_session_id === null) return mapSession(row);
+      if (row.kind !== "child" || row.depth === 0 || !row.parent_session_id) break;
+      expectedDepth = row.depth - 1; id = row.parent_session_id;
+    }
+    throw new Error("session root ancestry is invalid");
+  }
+
+  getRootScratch(sessionId) {
+    const root = this.getSessionRoot(sessionId);
+    const value = this.#sessionRow(root.sessionId).scratch_json;
+    if (value === null) return null;
+    const record = parseJson(value);
+    if (!record || record.version !== 1 || !["ready", "deleting", "removed"].includes(record.state)) throw new Error("root scratch ownership is invalid");
+    return record;
+  }
+
+  rootScratchCleanupState(rootId) {
+    try { return this.getRootScratch(rootId)?.state ?? "unowned"; }
+    catch { return "unknown"; }
+  }
+
+  listPendingScratchRoots() {
+    return this.#db.prepare(`SELECT id FROM sessions WHERE kind = 'root' AND lifecycle = 'deleted'
+      AND CASE WHEN json_valid(scratch_json) THEN json_extract(scratch_json, '$.state') END = 'deleting'`)
+      .all().map(row => row.id);
+  }
+
+  setRootScratch(rootId, record) {
+    if (this.getSessionRoot(rootId).sessionId !== rootId) throw new Error("scratch owner must be a root");
+    this.#db.prepare("UPDATE sessions SET scratch_json = ? WHERE id = ?").run(JSON.stringify(record), rootId);
   }
 
   get schemaVersion() { return Number(this.#db.prepare("PRAGMA user_version").get().user_version); }
@@ -1086,6 +1128,12 @@ export class HarnessStore {
     this.#db.exec("BEGIN IMMEDIATE");
     try {
       const sessions = this.getSessionSubtree(sessionId);
+      const selected = this.getSession(sessionId);
+      if (selected.kind === "root") {
+        let scratch;
+        try { scratch = this.getRootScratch(sessionId); } catch {}
+        if (scratch?.state === "ready") this.setRootScratch(sessionId, { ...scratch, state: "deleting" });
+      }
       const tombstone = this.#db.prepare(`UPDATE sessions SET display_name = display_name || '-deleted-' || short_id,
         lifecycle = 'deleted', actor_token = '', actor_pid = NULL, actor_identity_json = NULL,
         streaming = 0, activity = 'inactive', quiet_since = NULL, last_error = NULL,

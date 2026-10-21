@@ -4,6 +4,7 @@ import { once } from "node:events";
 import test from "node:test";
 import {
   captureOwnedProcessIdentity,
+  quiescentScratchProcessRoots,
   processOwnershipInternals,
   terminateOwnedProcess,
   verifyOwnedProcessIdentity,
@@ -47,4 +48,19 @@ test("parses Linux proc identity fields and matches exact environment entries", 
   const environment = Buffer.from("A=1\0PI_HARNESS_ACTOR_TOKEN=secret\0OTHER=2\0");
   assert.equal(processOwnershipInternals.hasEnvironmentToken(environment, "secret"), true);
   assert.equal(processOwnershipInternals.hasEnvironmentToken(environment, "sec"), false);
+});
+
+test("scratch process proof is exact, bounded, and read-only", async t => {
+  const rootId = crypto.randomUUID(), unrelated = crypto.randomUUID();
+  const child = spawn(process.execPath, ["-e", "console.log('ready');setInterval(()=>{},1000)"], {
+    env: { ...process.env, PI_HARNESS_ROOT_SESSION_ID: rootId }, stdio: ["ignore", "pipe", "ignore"] });
+  t.after(() => { if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL"); });
+  await once(child.stdout, "data");
+  const proof = await quiescentScratchProcessRoots([rootId, unrelated]);
+  assert.equal(proof.has(rootId), false);
+  assert.equal(proof.has(unrelated), true);
+  assert.equal(child.exitCode, null);
+  assert.equal((await quiescentScratchProcessRoots([rootId], { maxProcesses: 0 })).size, 0);
+  assert.equal((await quiescentScratchProcessRoots([rootId], { maxBytes: 0 })).size, 0);
+  assert.equal((await quiescentScratchProcessRoots([rootId], { timeoutMs: 0 })).size, 0);
 });

@@ -1040,6 +1040,12 @@ except Exception as error:
 emit({"type": "runtime_validated", "versions": runtime_versions})
 if receive().get("type") != "runtime_continue":
     raise RuntimeError("expected runtime startup continuation")
+scratch = config.get("scratch")
+if scratch is not None:
+    if (not isinstance(scratch, dict) or not isinstance(scratch.get("directory"), str)
+            or not os.path.isabs(scratch["directory"])):
+        raise RuntimeError("invalid harness scratch context")
+    shell.user_ns["scratch_dir"] = Path(scratch["directory"])
 protected_names = set(shell.user_ns) | set(proxies)
 snapshot_recovery_report = recover_previous_snapshot(config["snapshotPath"])
 recovery_validation = snapshot_recovery_report.pop("_validation", None)

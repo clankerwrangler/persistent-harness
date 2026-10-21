@@ -19,7 +19,7 @@ async function fixture(t, flush, acknowledge = () => ({}), initialEntries = []) 
   const hooks = new Map(), commands = new Map(), sent = [], requests = [], trace = [], entries = [...initialEntries];
   const owner = {};
   let client;
-  t.mock.method(HarnessClient.prototype, "start", async function () { client = this; return { session: { depth: 1 } }; });
+  t.mock.method(HarnessClient.prototype, "start", async function () { client = this; return { session: { depth: 1 }, scratch: { rootSessionId: "sender", directory: path.join(directory, "scratch") } }; });
   t.mock.getter(HarnessClient.prototype, "isConnected", () => true);
   t.mock.getter(HarnessClient.prototype, "connectedSession", () => ({ sessionId: "boundary-fixture", actorGeneration: 1, depth: 1 }));
   t.mock.method(HarnessClient.prototype, "request", async (type, params) => {

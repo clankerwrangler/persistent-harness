@@ -5,7 +5,7 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { HarnessClient } from "../src/client.mjs";
-import { HarnessSupervisor } from "../src/supervisor.mjs";
+import { HarnessSupervisor } from "./fixtures/isolated-supervisor.mjs";
 
 const tick = () => new Promise((resolve) => setImmediate(resolve));
 async function eventually(predicate) {
