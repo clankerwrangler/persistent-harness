@@ -2106,3 +2106,70 @@ test("artifact generation blocked startup cannot read a newly reconciled desired
   assert.deepEqual(first.actor.loadedGrant, original);
   assert.match(await readFile(first.actor.loadedGrant.skills[0].skillPath, "utf8"), /First admitted bytes/);
 });
+
+
+for (const unexpectedExit of [false, true]) test(`overlapping launch and wake delivery preserve retryability after ${unexpectedExit ? "unexpected exit" : "submit rejection"}`, async t => {
+  const readGate = Promise.withResolvers(), readEntered = Promise.withResolvers();
+  t.after(() => readGate.resolve());
+  const f = await admissionFailureFixture(t);
+  let reads = 0;
+  f.supervisor.transcriptReader.read = async () => {
+    reads++;
+    if (reads === 1) { readEntered.resolve(); await readGate.promise; }
+    return { messages: [], inputIds: [], inputDeliveries: {}, inputAssociationStates: {} };
+  };
+  f.control.next = unexpectedExit ? {} : { submitFailure: true };
+  const accepted = await f.client.request("submit_input", f.params);
+  await readEntered.promise;
+  if (unexpectedExit) f.actors[1].submit = async () => {
+    f.actors[1].isRunning = false;
+    f.actors[1].emit("exit", { code: 1, signal: null, expected: false, error: "public fixture unexpected exit" });
+    throw new Error("public fixture submit rejected after unexpected exit");
+  };
+  // Launch has published resident but cannot finish its first delivery. This
+  // readiness request queues behind the original wake's readiness owner, so
+  // its response proves that wake has appended delivery behind the held tail.
+  await f.client.request("get_actor_state", { sessionId: f.sessionId });
+  assert.equal(reads, 1, "coalesced delivery is waiting behind launch, not reading independently");
+  readGate.resolve();
+  await eventually(() => f.supervisor.store.getSession(f.sessionId)?.lifecycle === "error"
+    && f.supervisor.status().capacity.starting === 0);
+  await f.client.request("heartbeat");
+  const failed = f.supervisor.store.getActorInput(accepted.inputId, f.sessionId);
+  assert.equal(failed.delivery.retryableError?.code, "actor_wake_failed");
+  assert.equal(failed.delivery.retryableError.generation, f.actors[1].session.actorGeneration);
+  assert.doesNotMatch(failed.delivery.retryableError.message, /injected/);
+  const retry = await f.client.request("submit_input", f.params);
+  assert.equal(retry.inputId, accepted.inputId); assert.equal(retry.delivery.retryableError, undefined);
+  await eventually(() => f.actors.some(actor => actor.submits.some(input => input.message === f.params.message)));
+  await f.client.request("submit_input", f.params); await f.client.request("heartbeat");
+  assert.equal(f.actors.flatMap(actor => actor.submits).filter(input => input.message === f.params.message).length, 1);
+  assert.equal(f.supervisor.store.listActorInputReceipts(f.sessionId).length, 1);
+});
+
+
+for (const mode of ["stop", "delete", "shutdown"]) test(`late delivery rejection after ${mode} cannot publish a retryable failure`, async t => {
+  const readGate = Promise.withResolvers(), readEntered = Promise.withResolvers();
+  const submitGate = Promise.withResolvers(), submitEntered = Promise.withResolvers();
+  t.after(() => { readGate.resolve(); submitGate.resolve(); });
+  const f = await admissionFailureFixture(t); let reads = 0;
+  f.supervisor.transcriptReader.read = async () => {
+    if (++reads === 1) { readEntered.resolve(); await readGate.promise; }
+    return { messages: [], inputIds: [], inputDeliveries: {}, inputAssociationStates: {} };
+  };
+  const failurePublications = [], publish = f.supervisor.store.setActorInputWakeError.bind(f.supervisor.store);
+  f.supervisor.store.setActorInputWakeError = (id, generation = null) => {
+    if (generation !== null) failurePublications.push(generation);
+    return publish(id, generation);
+  };
+  await f.client.request("submit_input", f.params); await readEntered.promise;
+  const actor = f.actors[1];
+  actor.submit = async () => { submitEntered.resolve(); await submitGate.promise; throw new Error("late public fixture delivery rejection"); };
+  await f.client.request("get_actor_state", { sessionId: f.sessionId });
+  readGate.resolve(); await submitEntered.promise;
+  const retiring = mode === "shutdown" ? f.supervisor.stop()
+    : f.client.request(mode === "delete" ? "delete_session" : "stop_session", { sessionId: f.sessionId });
+  await eventually(() => actor.closeEntered);
+  submitGate.resolve(); await retiring;
+  assert.deepEqual(failurePublications, [], "intentional retirement keeps the original cancellation outcome");
+});

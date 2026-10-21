@@ -4,6 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import { PassThrough } from "node:stream";
 import test from "node:test";
+import { reduceIdleMemory, IDLE_MEMORY_GAP_BYTES } from "../src/idle-memory.mjs";
 import { SDKWorker, runSDKWorkerRpc } from "../src/sdk-worker.mjs";
 
 const tick = () => new Promise(resolve => setImmediate(resolve));
@@ -11,7 +12,7 @@ async function until(predicate) {
   for (let i = 0; i < 200; i++) { if (predicate()) return; await new Promise(resolve => setTimeout(resolve, 5)); }
   assert.fail("idle-index fixture condition did not complete");
 }
-async function fixture(t, { configured = true, supported = true } = {}) {
+async function fixture(t, { configured = true, supported = true, reduceMemory } = {}) {
   const root = await mkdtemp(path.join(os.tmpdir(), "worker-entry-index-"));
   const calls = [], gates = []; let closed = false;
   const manager = supported ? { prepareEntryIndex({ signal }) {
@@ -23,7 +24,7 @@ async function fixture(t, { configured = true, supported = true } = {}) {
     getState: () => ({ isStreaming: false }), abort: async () => {}, close: async () => {}, waitForIdle: async () => {} };
   const cachePath = path.join(root, "private", "source.index");
   const worker = new SDKWorker({ session, coordinator, runner: { invalidate() {} }, broker: { close() {}, cancelAll() {} },
-    sdk: {}, lifecycle: {}, publish() {}, entryIndexCachePath: configured ? cachePath : undefined });
+    sdk: {}, lifecycle: {}, publish() {}, entryIndexCachePath: configured ? cachePath : undefined, reduceMemory });
   t.after(async () => { for (const gate of gates) gate.resolve(false); await worker.close(); await rm(root, { recursive: true, force: true }); });
   return { root, worker, session, coordinator, manager, calls, gates, cachePath, closed: () => closed };
 }
@@ -128,4 +129,66 @@ test("entry-index shutdown exclusion retains the drain for ordinary RPC requests
   ordinary.resolve({ isStreaming: false }); await run;
   assert.equal(f.closed(), true); assert.equal(f.calls[0].signal.aborted, true);
   f.gates[0].resolve(false); input.destroy();
+});
+
+function collector(gc) {
+  return eligible => reduceIdleMemory(eligible, { gc,
+    memoryUsage: () => ({ rss: IDLE_MEMORY_GAP_BYTES + 100, heapTotal: 80, external: 20 }) });
+}
+
+test("idle-memory worker independently excludes busy, pending and index preparation", async t => {
+  let calls = 0;
+  const f = await fixture(t, { reduceMemory: collector(async () => { calls++; }) });
+  for (const [owner, key, value] of [[f.coordinator,"isBusy",true], [f.session,"isIdle",false],
+    [f.session,"pendingMessageCount",1], [f.coordinator,"pendingMessageCount",1]]) {
+    const previous = owner[key]; owner[key] = value;
+    assert.equal(await f.worker.handle({ type: "reduce_idle_memory", token: "blocked" }), false);
+    owner[key] = previous;
+  }
+  const prep = f.worker.handle({ type: "prepare_entry_index", token: "held-index" });
+  await until(() => f.calls.length === 1);
+  assert.equal(await f.worker.handle({ type: "reduce_idle_memory", token: "index" }), false);
+  f.gates[0].resolve(true); await prep;
+  const pending = f.worker.handle({ type: "reduce_idle_memory", token: "late-busy" });
+  f.coordinator.isBusy = true; assert.equal(await pending, false); f.coordinator.isBusy = false;
+  assert.equal(calls, 0);
+});
+
+test("idle-memory token and new input cancel before invocation without changing retained aliases", async t => {
+  let calls = 0;
+  const f = await fixture(t, { reduceMemory: collector(async () => { calls++; }) });
+  const retained = { value: "public state" }; f.session.retained = retained; const alias = f.session.retained;
+  const first = f.worker.handle({ type: "reduce_idle_memory", token: "old" });
+  assert.equal(await f.worker.handle({ type: "cancel_idle_memory", token: "foreign" }), false);
+  assert.equal(await f.worker.handle({ type: "cancel_idle_memory", token: "old" }), true);
+  assert.equal(await first, false);
+  const second = f.worker.handle({ type: "reduce_idle_memory", token: "new" });
+  assert.equal(await f.worker.handle({ type: "cancel_idle_memory", token: "old" }), false);
+  assert.deepEqual(await f.worker.handle({ type: "prompt", message: "continue" }), { outcome: "accepted" });
+  assert.equal(await second, false); assert.equal(calls, 0);
+  assert.equal(await f.worker.handle({ type: "reduce_idle_memory", token: "finish" }), true);
+  assert.equal(calls, 1); assert.equal(f.session.retained, alias); assert.equal(alias.value, "public state");
+});
+
+test("started idle GC leaves prompt, ordinary RPC drain and extension shutdown independent", async t => {
+  const gc = Promise.withResolvers(), ordinary = Promise.withResolvers(); let entered = false, ordinaryEntered = false;
+  t.after(() => { gc.resolve(); ordinary.resolve({}); });
+  const f = await fixture(t, { reduceMemory: collector(() => { entered = true; return gc.promise; }) });
+  const input = new PassThrough(), output = new PassThrough(), frames = [];
+  output.on("data", chunk => { for (const line of chunk.toString().trim().split("\n")) frames.push(JSON.parse(line)); });
+  f.coordinator.getState = () => { ordinaryEntered = true; return ordinary.promise; };
+  const run = runSDKWorkerRpc({ input, output, installSignalHandlers: false, bootstrap: async ({ lifecycle }) => {
+    f.coordinator.submit = async () => { lifecycle.requestShutdown(); return { outcome: "handled" }; }; return f.worker;
+  } });
+  input.write(JSON.stringify({ id: "gc", type: "reduce_idle_memory", token: "running" }) + "\n");
+  await until(() => entered);
+  input.write(JSON.stringify({ id: "ordinary", type: "get_state" }) + "\n");
+  await until(() => ordinaryEntered);
+  input.write(JSON.stringify({ id: "prompt", type: "prompt", message: "shutdown" }) + "\n");
+  await until(() => frames.some(frame => frame.id === "prompt"));
+  assert.equal(f.closed(), false, "ordinary work retains the existing shutdown drain");
+  ordinary.resolve({ isStreaming: false }); await run;
+  assert.equal(f.closed(), true); assert.equal(frames.some(frame => frame.id === "gc"), false);
+  gc.resolve(); await tick(); assert.equal(frames.some(frame => frame.id === "gc"), false, "late optional response stays suppressed");
+  input.destroy();
 });

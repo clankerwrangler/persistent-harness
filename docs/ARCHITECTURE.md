@@ -23,6 +23,17 @@ child remains independent; later input or a family message uses normal revival,
 canonical history, and kernel snapshot recovery. Family activity and notification
 settlement still include descendants.
 
+Managed workers start with `--expose-gc`. After 30 seconds of continuous own-idle,
+the same timer can request one memory-reducing collection per idle interval when
+RSS exceeds JS heap capacity plus external allocations by at least 192 MiB.
+This margin is an eligibility heuristic, not exact cache accounting. Pending work,
+index preparation, or an unavailable GC hook skips the optional collection. Wake
+and retirement cancel unstarted work; a started collection is not awaited by
+input admission or shutdown, and the passivation deadline stays unchanged.
+The experimental V8 last-resort hook still pauses the isolate and clears
+compilation caches, so later compilation can cost more. Strongly retained session
+and namespace values remain intact.
+
 The supervisor lazily owns one disposable Node compile-cache directory shared by
 its actors. The actor enables it before importing the SDK worker; tools and the
 supervisor do not enable it through this path. Node owns code/source/version

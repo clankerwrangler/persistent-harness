@@ -1,3 +1,4 @@
+import { reduceIdleMemory } from "./idle-memory.mjs";
 import { nodeMemoryDiagnostics } from "./memory-diagnostics.mjs";
 import { projectAvailableModels, validateInferenceEffort } from "./inference-options.mjs";
 import { conversationBirth } from "./conversation-birth.mjs";
@@ -176,11 +177,29 @@ function discoveredPaths(paths) {
 export class SDKWorker {
   #closed;
   #entryIndexPreparation;
-  constructor({ session, coordinator, runner, resources, sdk, models, projectContext, broker, publish, lifecycle, entryIndexCachePath }) {
-    Object.assign(this, { session, coordinator, runner, resources, sdk, models, projectContext, broker, publish, lifecycle, entryIndexCachePath });
+  #idleMemoryReduction;
+  constructor({ session, coordinator, runner, resources, sdk, models, projectContext, broker, publish, lifecycle, entryIndexCachePath, reduceMemory = reduceIdleMemory }) {
+    Object.assign(this, { session, coordinator, runner, resources, sdk, models, projectContext, broker, publish, lifecycle, entryIndexCachePath, reduceMemory });
     this.unsubscribeService = session.subscribe((event) => {
       if (["session_info_changed", "thinking_level_changed"].includes(event.type)) publish(event);
     });
+  }
+  cancelIdleMemory(token) {
+    const current = this.#idleMemoryReduction;
+    if (!current || (token !== undefined && current.token !== token)) return false;
+    current.cancelled = true;
+    return true;
+  }
+  async reduceIdleMemory(token) {
+    if (this.#idleMemoryReduction) return false;
+    const current = { token, cancelled: false };
+    const eligible = () => !this.#closed && !current.cancelled && !this.#entryIndexPreparation
+      && !this.coordinator.isBusy && this.session.isIdle
+      && !this.coordinator.pendingMessageCount && !this.session.pendingMessageCount;
+    if (!eligible()) return false;
+    this.#idleMemoryReduction = current;
+    try { return await this.reduceMemory(eligible); }
+    finally { if (this.#idleMemoryReduction === current) this.#idleMemoryReduction = undefined; }
   }
   cancelEntryIndex(token) {
     const current = this.#entryIndexPreparation;
@@ -234,10 +253,13 @@ export class SDKWorker {
   async handle(command) {
     if (this.#closed) throw new Error("Actor worker is closing");
     if (!command || typeof command !== "object" || Array.isArray(command)) throw new TypeError("RPC command must be an object");
+    if (!["reduce_idle_memory", "cancel_idle_memory"].includes(command.type)) this.cancelIdleMemory();
     const { session, coordinator, runner, models } = this;
     const manager = session.sessionManager;
     const persist = command.persist === undefined ? false : boolean(command.persist, "persist");
     switch (command.type) {
+      case "reduce_idle_memory": return this.reduceIdleMemory(string(command.token, "token"));
+      case "cancel_idle_memory": return this.cancelIdleMemory(string(command.token, "token"));
       case "prepare_entry_index": return this.prepareEntryIndex(string(command.token, "token"));
       case "cancel_entry_index": return this.cancelEntryIndex(string(command.token, "token"));
       case "get_state": return coordinator.getState();
@@ -356,6 +378,7 @@ export class SDKWorker {
     }
   }
   close() {
+    this.cancelIdleMemory();
     this.cancelEntryIndex();
     if (!this.#closed) {
       this.broker.close();
@@ -453,7 +476,7 @@ export async function bootstrapSDKWorker({ argv = [], cwd = process.cwd(), env =
   const startupErrors = [];
   let ready = false, worker, session;
   const emit = (event) => {
-    if (event.type === "agent_start") worker?.cancelEntryIndex();
+    if (event.type === "agent_start") { worker?.cancelIdleMemory(); worker?.cancelEntryIndex(); }
     const frame = toWorkerRpcEvent(event); if (frame) publish(frame);
   };
   runner.onError((error) => { if (!ready) startupErrors.push(error); emit({ type: "extension_error", ...error }); });
@@ -536,6 +559,7 @@ export async function runSDKWorkerRpc({ input = process.stdin, output = process.
   const broker = new RpcDialogBroker(publish, { onChange: () => { void drainShutdown(); } });
   const lifecycle = { requestShutdown: () => {
     shutdownRequested = true;
+    worker?.cancelIdleMemory?.();
     worker?.cancelEntryIndex?.();
     queueMicrotask(() => { void drainShutdown(); });
   } };
@@ -585,7 +609,7 @@ export async function runSDKWorkerRpc({ input = process.stdin, output = process.
       }
       if (command?.id != null) activeIds.add(command.id);
       // Optional work keeps admission/ID accounting but cannot hold shutdown.
-      const preparation = command?.type === "prepare_entry_index";
+      const preparation = ["prepare_entry_index", "reduce_idle_memory"].includes(command?.type);
       if (preparation) preparationRequests += 1;
       const task = (async () => {
         try {
