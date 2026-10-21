@@ -1,4 +1,5 @@
-import { appendFileSync } from "node:fs";
+import { appendFileSync, mkdirSync } from "node:fs";
+import path from "node:path";
 import { pathToFileURL } from "node:url";
 import { HarnessClient } from "../../src/client.mjs";
 import { HarnessStore } from "../../src/store.mjs";
@@ -10,7 +11,10 @@ const store = new HarnessStore(process.env.RETRY_FIXTURE_DATABASE);
 const actorId = process.env.PI_HARNESS_ACTOR_ID;
 const registeredSession = { sessionId: actorId, actorGeneration: Number(process.env.PI_HARNESS_ACTOR_GENERATION), depth: 1 };
 // Substitute only the fixture's actor-control peer, not Pi command dispatch or navigation.
-HarnessClient.prototype.start = async () => ({ session: registeredSession });
+const scratch = { rootSessionId: store.getSessionRoot(actorId).sessionId,
+  directory: path.join(path.dirname(process.env.RETRY_FIXTURE_DATABASE), "scratch", actorId) };
+mkdirSync(scratch.directory, { recursive: true });
+HarnessClient.prototype.start = async () => ({ session: registeredSession, scratch });
 Object.defineProperty(HarnessClient.prototype, "connectedSession", { get: () => registeredSession });
 Object.defineProperty(HarnessClient.prototype, "isConnected", { get: () => true });
 HarnessClient.prototype.request = async (type, params) => {

@@ -1,3 +1,5 @@
+import { quiescentScratchProcessRoots } from "./process-ownership.mjs";
+import { DEFAULT_SCRATCH_DIRECTORY, ensureSessionScratch, reclaimSessionScratch } from "./session-scratch.mjs";
 import { nodeMemoryDiagnostics, workerMemoryDiagnostics } from "./memory-diagnostics.mjs";
 import { birthOrder } from "./conversation-birth.mjs";
 import { createHash, randomUUID } from "node:crypto";
@@ -424,6 +426,7 @@ export class HarnessSupervisor {
     cronStoreFactory = (value) => new CronStore(value),
     cronSchedulerFactory = (options) => new CronScheduler(options),
     backgroundJobsDirectory = defaultBackgroundJobsDirectory(),
+    scratchDirectory = process.env.PI_HARNESS_SCRATCH_ROOT || DEFAULT_SCRATCH_DIRECTORY,
     backgroundCompletionIntervalMs = Number(process.env.PI_HARNESS_BACKGROUND_COMPLETION_TICK_MS ?? 1_000),
     titleGenerator = createRootTitleGenerator(),
     notificationIdleMs = NOTIFICATION_IDLE_MS,
@@ -434,7 +437,7 @@ export class HarnessSupervisor {
       configuredChildModel, configuredChildThinkingLevel, piCommand, actorFactory, transcriptReader, processIdentityFactory, processTerminator,
       actorStartupTimeoutMs, actorPromptPreflightTimeoutMs, actorShutdownTimeoutMs, logger, maxLogBytes,
       cronTickIntervalMs, cronMaxParallel, cronDefaultTimezone, cronStoreFactory, cronSchedulerFactory,
-      backgroundJobsDirectory,
+      backgroundJobsDirectory, scratchDirectory,
       backgroundCompletionIntervalMs, titleGenerator, notificationIdleMs, notificationTickMs });
     this.actorExtensionPath = path.resolve(actorExtensionPath);
     this.actorExtensionPaths = [...new Set(actorExtensionPaths.map((item) => path.resolve(item)))].filter((item) => item !== this.actorExtensionPath);
@@ -511,6 +514,7 @@ export class HarnessSupervisor {
       this.#cronScheduler.start();
       this.#backgroundCompletionMonitor = new BackgroundCompletionMonitor({
         directory: this.backgroundJobsDirectory,
+        onScanComplete: () => this.#retryPendingScratchCleanup(),
         intervalMs: this.backgroundCompletionIntervalMs,
         dispatch: (job) => this.#dispatchBackgroundCompletion(job),
         onActiveJobsChanged: (sessionId, jobs) => {
@@ -723,7 +727,8 @@ export class HarnessSupervisor {
           && this.store.getSession(state.sessionId)?.lifecycle === "resident") this.#kickActorInputDelivery(state.sessionId, actor);
         void this.#withSessionMutation(state.sessionId, () => this.#deliverPending(state));
       });
-      return { ...registered, limits: this.#limits() };
+      const scratch = ensureSessionScratch(this.store, state.sessionId, this.scratchDirectory);
+      return { ...registered, scratch, limits: this.#limits() };
     }
     if (type === "register_client") {
       if (state.role) throw new Error("connection is already registered"); state.role = "client"; state.clientInstanceId = params.clientInstanceId; this.#clientConnections.add(state);
@@ -1029,8 +1034,40 @@ export class HarnessSupervisor {
       }
       for (const client of this.#clientConnections) this.#write(client, event("sessions_deleted", { sessionIds: ids }));
       this.#broadcastNavigator("sessions_deleted");
-      return { session, deletedSessionIds: ids };
+      if (session.kind === "root" && this.store.rootScratchCleanupState(sessionId) === "deleting") {
+        this.#backgroundCompletionMonitor?.resetRetirementProof();
+      }
+      return { session, deletedSessionIds: ids,
+        ...(session.kind === "root" ? { scratchCleanup: this.store.rootScratchCleanupState(sessionId) } : {}) };
     } finally { retirement.release(); this.store.endSessionDeletion(sessions); }
+  }
+
+  async #tryScratchCleanup(rootId, processRoots) {
+    if (!processRoots.has(rootId)) return;
+    try {
+      const record = this.store.getRootScratch(rootId);
+      if (record?.state !== "deleting") return;
+      const family = this.store.getSessionSubtree(rootId);
+      if (family.some(session => session.lifecycle !== "deleted" || this.#actors.get(session.sessionId)?.worker.isRunning)) return;
+      if (!await this.#backgroundCompletionMonitor?.areSessionsQuiescent(family.map(session => session.sessionId))) return;
+      reclaimSessionScratch(this.store, rootId, this.scratchDirectory);
+    } catch {
+      // The tombstone and durable intent survive path changes, I/O errors, and restarts.
+      // Retrying never revives actors, kills detached jobs, or replays their input.
+    }
+  }
+
+  async #retryPendingScratchCleanup() {
+    if (this.#stoppingPromise) return;
+    const roots = this.store.listPendingScratchRoots().filter(rootId => !this.store.isSessionDeleting(rootId));
+    const owners = roots.flatMap(rootId => this.store.getSessionSubtree(rootId).map(session => session.sessionId));
+    if (!roots.length) { this.#backgroundCompletionMonitor?.resetRetirementProof(); return; }
+    const processRoots = await quiescentScratchProcessRoots(roots);
+    await this.#backgroundCompletionMonitor?.prepareRetirementProof(owners);
+    for (const rootId of roots) {
+      if (this.store.isSessionDeleting(rootId) || this.#sessionMutationTails.has(rootId)) continue;
+      await this.#withSessionMutation(rootId, () => this.#tryScratchCleanup(rootId, processRoots));
+    }
   }
 
   #clearSessionRouting(sessionId) {
@@ -1870,8 +1907,10 @@ export class HarnessSupervisor {
     if (!session.sessionFile) throw new Error(`session ${session.sessionId} has no canonical Pi session file`);
     args.push("--session", session.sessionFile); return args;
   }
-  #actorEnv(session, compileCache, generationSkillGrantPath) {
+  #actorEnv(session, compileCache, generationSkillGrantPath, scratch) {
     const env = { ...process.env, PI_HARNESS_WORKER_EVENTS: "supervised-source", PI_HARNESS_SOCKET: this.socketPath, PI_HARNESS_AUTO_START: "0", PI_HARNESS_ACTOR_ID: session.sessionId, PI_HARNESS_ACTOR_TOKEN: session.actorToken, PI_HARNESS_ACTOR_GENERATION: String(session.actorGeneration) };
+    env.PI_HARNESS_ROOT_SESSION_ID = scratch.rootSessionId;
+    env.PI_HARNESS_SCRATCH_DIRECTORY = scratch.directory;
     delete env.PI_SESSION_ID; delete env.PI_SESSION_FILE;
     delete env.PI_HARNESS_ACTOR_COMPILE_CACHE;
     if (compileCache) env.PI_HARNESS_ACTOR_COMPILE_CACHE = compileCache.directory;
@@ -1895,7 +1934,8 @@ export class HarnessSupervisor {
     const session = this.store.getActorLaunch(sessionId); if (!session || session.lifecycle !== "starting" || this.store.isSessionDeleting(sessionId)) return;
     const generationSkillGrantPath = await publishActorGenerationSkillGrant(session, skillGrant);
     check();
-    const worker = this.actorFactory({ command: process.execPath, args: [STOCK_ACTOR_WORKER, ...this.#actorArgs(session)], cwd: session.cwd, env: { ...this.#actorEnv(session, compileCache, generationSkillGrantPath), PI_HARNESS_PI_COMMAND: this.piCommand }, startupTimeoutMs: this.actorStartupTimeoutMs, promptPreflightTimeoutMs: this.actorPromptPreflightTimeoutMs,
+    const scratch = ensureSessionScratch(this.store, sessionId, this.scratchDirectory);
+    const worker = this.actorFactory({ command: process.execPath, args: [STOCK_ACTOR_WORKER, ...this.#actorArgs(session)], cwd: session.cwd, env: { ...this.#actorEnv(session, compileCache, generationSkillGrantPath, scratch), PI_HARNESS_PI_COMMAND: this.piCommand }, startupTimeoutMs: this.actorStartupTimeoutMs, promptPreflightTimeoutMs: this.actorPromptPreflightTimeoutMs,
       shutdownTimeoutMs: this.actorShutdownTimeoutMs, session });
     const record = { worker, generation: session.actorGeneration, rootOutputSession: Object.freeze({ sessionId: session.sessionId, kind: session.kind, depth: session.depth }), expectedLifecycle: null, exitError: null, eventSeq: 0, eventRing: [], eventRingBytes: 0, progressSummary: undefined, progressTurnId: null,
       skillGrantFingerprint: skillGrant.fingerprint, skillGrantSkills: skillGrant.skills, skillRefreshPending: false,

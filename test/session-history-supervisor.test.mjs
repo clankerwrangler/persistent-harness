@@ -6,7 +6,7 @@ import test from "node:test";
 import { setTimeout as sleep } from "node:timers/promises";
 import { HarnessClient, HarnessRequestError } from "../src/client.mjs";
 import { SessionHistoryIndex } from "../src/session-history-index.mjs";
-import { HarnessSupervisor } from "../src/supervisor.mjs";
+import { HarnessSupervisor } from "./fixtures/isolated-supervisor.mjs";
 
 const launch = { model: null, thinking: { requested: null, resolved: null, source: "settings" }, capabilities: [] };
 

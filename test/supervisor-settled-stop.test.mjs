@@ -7,7 +7,7 @@ import path from "node:path";
 import test from "node:test";
 import { HarnessClient } from "../src/client.mjs";
 import { PiSessionActor } from "../src/session-actor.mjs";
-import { HarnessSupervisor } from "../src/supervisor.mjs";
+import { HarnessSupervisor } from "./fixtures/isolated-supervisor.mjs";
 import { PythonRuntimeManager } from "../src/python-runtime.mjs";
 import { acceptedNativeRuntime } from "./fixtures/accepted-native-runtime.mjs";
 

@@ -229,7 +229,7 @@ async function generationExtension(t, { drift = false, desiredPath = false, with
     PI_HARNESS_ACTOR_SKILL_GRANT: grantPath, PI_CODING_AGENT_DIR: path.join(f.root, "agent") });
   const { default: extension, extensionInternals } = await import(`../src/extension.mjs?generation=${randomUUID()}`);
   const hooks = new Map(), tools = new Map(), owner = {}, entries = [], requests = []; let commandReads = 0;
-  t.mock.method(HarnessClient.prototype, "start", async () => ({ session: { depth: 1 } }));
+  t.mock.method(HarnessClient.prototype, "start", async () => ({ session: { depth: 1 }, scratch: { rootSessionId: sessionId, directory: path.join(f.root, "scratch") } }));
   t.mock.getter(HarnessClient.prototype, "isConnected", () => true);
   t.mock.getter(HarnessClient.prototype, "connectedSession", () => ({ sessionId, actorGeneration, depth: 1 }));
   t.mock.method(HarnessClient.prototype, "request", async (type, params) => {

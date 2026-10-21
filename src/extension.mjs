@@ -462,6 +462,7 @@ export default function persistentHarnessExtension(pi, owner = null) {
   let client;
   let activeContext;
   let actorDepth;
+  let actorScratch;
   if (owner) owner.projectPublicText = text => actorDepth === 0 ? sanitizePresentationText(text).text : text;
   const actorInputs = createActorInputDelivery({ pi, getClient: () => client, getContext: () => activeContext });
   let knownDeliveredIds = new Set();
@@ -724,11 +725,13 @@ ${catalog.diagnostics.map((item) => item.error).join("\n")}`);
           cwd: ctx.cwd,
           stateDir,
           manifest,
+          scratch: actorScratch,
           shutdownTimeoutMs: Number(process.env.PI_HARNESS_KERNEL_SHUTDOWN_TIMEOUT_MS ?? 1500),
           killTimeoutMs: Number(process.env.PI_HARNESS_KERNEL_KILL_TIMEOUT_MS ?? 1000),
           interruptTimeoutMs: Number(process.env.PI_HARNESS_KERNEL_INTERRUPT_TIMEOUT_MS ?? 2000),
           hostHandlers: createHostHandlers({
             cwd: ctx.cwd,
+            scratch: actorScratch,
             getClient: () => client,
             getContext: () => activeContext,
             getManifest: () => currentManifest,
@@ -1165,6 +1168,9 @@ ${catalog.diagnostics.map((item) => item.error).join("\n")}`);
       throw new Error("supervisor registration did not provide a valid RLM depth");
     }
     actorDepth = registered.session.depth;
+    if (!registered.scratch || typeof registered.scratch.directory !== "string"
+      || typeof registered.scratch.rootSessionId !== "string") throw new Error("supervisor did not provide root scratch context");
+    actorScratch = registered.scratch;
     await turnFailureReporter.flush();
     await actorInputs.flush();
     await flushUsageEntries();
@@ -1194,7 +1200,8 @@ ${catalog.diagnostics.map((item) => item.error).join("\n")}`);
           depthPrompt: depthPrompt.prompt,
           skillPrompt: skillPrompt(manifest.skills, nativeAsyncEnabled(ctx.model)),
           prefixPrompt,
-        }) + (recoveryDiagnostic ? `\n\n${recoveryDiagnostic}` : "");
+        }) + `\n\n# Session scratch\nUse ${actorScratch.directory}/ for temporary work. This directory belongs to root session ${actorScratch.rootSessionId} and is shared by its descendants. Explicit root deletion reclaims it after owned work finishes. Python exposes this path as scratch_dir.`
+        + (recoveryDiagnostic ? `\n\n${recoveryDiagnostic}` : "");
       const checkpointError = kernel?.snapshotStats.checkpointError;
       if (checkpointError) systemPrompt += `\n\nPython namespace save diagnostic: ${JSON.stringify(checkpointError)}. `
         + "Do not replay external side effects to repair a save failure.";

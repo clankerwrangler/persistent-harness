@@ -10,7 +10,7 @@ import { pathToFileURL } from "node:url";
 import { getHeapStatistics } from "node:v8";
 import { explicitHeapCap } from "../fixtures/node-heap-cap.mjs";
 import { HarnessClient } from "../../src/client.mjs";
-import { HarnessSupervisor } from "../../src/supervisor.mjs";
+import { HarnessSupervisor } from "../fixtures/isolated-supervisor.mjs";
 import { PiSessionActor } from "../../src/session-actor.mjs";
 import { verifyOwnedProcessIdentity } from "../../src/process-ownership.mjs";
 import { sessionSidecarPaths } from "../../src/session-paths.mjs";

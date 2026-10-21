@@ -39,7 +39,8 @@ async function fixture(t, { holdReconnect = false, dropAck = false, rejectFlush 
   const append = entry => { entries.push(entry); appendFileSync(sessionFile, `${JSON.stringify(entry)}\n`); return entry.id; };
   const canonicalEntries = () => readFileSync(sessionFile, "utf8").trim().split("\n").filter(Boolean).map(line => JSON.parse(line));
   const admit = (socket, request) => socket.write(encodeFrame(response(request.id, request.type, {
-    session: { sessionId: request.params.sessionId, actorGeneration: request.params.actorGeneration, depth: 1 }, limits: {},
+    session: { sessionId: request.params.sessionId, actorGeneration: request.params.actorGeneration, depth: 1 },
+    scratch: { rootSessionId: "sender", directory: path.join(dir, "scratch") }, limits: {},
   })));
   const server = net.createServer(socket => {
     sockets.push(socket); socket.on("error", () => {});

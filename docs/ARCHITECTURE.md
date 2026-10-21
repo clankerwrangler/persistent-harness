@@ -41,6 +41,8 @@ skip this optimization. See [Node cache controls](DEPENDENCIES.md#node-compile-c
 
 These are same-user local processes, not a multi-tenant security boundary. The Python and shell capabilities execute with the service account's privileges.
 
+Root scratch ownership is attached to the existing root session row, not to actor generations or shared family labels. Canonical ancestry supplies descendant paths. Root tombstoning and pending cleanup intent share the store transaction; existing process ownership and background-completion monitoring gate later reclamation. Restart preserves the tombstone and retries cleanup, never the deleted actor's input. See [Root session scratch](OPERATIONS.md#root-session-scratch) for bounds and recovery.
+
 ## Python namespace checkpoints
 
 Each eligible top-level binding keeps its own dill serialization, payload file,

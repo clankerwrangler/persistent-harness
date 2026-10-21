@@ -70,6 +70,11 @@ async function isActiveProcess(meta) {
   return true;
 }
 
+// Retirement metadata is projected/validated by #retirementJobMeta before caching.
+function completeRetirementIdentity(meta) {
+  return Boolean(meta && meta.kind !== null && meta.pid !== null && meta.starttime !== null);
+}
+
 function startedAt(value) {
   if (typeof value !== "string" || value.length > 64) return null;
   const timestamp = Date.parse(value);
@@ -142,14 +147,17 @@ export class BackgroundCompletionMonitor {
   #onActiveJobsChanged;
   #directoryReader;
   #retryJobs = new Set();
+  #onScanComplete;
+  #retirementSample;
 
-  constructor({ directory = defaultBackgroundJobsDirectory(), dispatch, onActiveJobsChanged = () => {}, intervalMs = 1_000, logger = console } = {}) {
+  constructor({ directory = defaultBackgroundJobsDirectory(), dispatch, onActiveJobsChanged = () => {}, onScanComplete = () => {}, intervalMs = 1_000, logger = console } = {}) {
     if (typeof directory !== "string" || !directory) throw new Error("background jobs directory is required");
     if (typeof dispatch !== "function") throw new Error("background completion dispatch is required");
     if (typeof onActiveJobsChanged !== "function") throw new Error("background activity callback is invalid");
     if (!Number.isInteger(intervalMs) || intervalMs < 100 || intervalMs > 60 * 60 * 1000) throw new Error("background completion interval is invalid");
     this.#directory = path.resolve(directory); this.#dispatch = dispatch; this.#intervalMs = intervalMs; this.#logger = logger;
     this.#onActiveJobsChanged = onActiveJobsChanged;
+    this.#onScanComplete = onScanComplete;
   }
 
   getActiveBackgroundJobs(sessionId) {
@@ -201,6 +209,89 @@ export class BackgroundCompletionMonitor {
     return jobs;
   }
 
+  // Admissions have drained before these owners enter retirement. Keep only their
+  // matching/unknown job IDs, not a second index of historical job contents.
+  resetRetirementProof() { this.#retirementSample = null; }
+
+  async prepareRetirementProof(sessionIds) {
+    const owners = new Set(sessionIds);
+    const previous = this.#retirementSample;
+    if (previous && [...owners].every(id => previous.owners.has(id))) {
+      previous.owners = owners;
+      for (const [id, meta] of previous.jobs) if (meta && !owners.has(meta.session_id)) previous.jobs.delete(id);
+      return;
+    }
+    const sample = { owners, jobs: new Map(), complete: false, directory: null };
+    this.#retirementSample = sample;
+    if (!owners.size) { sample.complete = true; return; }
+    let directory, reader;
+    try {
+      try { directory = await open(this.#directory, constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW); }
+      catch (error) { if (error.code === "ENOENT") sample.complete = true; return; }
+      sample.directory = await directory.stat();
+      reader = await opendir(`/proc/self/fd/${directory.fd}`);
+      let count = 0;
+      for await (const entry of reader) {
+        if (++count > 10_000) return;
+        if (!JOB_ID.test(entry.name)) continue;
+        const meta = await this.#retirementJobMeta(directory, entry.name);
+        if (!meta || owners.has(meta.session_id)) sample.jobs.set(entry.name, meta);
+      }
+      const current = await lstat(this.#directory);
+      sample.complete = current.isDirectory() && current.dev === sample.directory.dev && current.ino === sample.directory.ino;
+    } catch {} // An incomplete directory proof requires explicit retry or restart.
+    finally { try { await reader?.close(); } catch {} await directory?.close(); }
+  }
+
+  async #retirementJobMeta(directory, id) {
+    let job;
+    try {
+      job = await open(`/proc/self/fd/${directory.fd}/${id}`, constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW);
+      const meta = await readJson(`/proc/self/fd/${job.fd}/meta.json`);
+      if (meta?.schema !== "background.job.v1" || meta.id !== id
+        || typeof meta.session_id !== "string" || !SESSION_ID.test(meta.session_id)) return null;
+      return { session_id: meta.session_id,
+        kind: ["launched", "adopted"].includes(meta.kind) ? meta.kind : null,
+        pid: Number.isSafeInteger(meta.pid) && meta.pid > 0 && meta.pid <= 2 ** 31 - 1 ? meta.pid : null,
+        starttime: typeof meta.starttime === "string" && /^[0-9]{1,20}$/.test(meta.starttime) ? meta.starttime : null };
+    } catch { return null; }
+    finally { await job?.close(); }
+  }
+
+  async areSessionsQuiescent(sessionIds) {
+    const sample = this.#retirementSample, owners = new Set(sessionIds);
+    if (!sample?.complete || [...owners].some(id => !sample.owners.has(id))) return false;
+    if (!sample.directory) return true;
+    let directory;
+    try {
+      directory = await open(this.#directory, constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW);
+      const stat = await directory.stat();
+      if (stat.dev !== sample.directory.dev || stat.ino !== sample.directory.ino) return false;
+      for (const [id, previous] of sample.jobs) {
+        if (previous && !owners.has(previous.session_id)) continue;
+        const identity = completeRetirementIdentity(previous) ? previous : await this.#retirementJobMeta(directory, id);
+        // Repair incomplete observations as a whole, while keeping an established owner sticky.
+        if (!identity || previous && identity.session_id !== previous.session_id) return false;
+        if (!sample.owners.has(identity.session_id)) { sample.jobs.delete(id); continue; }
+        sample.jobs.set(id, identity);
+        if (!owners.has(identity.session_id)) continue;
+        if (!completeRetirementIdentity(identity)) return false;
+        let text;
+        try { text = await readBoundedText(`/proc/${identity.pid}/stat`, 4096); }
+        catch (error) { if (["ENOENT", "ESRCH"].includes(error.code)) continue; return false; }
+        if (text === null) return false;
+        const close = text.lastIndexOf(")");
+        if (close < 0) return false;
+        const fields = text.slice(close + 2).trim().split(/\s+/);
+        if (fields.length < 20) return false;
+        if (fields[19] === identity.starttime && !["Z", "X", "x"].includes(fields[0])) return false;
+      }
+      const current = await lstat(this.#directory);
+      return current.isDirectory() && current.dev === stat.dev && current.ino === stat.ino;
+    } catch { return false; }
+    finally { await directory?.close(); }
+  }
+
   start() {
     if (!this.#stopped) return;
     this.#stopped = false;
@@ -241,6 +332,10 @@ export class BackgroundCompletionMonitor {
           } finally { this.#inFlight.delete(job.id); }
         });
         this.#inFlight.set(job.id, delivery);
+      }
+      if (!this.#stopped) {
+        try { await this.#onScanComplete(); }
+        catch { this.#logger.error?.("pending root scratch cleanup could not be checked"); }
       }
     })();
     this.#scanPromise = operation;

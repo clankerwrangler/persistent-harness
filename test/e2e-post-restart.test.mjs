@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { execFile, spawn } from "node:child_process";
 import { once } from "node:events";
-import { readFile, mkdir, mkdtemp, readdir, rm, writeFile } from "node:fs/promises";
+import { lstat, readFile, mkdir, mkdtemp, readdir, rm, writeFile } from "node:fs/promises";
 import http from "node:http";
 import os from "node:os";
 import path from "node:path";
@@ -212,7 +212,7 @@ test("teardown discovers actor process groups from supervisor descendants", () =
 test("teardown waits for detached supervisor publication when control is unavailable", { timeout: 30_000 }, async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), "harness-post-restart-publication-"));
   const socketPath = path.join(root, "run", "supervisor.sock"); const databasePath = path.join(root, "state", "harness.sqlite"); const pidPath = path.join(root, "run", "supervisor.pid");
-  const env = { ...sanitizedRestartEnvironment(process.env), PI_CODING_AGENT_DIR: path.join(root, "agent"), PI_HARNESS_AUTO_INSTALL: process.env.PI_HARNESS_AUTO_INSTALL ?? "1" };
+  const env = { ...sanitizedRestartEnvironment(process.env), PI_HARNESS_SCRATCH_ROOT: path.join(root, "scratch"), PI_CODING_AGENT_DIR: path.join(root, "agent"), PI_HARNESS_AUTO_INSTALL: process.env.PI_HARNESS_AUTO_INSTALL ?? "1" };
   let daemon = null;
   const publication = (async () => {
     await sleep(250);
@@ -276,7 +276,7 @@ test("external restart revives and nudges the initiating session exactly once", 
   });
   await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
   const address = server.address(); assert(address && typeof address === "object");
-  const env = { ...sanitizedRestartEnvironment(process.env), PI_CODING_AGENT_DIR: agentDir, PI_HARNESS_SOCKET: socketPath, PI_HARNESS_DATABASE: databasePath, PI_HARNESS_PID: pidPath,
+  const env = { ...sanitizedRestartEnvironment(process.env), PI_HARNESS_SCRATCH_ROOT: path.join(root, "scratch"), PI_CODING_AGENT_DIR: agentDir, PI_HARNESS_SOCKET: socketPath, PI_HARNESS_DATABASE: databasePath, PI_HARNESS_PID: pidPath,
     PI_HARNESS_ACTOR_EXTENSIONS: JSON.stringify([fakeProviderPath]), PI_HARNESS_ACTOR_INACTIVITY_MS: "0", PI_HARNESS_AUTO_INSTALL: process.env.PI_HARNESS_AUTO_INSTALL ?? "1", HARNESS_FAKE_BASE_URL: `http://127.0.0.1:${address.port}/v1` };
   const daemon = spawn(process.execPath, [supervisorBin, "start", "--socket", socketPath, "--db", databasePath, "--pid", pidPath], { env, stdio: ["ignore", "pipe", "pipe"] });
   await waitLine(daemon.stdout); const oldPid = daemon.pid;
@@ -285,6 +285,9 @@ test("external restart revives and nudges the initiating session exactly once", 
   const admitted = (await ui.request("create_root", { cwd, repositoryRoot: null, name: "restart-root", provider: "harness-fake", model: "fake-model", thinkingLevel: null })).admission;
   await ui.request("subscribe_session", { selector: admitted.sessionId });
   await submitAndSettle(ui, admitted.sessionId, "before restart");
+  const scratchPath = path.join(env.PI_HARNESS_SCRATCH_ROOT, admitted.sessionId);
+  const scratchBefore = await lstat(scratchPath);
+  assert(scratchBefore.isDirectory(), "the real restart fixture must allocate private scratch");
   const before = (await ui.request("get_status")).sessions.find((item) => item.sessionId === admitted.sessionId);
   const sessionFile = before.sessionFile; const oldActorPid = before.actorPid;
   const oldActor = await processIdentity(oldActorPid); assert(oldActor); actorIdentities.set(`${oldActor.pid}:${oldActor.startTime}`, oldActor);
@@ -311,6 +314,7 @@ test("external restart revives and nudges the initiating session exactly once", 
   assert.equal(replayedHistory.entries.filter((entry) => entry.type === "message" && entry.message?.role === "user" && JSON.stringify(entry).includes(POST_RESTART_NUDGE)).length, 1);
   const after = (await ui2.request("get_status")).sessions.find((item) => item.sessionId === admitted.sessionId);
   assert.equal(after.sessionFile, sessionFile); assert.notEqual(after.actorPid, oldActorPid);
+  assert.equal((await lstat(scratchPath)).ino, scratchBefore.ino, "post-restart continuation preserves root scratch");
   const replacementActor = await processIdentity(after.actorPid); assert(replacementActor); actorIdentities.set(`${replacementActor.pid}:${replacementActor.startTime}`, replacementActor);
   await ui2.stop(); clients.delete(ui2);
 });

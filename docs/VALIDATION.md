@@ -110,7 +110,15 @@ bounds; batch completion uses the existing request and outer-test deadlines.
 
 The broader private integration checkpoint also exercised a browser client. Browser assets, its HTTP adapter, and browser-only tests are intentionally not part of this harness-only repository. Client-neutral protocol/history tests remain.
 
+The lifecycle test supervisor wrapper supplies test-private scratch and background directories. Run with private `HOME` and `PI_CODING_AGENT_DIR` as required above; inherited deployment extension configuration must also be cleared when testing default extension lists.
+
+`session-scratch.test.mjs` covers canonical root/child/grandchild propagation, generation revival, child preservation, actor-stop fencing, deferred detached ownership under tombstoned descendants, an orphan writer surviving its leader, restart recovery without replay, unknown metadata, discovery beyond the 128-job presentation cache, unrelated-history reuse, and unowned/traversal/symlink/substituted-path rejection. `kernel-scratch.test.mjs` checks the real Python alias, protected restore behavior, and explicit kernel/host-shell marker propagation. Process-owner tests exercise exact matching and each sample bound. All destructive fixtures are automatically cleaned temporary trees.
+
 ## Models
+
+`RootScratch` models canonical family lifetime, tombstone-before-reclaim intent, independent draining tool/background ownership, restart, path substitution, child deletion, and preserved unrelated roots/legacy data. TLC checks 39,103 generated states, 4,360 distinct states, and depth 17. Its six negative controls (skip background, skip tools, drop intent, follow changed paths, child reclamation, and counting the supervisor as root work) must fail. The abstraction does not prove Linux process attribution, filesystem crash atomicity, or same-UID race exclusion.
+
+`ScratchJobIdentity` checks repair of valid-PID/missing-birth, invalid-kind, and out-of-range-PID observations, sticky owner association, and freezing only complete process identities. Its positive model checks 24 generated states, 11 distinct states, and depth 4; its early-freeze negative control violates repair progress. The existing metadata-repair fixture reproduces both failures on old code and checks active replacement identity, retarget rejection, complete-identity pinning, and eventual reclamation after exit.
 
 `OwnIdleRetirement` separates the worker's quiet age from descendant display
 activity. It checks safe and available inactivity/capacity retirement, stable

@@ -7,7 +7,7 @@ import path from "node:path";
 import test from "node:test";
 import { promisify } from "node:util";
 import { HarnessClient } from "../src/client.mjs";
-import { HarnessSupervisor } from "../src/supervisor.mjs";
+import { HarnessSupervisor } from "./fixtures/isolated-supervisor.mjs";
 import { ACTOR_INPUT_COMMAND } from "../src/protocol.mjs";
 import { backgroundCompletionMessage } from "../src/background-notifier.mjs";
 import { actorInputCustomPayload } from "../src/extension.mjs";

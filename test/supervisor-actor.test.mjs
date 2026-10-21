@@ -16,7 +16,7 @@ import { defaultRootName } from "../src/root-title.mjs";
 import { actorInputCustomPayload, ACTOR_INPUT_COMMAND } from "../src/protocol.mjs";
 import { createRootTitleGenerator } from "../src/root-title-generator.mjs";
 import { PiSessionActor } from "../src/session-actor.mjs";
-import { HarnessSupervisor } from "../src/supervisor.mjs";
+import { HarnessSupervisor } from "./fixtures/isolated-supervisor.mjs";
 import { discoverSkills, skillCatalogForSkills } from "../src/skills.mjs";
 import { sessionSidecarPaths } from "../src/session-paths.mjs";
 
@@ -2095,7 +2095,10 @@ test("artifact generation blocked startup cannot read a newly reconciled desired
   await writeGuidanceSkill(f.skillsPath, "alpha", "Updated during paused startup.");
   const input = f.client.request("submit_input", { sessionId: id, message: "during startup", behavior: "auto", clientRequestId: "artifact-startup-race" });
   await eventually(() => f.supervisor.store.getSessionSkillGrant(id).skills[0].skillPath !== original.skills[0].skillPath);
-  const desired = JSON.parse(await readFile(sessionSidecarPaths(first.options.session.sessionFile).skillGrantPath, "utf8"));
+  const desired = await eventually(async () => {
+    const value = JSON.parse(await readFile(sessionSidecarPaths(first.options.session.sessionFile).skillGrantPath, "utf8"));
+    return value.skills[0].skillPath !== original.skills[0].skillPath ? value : null;
+  });
   assert.notEqual(desired.skills[0].skillPath, original.skills[0].skillPath, "negative control: mutable desired path really changed");
   assert.equal(await readFile(first.options.env.PI_HARNESS_ACTOR_SKILL_GRANT, "utf8"), originalBytes);
   release.resolve(); await admission; await input;

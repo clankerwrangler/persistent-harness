@@ -8,7 +8,7 @@ import test from "node:test";
 import { HarnessClient } from "../src/client.mjs";
 import { JsonLineDecoder, encodeFrame } from "../src/framing.mjs";
 import { PROTOCOL_VERSION } from "../src/protocol.mjs";
-import { HarnessSupervisor, socketOutputBufferLimit } from "../src/supervisor.mjs";
+import { HarnessSupervisor, socketOutputBufferLimit } from "./fixtures/isolated-supervisor.mjs";
 import { VisibleTranscriptReader } from "../src/visible-transcript-reader.mjs";
 
 const deferred = () => Promise.withResolvers();

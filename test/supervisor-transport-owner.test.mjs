@@ -9,7 +9,7 @@ import { HarnessClient } from "../src/client.mjs";
 import { encodeFrame, JsonLineDecoder } from "../src/framing.mjs";
 import { MAX_INPUT_IMAGE_BYTES, normalizeInputImages } from "../src/input-images.mjs";
 import { MAX_FRAME_BYTES, PROTOCOL_VERSION, response } from "../src/protocol.mjs";
-import { HarnessSupervisor, socketOutputBufferLimit } from "../src/supervisor.mjs";
+import { HarnessSupervisor, socketOutputBufferLimit } from "./fixtures/isolated-supervisor.mjs";
 import { VisibleTranscriptReader } from "../src/visible-transcript-reader.mjs";
 
 const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));

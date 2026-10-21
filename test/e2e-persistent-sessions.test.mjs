@@ -9,7 +9,7 @@ import { HarnessClient } from "../src/client.mjs";
 import { AGENT_MESSAGE_ENTRY_TYPE } from "../src/agent-message-projection.mjs";
 import { verifyOwnedProcessIdentity } from "../src/process-ownership.mjs";
 import { sessionSidecarPaths } from "../src/session-paths.mjs";
-import { HarnessSupervisor } from "../src/supervisor.mjs";
+import { HarnessSupervisor } from "./fixtures/isolated-supervisor.mjs";
 
 const fakeProviderPath = path.join(import.meta.dirname, "fixtures", "fake-provider.ts");
 async function waitUntil(probe, description, timeoutMs = 60_000) { const deadline = Date.now() + timeoutMs; let last; while (Date.now() < deadline) { try { const value = await probe(); if (value) return value; } catch (error) { last = error; } await new Promise((resolve) => setTimeout(resolve, 20)); } throw new Error(`timed out waiting for ${description}${last ? `: ${last.message}` : ""}`); }

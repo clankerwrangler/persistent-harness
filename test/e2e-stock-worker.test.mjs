@@ -4,7 +4,7 @@ import http from "node:http";
 import { cp, mkdtemp, mkdir, rm, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
 import os from "node:os";
-import { HarnessSupervisor } from "../src/supervisor.mjs";
+import { HarnessSupervisor } from "./fixtures/isolated-supervisor.mjs";
 import { HarnessClient } from "../src/client.mjs";
 import { CronStore } from "../src/cron-store.mjs";
 import { runtimeVersions } from "../src/python-runtime.mjs";
