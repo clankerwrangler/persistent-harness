@@ -67,13 +67,37 @@ export function ensureSessionScratch(store, sessionId, directory = DEFAULT_SCRAT
       // EEXIST is deliberately fatal: retained namespaces are not ownership evidence.
       mkdirSync(target, { mode: 0o700 }); fsyncSync(base.fd);
     }
-    rootFd = openSync(target, DIRECTORY);
+    let recreated;
+    const checkRecoveryOwner = () => {
+      store.assertSessionAvailable(sessionId);
+      store.assertSessionAvailable(root.sessionId);
+      if (rootIdentity(store, sessionId).sessionId !== root.sessionId
+        || JSON.stringify(store.getRootScratch(root.sessionId)) !== JSON.stringify(record)) fail();
+    };
+    try { rootFd = openSync(target, DIRECTORY); }
+    catch (error) {
+      if (!record || error.code !== "ENOENT") throw error;
+      if (record.root?.dev !== String(baseStat.dev) || typeof record.root?.ino !== "string"
+        || !/^[1-9][0-9]*$/.test(record.root.ino)) fail();
+      base.check(); checkRecoveryOwner();
+      // Recover only an absent leaf. A concurrent creator must fail with EEXIST.
+      mkdirSync(target, { mode: 0o700 });
+      recreated = lstatSync(target, { bigint: true });
+      if (!recreated.isDirectory()) fail();
+      fsyncSync(base.fd);
+      rootFd = openSync(target, DIRECTORY);
+    }
     const rootStat = fstatSync(rootFd, { bigint: true });
-    if (rootStat.dev !== baseStat.dev || mountId(rootFd) !== mountId(base.fd) || record && !same(rootStat, record.root)) fail();
+    const expectedRoot = recreated ?? record?.root;
+    if (rootStat.dev !== baseStat.dev || mountId(rootFd) !== mountId(base.fd)
+      || expectedRoot && !same(rootStat, expectedRoot)) fail();
     base.check();
     const current = lstatSync(target, { bigint: true });
     if (!current.isDirectory() || !same(current, rootStat)) fail();
-    if (!record) store.setRootScratch(root.sessionId, { version: 1, state: "ready", directory, base: witness(baseStat), root: witness(rootStat) });
+    if (recreated) {
+      checkRecoveryOwner();
+      store.setRootScratch(root.sessionId, { ...record, root: witness(rootStat) });
+    } else if (!record) store.setRootScratch(root.sessionId, { version: 1, state: "ready", directory, base: witness(baseStat), root: witness(rootStat) });
     return { rootSessionId: root.sessionId, directory: path.join(directory, root.sessionId) };
   } finally { if (rootFd !== undefined) closeSync(rootFd); base.close(); }
 }
