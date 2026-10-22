@@ -1,5 +1,7 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
+import fs from "node:fs";
+import { syncBuiltinESMExports } from "node:module";
 import { once } from "node:events";
 import { lstat, mkdir, mkdtemp, readFile, rename, rm, symlink, writeFile } from "node:fs/promises";
 import path from "node:path";
@@ -73,6 +75,98 @@ test("canonical root path is shared through grandchildren and survives stop, rev
   await f.client.request("delete_session", { sessionId: tree.child.sessionId });
   assert.equal(await readFile(path.join(rootPath, "family.txt"), "utf8"), "preserve");
   assert.equal(f.supervisor.store.getRootScratch(tree.root.sessionId).state, "ready");
+});
+
+test("missing owned scratch is recreated for the family and reused on revival", async t => {
+  const f = await deletionFixture(t), root = await f.admit("Root"), child = await f.admit("Child", root);
+  const store = f.supervisor.store, rootPath = scratchOf(f, root), base = f.supervisor.scratchDirectory;
+  const before = store.getRootScratch(root.sessionId);
+  await f.client.request("stop_session", { sessionId: root.sessionId });
+  await writeFile(path.join(rootPath, "keep"), "detached original");
+  await rename(rootPath, rootPath + "-original");
+  const context = ensureSessionScratch(store, child.sessionId, base);
+  const stat = await lstat(rootPath), after = store.getRootScratch(root.sessionId);
+  assert.deepEqual(context, { rootSessionId: root.sessionId, directory: rootPath });
+  assert.equal(stat.mode & 0o777, 0o700);
+  assert.notDeepEqual(after.root, before.root);
+  assert.deepEqual(after, { ...before, root: { dev: String(stat.dev), ino: String(stat.ino) } });
+  assert.equal(await readFile(path.join(rootPath + "-original", "keep"), "utf8"), "detached original");
+  assert.deepEqual(ensureSessionScratch(store, root.sessionId, base), context);
+  assert.deepEqual(store.getRootScratch(root.sessionId), after);
+  await f.client.request("revive_session", { sessionId: root.sessionId });
+  await until(() => f.actors.get(root.sessionId)?.isRunning);
+  assert.deepEqual(store.getRootScratch(root.sessionId), after);
+  assert.equal(f.actors.get(root.sessionId).env.PI_HARNESS_SCRATCH_DIRECTORY, rootPath);
+});
+
+test("missing scratch recovery rejects unavailable sessions and invalid ownership", async t => {
+  for (const mode of ["deleting", "removed", "fenced", "deleted", "missing-witness", "invalid-inode", "foreign-device"]) await t.test(mode, async t => {
+    const f = await deletionFixture(t), root = await f.admit("Root"), store = f.supervisor.store;
+    const rootPath = scratchOf(f, root), before = store.getRootScratch(root.sessionId);
+    await rm(rootPath, { recursive: true });
+    if (["deleting", "removed"].includes(mode)) store.setRootScratch(root.sessionId, { ...before, state: mode });
+    else if (mode === "fenced") {
+      const sessions = store.beginSessionDeletion(root.sessionId);
+      t.after(() => store.endSessionDeletion(sessions));
+    } else if (mode === "deleted") store.deleteSession(root.sessionId);
+    else {
+      const witness = mode === "missing-witness" ? undefined
+        : { ...before.root, ...(mode === "invalid-inode" ? { ino: "0" } : { dev: "-1" }) };
+      store.setRootScratch(root.sessionId, { ...before, root: witness });
+    }
+    const record = store.getRootScratch(root.sessionId);
+    assert.throws(() => ensureSessionScratch(store, root.sessionId, f.supervisor.scratchDirectory));
+    assert.equal(await absent(rootPath), true);
+    assert.deepEqual(store.getRootScratch(root.sessionId), record);
+  });
+});
+
+test("missing scratch recovery fails closed on creation and validation races", async t => {
+  for (const mode of ["mkdir-directory", "mkdir-symlink", "opened-directory", "opened-symlink", "base", "session", "record"]) await t.test(mode, async t => {
+    const f = await deletionFixture(t), root = await f.admit("Root"), store = f.supervisor.store;
+    const base = f.supervisor.scratchDirectory, rootPath = scratchOf(f, root);
+    const before = store.getRootScratch(root.sessionId);
+    await rm(rootPath, { recursive: true });
+    const original = { openSync: fs.openSync, fsyncSync: fs.fsyncSync };
+    let raced = false, opens = 0;
+    const replaceLeaf = symlink => {
+      if (fs.existsSync(rootPath)) fs.renameSync(rootPath, rootPath + "-created");
+      if (symlink) fs.symlinkSync(f.dir, rootPath); else fs.mkdirSync(rootPath);
+    };
+    fs.openSync = (...args) => {
+      if (String(args[0]).endsWith("/" + root.sessionId)) {
+        opens++;
+        if (opens === 1 && mode.startsWith("mkdir-")) {
+          try { return original.openSync(...args); }
+          catch (error) {
+            assert.equal(error.code, "ENOENT");
+            replaceLeaf(mode.endsWith("symlink")); raced = true; throw error;
+          }
+        }
+        if (opens === 2 && mode.startsWith("opened-")) {
+          replaceLeaf(mode.endsWith("symlink")); raced = true;
+        }
+      }
+      return original.openSync(...args);
+    };
+    fs.fsyncSync = (...args) => {
+      if (!raced && fs.existsSync(rootPath)) {
+        if (mode === "base") { fs.renameSync(base, base + "-moved"); fs.mkdirSync(base); raced = true; }
+        if (mode === "session") { store.deleteSession(root.sessionId); raced = true; }
+        if (mode === "record") { store.setRootScratch(root.sessionId, { ...before, state: "deleting" }); raced = true; }
+      }
+      return original.fsyncSync(...args);
+    };
+    syncBuiltinESMExports();
+    try {
+      assert.throws(() => ensureSessionScratch(store, root.sessionId, base));
+    } finally {
+      Object.assign(fs, original); syncBuiltinESMExports();
+    }
+    assert.equal(raced, true, "the actual filesystem boundary was reached");
+    const expected = ["session", "record"].includes(mode) ? { ...before, state: "deleting" } : before;
+    assert.deepEqual(store.getRootScratch(root.sessionId), expected, "failed recovery never replaces ownership");
+  });
 });
 
 test("root tombstone waits for actor retirement; cleanup preserves other roots and link targets", async t => {
