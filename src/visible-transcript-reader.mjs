@@ -8,6 +8,7 @@ import { sanitizePresentationText } from "./presentation-directive.mjs";
 import { selectIncomingFamilyMessages, projectAgentMessageEntry } from "./agent-message-projection.mjs";
 import { projectProgressEntry } from "./progress-projection.mjs";
 import { firstCompletedTitleTurn, rootTitleExcerpt } from "./root-title.mjs";
+import { followsSourceWatermark, sameSourceWatermark } from "./source-watermark.mjs";
 import { canonicalRetryInput } from "./session-actions.mjs";
 
 const READ_CHUNK_BYTES = 256 * 1024;
@@ -178,11 +179,11 @@ export class VisibleTranscriptReader {
     } finally { await handle.close(); }
   }
 
-  async #readSnapshot({ sessionFile, sessionId, maxMessages = 512, maxBytes = 48 * 1024, sanitizePresentation = false, includeTitleTurn = false, before = null, publicView = false, verifySource = false, historyIndex = false, allowToolImages = false, signal }) {
+  async #readSnapshot({ sessionFile, sessionId, maxMessages = 512, maxBytes = 48 * 1024, sanitizePresentation = false, includeTitleTurn = false, before = null, publicView = false, verifySource = false, historyIndex = false, allowToolImages = false, signal, sourceWatermark = null, ownedAppendBase = null, forceFull = false }) {
     const cursor = before === null ? null : parseHistoryCursor(before);
     const filePath = path.resolve(sessionFile);
-    const options = { sessionFile: filePath, sessionId, maxMessages, maxBytes, sanitizePresentation, includeTitleTurn, before, publicView, verifySource, historyIndex, allowToolImages, signal };
-    const projectionKey = JSON.stringify([sessionId, maxMessages, maxBytes, sanitizePresentation, includeTitleTurn, before, publicView, verifySource, historyIndex, allowToolImages]);
+    const options = { sessionFile: filePath, sessionId, maxMessages, maxBytes, sanitizePresentation, includeTitleTurn, before, publicView, verifySource, historyIndex, allowToolImages, signal, sourceWatermark, ownedAppendBase, forceFull };
+    const projectionKey = JSON.stringify([sessionId, maxMessages, maxBytes, sanitizePresentation, includeTitleTurn, before, publicView, verifySource, historyIndex, allowToolImages, sourceWatermark, ownedAppendBase, forceFull]);
     const active = this.#inflight.get(filePath);
     if (active) {
       // Independently owned history requests must never share an abort signal.
@@ -197,7 +198,7 @@ export class VisibleTranscriptReader {
       return trailing;
     }
     const state = { promise: null, trailing: new Map() };
-    state.promise = this.#read(filePath, sessionId, { maxMessages, maxBytes, sanitizePresentation, includeTitleTurn, cursor, publicView, verifySource, historyIndex, allowToolImages, signal })
+    state.promise = this.#read(filePath, sessionId, { maxMessages, maxBytes, sanitizePresentation, includeTitleTurn, cursor, publicView, verifySource, historyIndex, allowToolImages, signal, sourceWatermark, ownedAppendBase, forceFull })
       .catch((error) => { if (!verifySource && error.code !== "history_cursor_stale") this.#records.delete(filePath); throw error; })
       .finally(() => { if (this.#inflight.get(filePath) === state) this.#inflight.delete(filePath); });
     this.#inflight.set(filePath, state);
@@ -371,8 +372,16 @@ export class VisibleTranscriptReader {
       const fingerprint = transcriptFingerprint(await handle.stat({ bigint: true }));
       const stat = { dev: Number(fingerprint.dev), ino: Number(fingerprint.ino), size: Number(fingerprint.size) };
       let record = this.#records.get(filePath);
-      if (!record || record.sessionId !== sessionId || !sameFile(record, stat) || (bounds.verifySource && !record.hash)) record = newRecord(filePath, stat, sessionId, bounds.verifySource);
-      if (bounds.verifySource && record.offset && (!record.verified || !sameTranscriptFingerprint(record.fingerprint, fingerprint))) {
+      if (bounds.forceFull || !record || record.sessionId !== sessionId || !sameFile(record, stat) || (bounds.verifySource && !record.hash)) record = newRecord(filePath, stat, sessionId, bounds.verifySource);
+      const next = bounds.sourceWatermark, base = bounds.ownedAppendBase;
+      // Only a previously accepted owner cursor can waive old-byte reconciliation.
+      // A shared-reader append may already have advanced this same logical hash.
+      const ownedAppend = Boolean(bounds.verifySource && followsSourceWatermark(base, next)
+        && sameTranscriptFingerprint(next.fingerprint, fingerprint) && record.hash && record.pendingBytes === 0
+        && record.offset >= base.bytes && record.offset <= next.bytes
+        && (sameSourceWatermark(record.indexWatermark, base)
+          || (record.offset === base.bytes && record.hash.copy().digest("hex") === base.digest)));
+      if (bounds.verifySource && !ownedAppend && record.offset && (!record.verified || !sameTranscriptFingerprint(record.fingerprint, fingerprint))) {
         // Arbitrary same-inode rewrites (including rewrite + growth) are legal.
         // Verify every accepted prefix byte before reusing parsed metadata.
         const hash = createHash("sha256"), buffer = Buffer.allocUnsafe(READ_CHUNK_BYTES);
@@ -400,6 +409,9 @@ export class VisibleTranscriptReader {
         const chunk = buffer.subarray(0, bytesRead);
         record.hash?.update(chunk); record.offset += bytesRead;
         this.#consume(record, chunk, record.offset - bytesRead);
+      }
+      if (ownedAppend && (record.pendingBytes || record.offset !== next.bytes || record.hash.copy().digest("hex") !== next.digest)) {
+        throw Object.assign(new Error("owned append cursor does not match the complete suffix"), { code: "owned_append_unavailable" });
       }
       if (!record.headerValidated) throw new Error(`canonical Pi transcript header is incomplete: ${filePath}`);
       const receiptDependencies = bounds.historyIndex ? [] : null;
@@ -438,7 +450,7 @@ export class VisibleTranscriptReader {
           || !sameTranscriptFingerprint(fingerprint, transcriptFingerprint(await fileStat(filePath, { bigint: true })))) {
           throw new Error("canonical Pi transcript changed during verified read");
         }
-        bounds.signal?.throwIfAborted(); record.verified = true;
+        bounds.signal?.throwIfAborted(); record.verified = !ownedAppend;
       }
       record.fingerprint = fingerprint; record.touchedAt = Date.now();
       this.#touch(filePath, record); this.#evict();
@@ -452,6 +464,11 @@ export class VisibleTranscriptReader {
         }));
         projection.fingerprint = fingerprint;
         projection.receiptDependencies = receiptDependencies;
+        projection.sourceDigest = record.hash?.copy().digest("hex") ?? null;
+        projection.prefixVerified = record.verified;
+        // The binding is reconstructible cache state; durable reconciliation lives in the index owner.
+        record.indexWatermark = next && next.digest === projection.sourceDigest
+          && sameTranscriptFingerprint(next.fingerprint, fingerprint) ? next : null;
       }
       return { projection, record, associations };
     } finally {

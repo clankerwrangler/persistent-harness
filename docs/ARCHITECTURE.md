@@ -245,22 +245,38 @@ request. Shutdown aborts and drains both publication and independent snapshot
 jobs before closing the index and store. Other RPC deadlines are unchanged.
 
 `SessionHistoryIndex` is a disposable, contentless FTS5 index of active-branch
-user and assistant projections. Schema 3 stores canonical byte spans, entry and
-projected-text hashes, and hashed rendering dependencies for input receipts.
+user and assistant projections. Schema 4 stores canonical byte spans, entry and
+projected-text hashes, hashed rendering dependencies for input receipts, an
+optional owned-source cursor, and a durable full-reconciliation requirement.
+Validated v3 indexes migrate additively, retaining their verified documents,
+FTS and receipt dependencies without rescanning canonical archives.
 It stores no raw transcript, image, tool, or receipt payloads. The directory is
 private (`0700`); database, WAL, and shared-memory files are `0600`. Snapshot
 queries cannot discard or rebuild a damaged index. Recovery belongs to explicit
 refresh or maintenance, whose transactions never become a reader's snapshot.
 
-Maintenance and strict refresh verify changed cached prefixes with a
-bounded-buffer SHA-256 pass before parsing complete appended frames. This
-recovery still reads O(archive bytes); a cold reader can parse the whole source.
-Replacement, truncation, or a prefix mismatch rebuilds the projection. Partial
-lines, branch changes, and receipt-only changes remain part of the verified
-version. Ordinary shared-reader observations cannot certify new fingerprints.
-The reader cache remains session-bounded; complete index projections retain
-the eight-session/4 MiB cap. Aborted or unstable refresh cannot publish partial
-rows.
+Eligible automatic maintenance consumes the SDK owner's coalesced watermark
+through the authenticated worker channel. The existing reader hashes every new
+suffix byte from its accepted owner/epoch cursor and checks the resulting digest,
+without certifying the old physical prefix. The same atomic publication records
+that unverified prefix; snapshots remain indexed/current=false and report
+`unverifiedPrefixSources` and `reconciliationRequired`. This debt is distinct
+from physical catch-up and does not trigger an automatic refresh loop. Watermark
+metadata never enters client events, replay rings or root output; retired actor
+records cannot replace the current owner's hint.
+
+Strict refresh bypasses both the unchanged-fingerprint and cached-prefix
+shortcuts for unverified versions, fully verifies canonical bytes and clears the
+durable requirement only after publication. Cold caches, unknown changes,
+replacement, truncation, missing ranges, epoch/branch changes, digest mismatch
+and receipt invalidation recover through the same canonical owner; recovery
+still reads O(archive bytes). Complete inventory and receipt association remain
+required, including after coalesced appends. Ordinary shared-reader observations
+cannot certify prefixes. Metadata traversal and selected legacy receipt reads
+remain; this optimization removes eligible old-prefix byte I/O, not all
+historical work. The reader cache remains session-bounded; complete index
+projections retain the eight-session/4 MiB cap. Aborted or unstable refresh
+cannot publish partial rows.
 
 Snapshot hydration reads only matched entries or open's bounded ordinal window.
 It permits a larger appended file while requiring the same source identity,

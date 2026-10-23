@@ -5,10 +5,11 @@ import { stat } from "node:fs/promises";
 import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { VisibleTranscriptReader, transcriptFingerprint as fingerprint, sameTranscriptFingerprint as sameFingerprint } from "./visible-transcript-reader.mjs";
+import { normalizeSourceWatermark, followsSourceWatermark, sameSourceWatermark } from "./source-watermark.mjs";
 import { PRESENTATION_HISTORY_PREFIX } from "./presentation-directive.mjs";
 
-// Version 3 adds canonical spans and digests for incremental FTS and bounded hydration.
-export const SESSION_HISTORY_SCHEMA_VERSION = 3;
+// Version 4 keeps owned-append cursors separate from durable full-reconciliation provenance.
+export const SESSION_HISTORY_SCHEMA_VERSION = 4;
 
 const MAX_QUERY_BYTES = 512;
 const MAX_QUERY_CLAUSES = 32;
@@ -248,14 +249,15 @@ export class SessionHistoryIndex {
     this.#projectionCacheBytes = 0;
   }
 
-  #validateSchema(db, { integrity = true } = {}) {
+  #validateSchema(db, { integrity = true, version = SESSION_HISTORY_SCHEMA_VERSION } = {}) {
     const columns = (name) => db.prepare(`PRAGMA table_info(${name})`).all().map((column) => column.name);
     const exact = (actual, expected, context) => {
       if (actual.length !== expected.length || actual.some((name, index) => name !== expected[index])) {
         throw new Error(`derived session history ${context} schema is invalid`);
       }
     };
-    exact(columns("sources"), ["session_id", "session_file", "sanitize_presentation", "dev", "ino", "size", "mtime_ns", "ctime_ns", "indexed_at"], "sources");
+    exact(columns("sources"), ["session_id", "session_file", "sanitize_presentation", "dev", "ino", "size", "mtime_ns", "ctime_ns", "indexed_at",
+      ...(version === 3 ? [] : ["source_cursor", "requires_reconcile"])], "sources");
     exact(columns("documents"), ["document_id", "session_id", "entry_id", "role", "created_at", "ordinal", "text_hash", "source_offset", "source_length", "source_hash", "strip_marker"], "documents");
     exact(columns("receipt_dependencies"), ["session_id", "input_id", "receipt_hash"], "receipt dependencies");
     exact(columns("message_fts"), ["text"], "FTS");
@@ -292,11 +294,24 @@ export class SessionHistoryIndex {
     try {
       this.#secureDatabaseFiles();
       const version = Number(db.prepare("PRAGMA user_version").get().user_version);
-      if (version !== 0 && version !== SESSION_HISTORY_SCHEMA_VERSION) {
+      if (version !== 0 && version !== 3 && version !== SESSION_HISTORY_SCHEMA_VERSION) {
         throw new Error("derived session history schema version is unsupported");
       }
       db.exec("PRAGMA busy_timeout = 5000; PRAGMA foreign_keys = ON;");
       if (this.databasePath !== ":memory:") db.exec("PRAGMA journal_mode = WAL;");
+      if (version === 3) {
+        // V3 publications already verified canonical prefixes. Add provenance atomically,
+        // without discarding their documents, receipts or FTS and rescanning the archive.
+        this.#validateSchema(db, { version: 3 });
+        db.exec("BEGIN IMMEDIATE");
+        try {
+          db.exec(`ALTER TABLE sources ADD COLUMN source_cursor TEXT;
+            ALTER TABLE sources ADD COLUMN requires_reconcile INTEGER NOT NULL DEFAULT 0 CHECK (requires_reconcile IN (0, 1));
+            PRAGMA user_version = ${SESSION_HISTORY_SCHEMA_VERSION};`);
+          this.#validateSchema(db, { integrity: false });
+          db.exec("COMMIT");
+        } catch (error) { db.exec("ROLLBACK"); throw error; }
+      }
       db.exec(`
         CREATE TABLE IF NOT EXISTS sources (
           session_id TEXT PRIMARY KEY,
@@ -307,7 +322,9 @@ export class SessionHistoryIndex {
           size TEXT NOT NULL,
           mtime_ns TEXT NOT NULL,
           ctime_ns TEXT NOT NULL,
-          indexed_at INTEGER NOT NULL
+          indexed_at INTEGER NOT NULL,
+          source_cursor TEXT,
+          requires_reconcile INTEGER NOT NULL DEFAULT 0 CHECK (requires_reconcile IN (0, 1))
         ) STRICT;
         CREATE TABLE IF NOT EXISTS receipt_dependencies (
           session_id TEXT NOT NULL REFERENCES sources(session_id) ON DELETE CASCADE,
@@ -404,7 +421,7 @@ export class SessionHistoryIndex {
     this.#evictProjection(sessionId);
   }
 
-  async #readStable(session, signal) {
+  async #readStable(session, signal, { sourceWatermark = null, ownedAppendBase = null, forceFull = false } = {}) {
     let lastError;
     for (let attempt = 0; attempt < 3; attempt += 1) {
       try {
@@ -416,7 +433,7 @@ export class SessionHistoryIndex {
           maxMessages: UNBOUNDED_MESSAGES,
           maxBytes: UNBOUNDED_BYTES,
           sanitizePresentation: session.sanitizePresentation,
-          verifySource: true, historyIndex: true, signal,
+          verifySource: true, historyIndex: true, signal, sourceWatermark, ownedAppendBase, forceFull,
         });
         const after = fingerprint(await stat(session.sessionFile, { bigint: true }));
         if (!sameFingerprint(before, after)) {
@@ -426,26 +443,31 @@ export class SessionHistoryIndex {
         const messages = projection.messages.filter((message) => ROLES.has(message.role))
           .map((message) => searchableMessage(message, session.sanitizePresentation));
         signal?.throwIfAborted();
-        return { fingerprint: after, messages, sourceEntries: projection.sourceEntries, receiptDependencies: projection.receiptDependencies };
-      } catch (error) { signal?.throwIfAborted(); lastError = error; }
+        return { fingerprint: after, messages, sourceEntries: projection.sourceEntries, receiptDependencies: projection.receiptDependencies,
+          sourceDigest: projection.sourceDigest, prefixVerified: projection.prefixVerified !== false };
+      } catch (error) {
+        signal?.throwIfAborted(); lastError = error;
+        // A cold cache, unavailable range or failed hint is ordinary canonical recovery.
+        ownedAppendBase = null; forceFull = true;
+      }
     }
     throw lastError ?? new Error("canonical Pi transcript could not be read stably");
   }
 
-  /** Refresh only the supplied caller-authorized sources. Changed sources reuse only verified canonical prefixes. */
-  async refresh(sessions, { signal } = {}) {
+  /** Strict by default. Automatic publication may ingest an owned suffix without certifying its old prefix. */
+  async refresh(sessions, { signal, automatic = false, sourceWatermark = null } = {}) {
     signal?.throwIfAborted();
     this.#assertOpen();
     const allowed = normalizedSessions(sessions);
-    try { return await this.#refreshAllowed(allowed, signal); }
+    try { return await this.#refreshAllowed(allowed, signal, { automatic, sourceWatermark }); }
     catch (error) {
       if (!this.#isDatabaseFailure(error)) throw error;
       this.#recoverDatabase();
-      return this.#refreshAllowed(allowed, signal);
+      return this.#refreshAllowed(allowed, signal, { automatic, sourceWatermark });
     }
   }
 
-  async #refreshAllowed(allowed, signal) {
+  async #refreshAllowed(allowed, signal, { automatic, sourceWatermark }) {
     this.#validateSchema(this.#db, { integrity: false });
     const removed = [];
     const indexed = [];
@@ -469,16 +491,28 @@ export class SessionHistoryIndex {
         continue;
       }
       const source = this.#db.prepare("SELECT * FROM sources WHERE session_id = ?").get(session.sessionId);
-      if (source && source.session_file === session.sessionFile
+      const hint = automatic ? normalizeSourceWatermark(sourceWatermark, session) : null;
+      let cursor = null;
+      try { cursor = normalizeSourceWatermark(JSON.parse(source?.source_cursor ?? "null"), session); } catch {}
+      const receiptsMatch = source && this.#receiptsMatch(session.sessionId);
+      const strictReconcile = !automatic && Boolean(source?.requires_reconcile);
+      if (source && !strictReconcile && (!hint || sameSourceWatermark(cursor, hint)) && source.session_file === session.sessionFile
         && Number(source.sanitize_presentation) === Number(session.sanitizePresentation)
         && sameFingerprint(sourceFingerprint(source), currentFingerprint)
-        && this.#receiptsMatch(session.sessionId)) {
+        && receiptsMatch) {
         unchanged.push(session.sessionId);
         continue;
       }
 
       let rebuilt;
-      try { rebuilt = await this.#readStable(session, signal); }
+      try {
+        const ownedAppendBase = automatic && source?.session_file === session.sessionFile
+          && Number(source.sanitize_presentation) === Number(session.sanitizePresentation) && receiptsMatch
+          && sameFingerprint(sourceFingerprint(source), cursor?.fingerprint)
+          && sameFingerprint(hint?.fingerprint, currentFingerprint) && followsSourceWatermark(cursor, hint) ? cursor : null;
+        rebuilt = await this.#readStable(session, signal, { sourceWatermark: hint, ownedAppendBase,
+          forceFull: strictReconcile || Boolean(source?.requires_reconcile && !ownedAppendBase) });
+      }
       catch (error) {
         signal?.throwIfAborted();
         const existed = Boolean(this.#db.prepare("SELECT 1 FROM sources WHERE session_id = ?").get(session.sessionId));
@@ -494,11 +528,14 @@ export class SessionHistoryIndex {
       try {
         const fp = rebuilt.fingerprint;
         this.#db.prepare(`INSERT INTO sources(session_id, session_file, sanitize_presentation,
-          dev, ino, size, mtime_ns, ctime_ns, indexed_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+          dev, ino, size, mtime_ns, ctime_ns, indexed_at, source_cursor, requires_reconcile) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
           ON CONFLICT(session_id) DO UPDATE SET session_file=excluded.session_file, sanitize_presentation=excluded.sanitize_presentation,
-          dev=excluded.dev, ino=excluded.ino, size=excluded.size, mtime_ns=excluded.mtime_ns, ctime_ns=excluded.ctime_ns, indexed_at=excluded.indexed_at`)
+          dev=excluded.dev, ino=excluded.ino, size=excluded.size, mtime_ns=excluded.mtime_ns, ctime_ns=excluded.ctime_ns, indexed_at=excluded.indexed_at,
+          source_cursor=excluded.source_cursor, requires_reconcile=excluded.requires_reconcile`)
           .run(session.sessionId, session.sessionFile, session.sanitizePresentation ? 1 : 0,
-            fp.dev, fp.ino, fp.size, fp.mtimeNs, fp.ctimeNs, Date.now());
+            fp.dev, fp.ino, fp.size, fp.mtimeNs, fp.ctimeNs, Date.now(),
+            hint && hint.digest === rebuilt.sourceDigest && sameFingerprint(hint.fingerprint, fp) ? JSON.stringify(hint) : null,
+            rebuilt.prefixVerified ? 0 : 1);
         this.#db.prepare("DELETE FROM receipt_dependencies WHERE session_id = ?").run(session.sessionId);
         const insertDependency = this.#db.prepare("INSERT INTO receipt_dependencies(session_id, input_id, receipt_hash) VALUES (?, ?, ?)");
         for (const row of rebuilt.receiptDependencies) insertDependency.run(session.sessionId, row.input_id, row.receipt_hash);
@@ -556,6 +593,7 @@ export class SessionHistoryIndex {
     signal?.throwIfAborted();
     const source = db.prepare("SELECT * FROM sources WHERE session_id = ?").get(session.sessionId);
     const accepted = sourceFingerprint(source);
+    if (!snapshot && source?.requires_reconcile) throw new Error("history source requires strict reconciliation before current hydration");
     const check = async () => {
       signal?.throwIfAborted();
       if (!this.#receiptsMatch(session.sessionId, db)) throw new Error("history receipt dependency changed; refresh required");
@@ -601,7 +639,7 @@ export class SessionHistoryIndex {
   }
 
   async #coverage(sessions, db, signal, unavailable = new Set()) {
-    let indexed = 0, changed = 0, missing = 0, oldest = null, newest = null;
+    let indexed = 0, changed = 0, missing = 0, unverified = 0, oldest = null, newest = null;
     const pending = new Set();
     for (const session of sessions) {
       signal?.throwIfAborted();
@@ -609,6 +647,7 @@ export class SessionHistoryIndex {
       if (!source || source.session_file !== session.sessionFile
         || Number(source.sanitize_presentation) !== Number(session.sanitizePresentation)) { missing++; pending.add(session.sessionId); continue; }
       indexed++;
+      if (source.requires_reconcile) unverified++;
       oldest = oldest === null ? source.indexed_at : Math.min(oldest, source.indexed_at);
       newest = newest === null ? source.indexed_at : Math.max(newest, source.indexed_at);
       try {
@@ -619,6 +658,7 @@ export class SessionHistoryIndex {
     return { pendingSessionIds: [...pending],
       freshness: { mode: "indexed", current: false, branch: "indexed", sources: sessions.length,
       indexedSources: indexed, changedSources: changed, missingSources: missing,
+      unverifiedPrefixSources: unverified, reconciliationRequired: unverified > 0,
       unavailableSources: unavailable.size, pendingSources: pending.size,
       oldestIndexedAt: oldest === null ? null : new Date(oldest).toISOString(),
       newestIndexedAt: newest === null ? null : new Date(newest).toISOString() } };

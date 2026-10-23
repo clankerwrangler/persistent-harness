@@ -1,5 +1,7 @@
 import assert from "node:assert/strict";
 import { DatabaseSync } from "node:sqlite";
+import { randomUUID } from "node:crypto";
+import { normalizeSourceWatermark } from "../src/source-watermark.mjs";
 import { EventEmitter } from "node:events";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
@@ -48,7 +50,7 @@ async function fixture(t, options = {}) {
     pidPath: path.join(root, "run/h.pid"), skillsPath, backgroundJobsDirectory: path.join(root, "jobs"), backgroundCompletionIntervalMs: 100,
     runtimeProvisioner: async () => ({}), titleGenerator: null, actorInactivityMs: 0, ...options,
     actorFactory: options => { const actor = new Actor(options, supervisor); actors.push(actor); return actor; },
-    sessionHistoryIndex: { close() {} }, processIdentityFactory: async pid => ({ pid }), processTerminator: async () => ({}),
+    sessionHistoryIndex: options.sessionHistoryIndex ?? { close() {} }, processIdentityFactory: async pid => ({ pid }), processTerminator: async () => ({}),
     logger: { error: value => errors.push(String(value)) } });
   await supervisor.start();
   const client = new HarnessClient({ socketPath: supervisor.socketPath, heartbeatMs: 0 }); const connections = [];
@@ -409,4 +411,49 @@ test("a passivation deadline before the memory grace stops normally without a GC
   assert.equal(f.supervisor.store.getSession(f.id).lifecycle, "passivated");
   assert.equal(f.actor.reductions.length, 0);
   t.mock.timers.tick(30_000); await flushIdle(); assert.equal(f.actor.reductions.length, 0);
+});
+
+
+test("source watermarks stay internal, coalesce on the current actor and fence retired actor records", async t => {
+  const refreshes = [];
+  const history = { async refresh(sources, options) { refreshes.push({ sources, options }); return { errors: [] }; }, close() {} };
+  const f = await fixture(t, { sessionHistoryIndex: history });
+  const observed = []; f.client.on("event", frame => observed.push(frame));
+  await f.client.request("subscribe_root_output", {});
+  const file = f.supervisor.store.getSession(f.id).sessionFile;
+  const hint = (owner, sequence, generation = 1) => ({ version: 1, owner, epoch: 1, generation, revision: sequence,
+    sequence, sessionId: f.id, sessionFile: file, bytes: 100 + sequence, digest: "a".repeat(64),
+    fingerprint: { dev: "1", ino: "2", size: 100 + sequence, mtimeNs: "3", ctimeNs: "4" },
+    untrustedExtra: "not retained" });
+  f.actor.activity("agent_start");
+  const before = await f.client.request("subscribe_session", { selector: f.id });
+  const firstOwner = randomUUID();
+  f.actor.emit("event", { type: "source_watermark", watermark: hint(firstOwner, 1) });
+  f.actor.emit("event", { type: "source_watermark", watermark: hint(firstOwner, 2) });
+  const after = await f.client.request("subscribe_session", { selector: f.id });
+  assert.equal(after.eventSeq, before.eventSeq, "metadata never consumes an event-ring sequence");
+  assert.equal(JSON.stringify(after).includes("source_watermark"), false);
+  assert.equal(JSON.stringify(after).includes(firstOwner), false);
+  const firstCount = refreshes.length;
+  f.actor.activity("agent_settled");
+  await until(() => refreshes.slice(firstCount).some(row => row.options.sourceWatermark?.owner === firstOwner));
+  const latest = refreshes.slice(firstCount).find(row => row.options.sourceWatermark?.owner === firstOwner);
+  assert.equal(latest.options.automatic, true);
+  assert.deepEqual(latest.options.sourceWatermark, normalizeSourceWatermark(hint(firstOwner, 2)));
+  assert.equal("untrustedExtra" in latest.options.sourceWatermark, false);
+  const retired = f.actor;
+  await f.client.request("stop_session", { sessionId: f.id });
+  await f.client.request("revive_session", { sessionId: f.id });
+  await until(() => f.actors.length === 2 && f.actors[1].isRunning);
+  const successor = f.actors[1], owner = randomUUID();
+  successor.activity("agent_start");
+  successor.emit("event", { type: "source_watermark", watermark: hint(owner, 7, 2) });
+  retired.emit("event", { type: "source_watermark", watermark: hint(firstOwner, 99) });
+  const secondCount = refreshes.length;
+  successor.activity("agent_settled");
+  await until(() => refreshes.slice(secondCount).some(row => row.options.sourceWatermark?.owner === owner));
+  assert.equal(refreshes.slice(secondCount).some(row => row.options.sourceWatermark?.owner === firstOwner), false);
+  assert.equal(JSON.stringify(observed).includes("source_watermark"), false);
+  assert.equal(JSON.stringify(observed).includes(firstOwner), false);
+  assert.equal(JSON.stringify(observed).includes(owner), false);
 });
