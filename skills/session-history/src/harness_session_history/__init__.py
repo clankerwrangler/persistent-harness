@@ -22,6 +22,7 @@ async def run(
     before: int = 2,
     after: int = 2,
     max_chars: int = 6000,
+    refresh: bool = False,
 ) -> SkillResult:
     """Run one bounded session-history query through the authorized host.
 
@@ -47,6 +48,7 @@ async def run(
             "limit": limit,
             "sort": sort,
             "snippetChars": snippet_chars,
+            "refresh": refresh,
         }
         if session_id is not None:
             payload["sessionId"] = session_id
@@ -58,6 +60,7 @@ async def run(
             "before": before,
             "after": after,
             "maxChars": max_chars,
+            "refresh": refresh,
         }
     else:
         payload = {"operation": operation}

@@ -19,7 +19,8 @@ Entry point: `await session_history(...)`
 The single entry point accepts `operation="list"`, `"search"`, or `"open"`.
 
 - `list` returns bounded session metadata and no transcript text.
-- `search` returns bounded plain-text snippets and canonical citations. Search
+- `search` queries the committed index snapshot and returns bounded plain-text
+  snippets and canonical citations. It does not scan archives before matching. Search
   first, then use `open` for only the excerpt needed.
 - `open` requires an exact `session_id` and `entry_id`, and returns the target
   entry with a bounded number of neighboring visible entries.
@@ -66,6 +67,9 @@ excerpt = await session_history(
 - `snippet_chars`: maximum search-snippet size.
 - `before` and `after`: maximum neighboring-entry counts for `open`.
 - `max_chars`: maximum aggregate excerpt size for `open`.
+- `refresh`: `False` by default for search/open. Set `True` to refresh the
+  selected canonical sources before retrieval. This strict operation has a
+  25-second budget and can fail on large or changing archives; narrow its scope.
 
 The host validates all arguments and applies hard bounds to query length, page
 size, snippets, neighboring entries, and aggregate output. Responses include
@@ -81,8 +85,23 @@ the transcript identity; no second harness transcript ID, file path, or line
 number is authoritative. Pass those citation values to `open` as its Python
 `session_id` and `entry_id` arguments.
 
-Results refer to the active visible branch of the canonical Pi JSONL by
-default. Deleted sessions and the caller's current session are excluded by
+Default results describe the visible branch **as indexed**, not the current
+branch. `freshness` reports indexed timestamps and source counts: indexed,
+changed, missing, unavailable, and pending maintenance. `complete=False` means
+that an indexed snapshot does not certify fully current search completeness.
+An appended newer branch or message may not be indexed yet. Missing coverage
+is not evidence that no conversation matched. Index maintenance runs separately
+without starting another actor. Metadata-only coverage can queue changed or
+missing sources; the snapshot query does not wait for archive refresh. Use
+`refresh=True` when selected sources must be fully refreshed before retrieval.
+
+Snapshot hydration checks canonical entry spans and hashes under stable file
+identity. Appends may preserve an older indexed citation; rewrites, replacement,
+truncation, or changed receipt rendering can make it unavailable. Search reports
+unavailable session IDs, and open fails explicitly rather than returning an
+unverified excerpt. `refresh=True` requests the fully refreshed branch instead.
+
+Deleted sessions and the caller's current session are excluded by
 default; other sessions remain eligible according to the filters. Use the
 explicit filters when historical or current-session retrieval is actually
 needed. A missing or non-visible citation is reported as an error;

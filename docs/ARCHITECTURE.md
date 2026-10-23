@@ -214,36 +214,57 @@ See [numeric observation limits](OPERATIONS.md#explicit-numeric-memory-observati
 
 ## Session-history retrieval
 
-Actor-authenticated `session_history` list, search, and open requests use the
-caller's existing family scope without starting transcript actors. List reads
-registry metadata. Search and open share one supervisor-owned history queue;
-each caller has an independent 25-second budget, including queue time, and a
-28-second client deadline. Disconnect, deadline, and shutdown abort further
-history work. Shutdown drains that work before closing the index and store.
-Other RPCs keep their existing deadlines and do not join this queue.
+Actor-authenticated `session_history` list, search, and open use the caller's
+existing family scope without starting transcript actors. List reads registry
+metadata. By default search and open query the committed index snapshot through
+an independent read-only WAL transaction. They do not refresh canonical archives
+or hash old prefixes before matching. `freshness` reports indexed timestamps and
+changed, missing, unavailable, and pending source counts; `complete=false` does
+not certify current completeness. Results describe the branch as indexed, not
+a newer live branch. Scope and tombstones are rechecked before returning text.
+
+One supervisor publication owner serializes explicit refresh and coalesced
+maintenance. Registration, settlement, receipt, and branch/entry boundaries queue
+maintenance; metadata-only snapshot coverage can also queue up to 20 pending
+source IDs. The maintenance queue holds at most 64 sessions, does not activate
+actors, and budgets each refresh at 60 seconds. Query discovery does not request
+a trailing retry of already-pending work. Failed maintenance records a fixed
+secret-free diagnostic and leaves coverage honest rather than retrying in a
+loop. `refresh=True` explicitly refreshes the selected canonical sources before
+retrieval, retaining its 25-second budget including queue time and 28-second
+client deadline. Default snapshot requests retain those deadlines but do not
+wait behind archive maintenance. Disconnect and deadline cancel only that
+request. Shutdown aborts and drains both publication and independent snapshot
+jobs before closing the index and store. Other RPC deadlines are unchanged.
 
 `SessionHistoryIndex` is a disposable, contentless FTS5 index of active-branch
 user and assistant projections. Schema 3 stores canonical byte spans, entry and
 projected-text hashes, and hashed rendering dependencies for input receipts.
 It stores no raw transcript, image, tool, or receipt payloads. The directory is
-private (`0700`); database, WAL, and shared-memory files are `0600`.
+private (`0700`); database, WAL, and shared-memory files are `0600`. Snapshot
+queries cannot discard or rebuild a damaged index. Recovery belongs to explicit
+refresh or maintenance, whose transactions never become a reader's snapshot.
 
-Changed sources verify the cached prefix with a bounded-buffer SHA-256 pass
-before parsing complete appended frames. This still reads O(archive bytes), but
-avoids reparsing unchanged historical JSON and rewriting unchanged FTS rows.
+Maintenance and strict refresh verify changed cached prefixes with a
+bounded-buffer SHA-256 pass before parsing complete appended frames. This
+recovery still reads O(archive bytes); a cold reader can parse the whole source.
 Replacement, truncation, or a prefix mismatch rebuilds the projection. Partial
 lines, branch changes, and receipt-only changes remain part of the verified
 version. Ordinary shared-reader observations cannot certify new fingerprints.
-The existing reader cache remains session-bounded; complete index projections
-retain the eight-session/4 MiB cap.
+The reader cache remains session-bounded; complete index projections retain
+the eight-session/4 MiB cap. Aborted or unstable refresh cannot publish partial
+rows.
 
-Cache misses and restarts hydrate only matched entries or open's bounded ordinal
-window. Source fingerprints, entry hashes, identity, role, receipt dependency
-hashes, and projected-text hashes must agree before a citation is returned.
-Receipt association still requires the existing complete canonical inventory;
-rendering metadata never establishes input delivery. Aborted or unstable work
-cannot publish partial rows. Cancelled requests fail rather than returning an
-empty successful search.
+Snapshot hydration reads only matched entries or open's bounded ordinal window.
+It permits a larger appended file while requiring the same source identity,
+verified entry spans/hashes and role, unchanged receipt rendering dependencies,
+matching projected-text digests, and stable file metadata throughout hydration.
+A stale indexed branch is never labeled current. Rewritten, replaced, truncated,
+or otherwise unhydratable citations are reported explicitly and queued for
+selected-source recovery, not silently rendered from a stale text cache. Receipt
+association still requires the existing complete canonical inventory; rendering
+metadata never establishes input delivery. Cancelled requests fail rather than
+returning an empty successful search.
 
 ## Current-session projection service
 

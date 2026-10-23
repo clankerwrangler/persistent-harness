@@ -1055,7 +1055,7 @@ export function createHostHandlers({ cwd, scratch = null, getClient, getContext 
       if (!client?.isConnected) throw new Error("harness is offline");
       const value = requireRecord(payload, "session_history.query payload");
       const supported = new Set(["operation", "query", "sessionId", "entryId", "kind", "includeDeleted",
-        "includeCurrent", "roles", "limit", "sort", "snippetChars", "before", "after", "maxChars"]);
+        "includeCurrent", "roles", "limit", "sort", "snippetChars", "before", "after", "maxChars", "refresh"]);
       for (const key of Object.keys(value)) if (!supported.has(key)) throw new Error(`unsupported session history option: ${key}`);
       return client.request("session_history", value);
     },
