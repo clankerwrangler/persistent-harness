@@ -772,7 +772,12 @@ export class HarnessSupervisor {
       this.#retryChildExitMessages();
       return { recorded: true };
     }
-    if (type === "update_activity") { const session = this.store.setActorActivity(state.sessionId, state.generation, params.streaming); if (!params.streaming) this.#queueHistoryMaintenance(state.sessionId, { invalidate: true }); this.#observeNotifications(state.sessionId); this.#syncPassivationTimers(); this.#broadcastNavigator("activity_changed"); return { session }; }
+    if (type === "update_activity") {
+      const session = this.store.setActorActivity(state.sessionId, state.generation, params.streaming);
+      if (params.streaming) this.#cancelHistoryMaintenance(state.sessionId);
+      else this.#queueHistoryMaintenance(state.sessionId, { invalidate: true });
+      this.#observeNotifications(state.sessionId); this.#syncPassivationTimers(); this.#broadcastNavigator("activity_changed"); return { session };
+    }
     if (type === "update_progress_heading") return this.#updateProgressHeading(state, params);
     if (type === "record_progress_entry") {
       const record = this.#actors.get(state.sessionId);
@@ -1258,14 +1263,35 @@ export class HarnessSupervisor {
     }
     return sessions;
   }
+  #historyMaintenanceBusy(sessionId, session = this.store.getSession(sessionId)) {
+    const actor = this.#actors.get(sessionId);
+    return this.#startQueue.includes(sessionId) || this.#startingActors.has(sessionId) || session?.activity === "working"
+      || Boolean(actor && (actor.expectedLifecycle || actor.notificationWork.size || this.store.hasPendingSessionWork(sessionId)));
+  }
+  #cancelHistoryMaintenance(sessionId) {
+    const pending = this.#sessionHistoryMaintenance.get(sessionId);
+    if (!pending) return;
+    pending.again = true;
+    pending.deferred = true;
+    // This controller belongs only to automatic maintenance, never a strict caller.
+    pending.controller.abort(new Error("history maintenance deferred for actor work"));
+  }
   #queueHistoryMaintenance(sessionId, { invalidate = false } = {}) {
     if (this.#stoppingPromise || typeof this.sessionHistoryIndex?.refresh !== "function") return;
+    const busy = this.#historyMaintenanceBusy(sessionId);
     const pending = this.#sessionHistoryMaintenance.get(sessionId);
-    if (pending) { if (invalidate) pending.again = true; return; }
+    if (pending) {
+      if (busy) this.#cancelHistoryMaintenance(sessionId);
+      else if (invalidate) pending.again = true;
+      return;
+    }
+    // Canonical/index coverage is the deferred-work witness. Busy sources take
+    // no queue slots; settlement and passivation retry without a dirty backlog.
+    if (busy) return;
     // One publication owner, bounded/coalesced work, no actor activation. Queued
     // sessions are resolved again at execution, so deletion cannot revive them.
     if (this.#sessionHistoryMaintenance.size >= 64) return;
-    const item = { again: false }, controller = new AbortController();
+    const controller = new AbortController(), item = { again: false, deferred: false, controller };
     this.#sessionHistoryMaintenance.set(sessionId, item);
     const job = { state: null, controller };
     this.#sessionHistoryJobs.add(job);
@@ -1273,6 +1299,7 @@ export class HarnessSupervisor {
       controller.signal.throwIfAborted();
       const session = this.store.getSession(sessionId);
       if (!session?.sessionFile || session.lifecycle === "deleted") return;
+      if (this.#historyMaintenanceBusy(sessionId, session)) { item.again = true; return; }
       // Recovery has a separate finite budget. It never delays a snapshot
       // query and never silently converts that query into a refresh.
       const timer = setTimeout(() => controller.abort(new Error("history maintenance deadline exceeded")), 60_000);
@@ -1290,7 +1317,7 @@ export class HarnessSupervisor {
     });
     job.done = operation;
     this.#sessionHistoryTail = operation.catch(() => {
-      if (!this.#stoppingPromise) {
+      if (!this.#stoppingPromise && !item.deferred) {
         this.#sessionHistoryMaintenanceFailure = { sessionId, code: "session_history_maintenance_failed",
           message: "background history refresh did not complete; indexed coverage may be pending" };
         this.logger.error?.(this.#sessionHistoryMaintenanceFailure.message);
@@ -1368,8 +1395,9 @@ export class HarnessSupervisor {
       limit: params.limit, sort: params.sort, snippetChars: params.snippetChars, signal, snapshot: !params.refresh });
     signal?.throwIfAborted();
     const byId = new Map(this.#historyCandidates(callerId, params).map((session) => [session.sessionId, session]));
-    for (const sessionId of new Set([...(found.pendingSessionIds ?? []), ...(found.unavailableSessionIds ?? [])])) {
-      if (byId.has(sessionId)) this.#queueHistoryMaintenance(sessionId);
+    const pendingSources = new Set([...(found.pendingSessionIds ?? []), ...(found.unavailableSessionIds ?? [])]);
+    for (const sessionId of [...pendingSources].filter(id => byId.has(id) && !this.#historyMaintenanceBusy(id)).slice(0, 20)) {
+      this.#queueHistoryMaintenance(sessionId);
     }
     return { operation: "search", query: params.query,
       results: found.matches.filter(match => byId.has(match.sessionId)).map(({ score: _score, ...match }) => ({ ...match,
@@ -1379,7 +1407,8 @@ export class HarnessSupervisor {
       freshness: { ...(found.freshness ?? { mode: params.refresh ? "current" : "indexed",
         current: Boolean(params.refresh) && refresh.errors.length === 0,
         branch: params.refresh ? "current" : "indexed" }),
-        maintenancePendingSources: sources.filter(source => this.#sessionHistoryMaintenance.has(source.sessionId)).length },
+        maintenancePendingSources: sources.filter(source => pendingSources.has(source.sessionId)
+          || this.#sessionHistoryMaintenance.has(source.sessionId)).length },
       ...(found.unavailableSessionIds?.length ? { unavailableSessionIds: found.unavailableSessionIds.filter(id => byId.has(id)),
         unavailableTruncated: found.unavailableTruncated } : {}),
       ...(unavailableSessionIds.length ? { unavailableSessionIds,
@@ -1883,6 +1912,7 @@ export class HarnessSupervisor {
     let session = this.store.getSession(sessionId); if (!session || session.lifecycle === "deleted") throw new Error("session does not exist");
     if (this.#actors.has(sessionId) || this.#startingActors.has(sessionId) || this.#startQueue.includes(sessionId)) return session;
     if (revive && session.lifecycle !== "starting") session = this.store.prepareActorRevival(sessionId, randomUUID());
+    this.#cancelHistoryMaintenance(sessionId);
     if (session.lifecycle !== "starting") return session;
     this.#startQueue.push(sessionId); setImmediate(() => this.#drainActorStarts()); return session;
   }
@@ -1969,7 +1999,7 @@ export class HarnessSupervisor {
             this.#broadcastNavigator("actor_error");
           }
           this.logger.error?.(`actor ${nextId} launch failed: ${message}`);
-        }).finally(() => { this.#launchPromises.delete(nextId); this.#startingActors.delete(nextId); this.#activeStarts -= 1; this.#syncPassivationTimer(nextId); setImmediate(() => this.#drainActorStarts()); });
+        }).finally(() => { this.#launchPromises.delete(nextId); this.#startingActors.delete(nextId); this.#activeStarts -= 1; this.#queueHistoryMaintenance(nextId); this.#syncPassivationTimer(nextId); setImmediate(() => this.#drainActorStarts()); });
         this.#launchPromises.set(nextId, launchPromise);
       }
     } finally { this.#drainingStarts = false; }
@@ -2298,8 +2328,9 @@ export class HarnessSupervisor {
 
   #onActorEvent(sessionId, record, frame) {
     if (this.#actors.get(sessionId) !== record) return;
-    if (["agent_settled", "session_tree", "session_compact", "entry_appended"].includes(frame?.type)) this.#queueHistoryMaintenance(sessionId, { invalidate: true });
+    if (["session_tree", "session_compact", "entry_appended"].includes(frame?.type)) this.#queueHistoryMaintenance(sessionId, { invalidate: true });
     if (frame?.type === "agent_start") {
+      this.#cancelHistoryMaintenance(sessionId);
       this.#cancelIdlePreparation(sessionId, record);
       record.entryIndexIdleAttempted = false;
       record.eventRing = []; record.eventRingBytes = 0;
@@ -2346,7 +2377,10 @@ export class HarnessSupervisor {
       if (frame?.type === "tool_execution_start" && typeof frame.toolCallId === "string") record.notificationWork.add(`tool:${frame.toolCallId}`);
       if (frame?.type === "tool_execution_end") record.notificationWork.delete(`tool:${frame.toolCallId}`);
       if (frame?.type === "compaction_start") record.notificationWork.add("compaction");
-      if (frame?.type === "compaction_end") record.notificationWork.delete("compaction");
+      if (frame?.type === "compaction_end") {
+        record.notificationWork.delete("compaction");
+        this.#queueHistoryMaintenance(sessionId, { invalidate: true });
+      }
       if (["tool_execution_start", "tool_execution_end", "compaction_start", "compaction_end"].includes(frame?.type)) {
         this.#observeNotifications(sessionId); this.#syncPassivationTimer(sessionId);
       }
@@ -2356,6 +2390,7 @@ export class HarnessSupervisor {
         this.store.completeSubmittedChildTask?.(sessionId, failure);
         if (failure) this.store.recordSessionLastError?.(sessionId, record.generation, failure);
         this.store.setActorActivity(sessionId, record.generation, false);
+        this.#queueHistoryMaintenance(sessionId, { invalidate: true });
         setImmediate(() => void this.#completeCronRunsForSession(sessionId));
         setImmediate(() => void this.#maybeAutoTitleRoot(sessionId));
         if (!record.expectedLifecycle) {
@@ -2390,6 +2425,7 @@ export class HarnessSupervisor {
     this.#clearExtensionUiRequests(sessionId, record.generation);
     this.#rootOutput.failSession(sessionId, record.generation, record.expectedLifecycle ?? "actor_exit");
     this.store.markActorLifecycle(sessionId, record.generation, lifecycle, error, Date.now(), { reportChildExit: true }); if (error || lifecycle === "stopped") this.store.completeSubmittedChildTask?.(sessionId, error ?? "actor was explicitly stopped");
+    this.#queueHistoryMaintenance(sessionId, { invalidate: true });
     if (error || lifecycle === "stopped") this.#failCronRunsForSession(sessionId, error ?? "session was explicitly stopped during scheduled execution");
     if (lifecycle === "error") this.#retryChildExitMessages();
     void this.#log("actor_stopped", { sessionId, generation: record.generation, lifecycle, ...(error ? { error } : {}) }); this.#broadcastNavigator(lifecycle === "error" ? "actor_error" : "actor_passivated"); setImmediate(() => this.#drainActorStarts());
@@ -2406,6 +2442,7 @@ export class HarnessSupervisor {
     } finally { retirement.release(); }
   }
   async #stopActor(sessionId, lifecycle = "passivated", error = null) {
+    this.#cancelHistoryMaintenance(sessionId);
     this.#cancelIdlePreparation(sessionId);
     this.#clearPassivation(sessionId); this.#startQueue = this.#startQueue.filter((id) => id !== sessionId); const record = this.#actors.get(sessionId);
     if (record) {
@@ -2435,6 +2472,7 @@ export class HarnessSupervisor {
     }
   }
   #cancelIdlePreparation(sessionId, record = this.#actors.get(sessionId)) {
+    if (this.#historyMaintenanceBusy(sessionId)) this.#cancelHistoryMaintenance(sessionId);
     this.#cancelIdleMemory(record);
     const current = record?.entryIndexPreparation;
     if (!current) return;

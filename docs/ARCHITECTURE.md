@@ -224,14 +224,21 @@ not certify current completeness. Results describe the branch as indexed, not
 a newer live branch. Scope and tombstones are rechecked before returning text.
 
 One supervisor publication owner serializes explicit refresh and coalesced
-maintenance. Registration, settlement, receipt, and branch/entry boundaries queue
-maintenance; metadata-only snapshot coverage can also queue up to 20 pending
-source IDs. The maintenance queue holds at most 64 sessions, does not activate
-actors, and budgets each refresh at 60 seconds. Query discovery does not request
-a trailing retry of already-pending work. Failed maintenance records a fixed
-secret-free diagnostic and leaves coverage honest rather than retrying in a
-loop. `refresh=True` explicitly refreshes the selected canonical sources before
-retrieval, retaining its 25-second budget including queue time and 28-second
+maintenance. Automatic refresh runs only when its source actor has no current
+turn, tool/compaction, startup, retirement, or pending input/task/message work.
+Busy sources occupy no publication slots: canonical/index coverage records the
+deferred work, and startup completion, settlement, and passivation retry it.
+Eligibility is rechecked at execution. New actor work cancels only that source's
+automatic refresh; the last committed index remains available. Snapshot coverage
+can admit up to 20 eligible sources, skipping busy sources before that bound.
+`maintenancePendingSources` counts the union of caller-scoped pending coverage
+and admitted jobs, including deferred sources beyond the admission bound.
+The maintenance queue holds at most 64 sessions, does not activate actors, and
+budgets each refresh at 60 seconds. Query discovery does not request a trailing
+retry of already-pending work. Failed maintenance records a fixed secret-free
+diagnostic and leaves coverage honest rather than retrying in a loop.
+`refresh=True` is not gated by actor activity. It refreshes the selected canonical
+sources before retrieval, retaining its 25-second budget including queue time and 28-second
 client deadline. Default snapshot requests retain those deadlines but do not
 wait behind archive maintenance. Disconnect and deadline cancel only that
 request. Shutdown aborts and drains both publication and independent snapshot

@@ -466,6 +466,16 @@ prefix I/O and FTS transactions. Supervisor tests hold disconnect, deadline,
 shutdown, and competing source versions; a real Python skill-to-RPC test crosses
 the former three-second deadline without reviving a transcript actor.
 
+`HistoryMaintenance` checks quiescent automatic admission and execution, resume
+cancellation, unchanged strict-caller availability, independent snapshots, dirty
+coverage retention, and close/drain. The positive finite check covers 388 states;
+`Busy` and `Resume` controls fail their intended invariants. Serial synthetic
+index/supervisor fixtures verify full-prefix read bytes after small appends,
+more than 64 deferred sources without queue starvation, exact pending counts,
+strict cancellation isolation, input admission during held maintenance, and
+unconditional settlement/compaction-end/passivation retries. This is contention
+relief: it does not certify append-only writer ownership or remove prefix I/O.
+
 `ConversationBirthOrder` models text/progress births, arbitrary event arrival,
 equal-millisecond sequence order, prefix rebase, immutable identity, embedded
 commit metadata, restart/fork recovery, and visible text after commit failure.

@@ -369,6 +369,121 @@ test("settlement maintenance coalesces without blocking snapshot queries or waki
 });
 
 
+test("busy append coverage defers automatic refresh, but strict refresh and final settlement remain current", async (t) => {
+  let refreshes = 0;
+  class CountedIndex extends SessionHistoryIndex {
+    async refresh(...args) { refreshes++; return super.refresh(...args); }
+  }
+  const { supervisor, clients: [a, b] } = await ownedHistoryFixture(t, null,
+    { sessionHistoryIndexFactory: options => new CountedIndex(options) });
+  const file = supervisor.store.getSession("caller-a").sessionFile;
+  const frames = [{ type: "session", version: 3, id: "caller-a", timestamp: "2026-01-01T00:00:00Z" },
+    { type: "message", id: "seed", parentId: null, timestamp: "2026-01-01T00:00:00Z", message: { role: "user", content: "needle" } }];
+  await writeFile(file, frames.map(JSON.stringify).join("\n") + "\n");
+  const query = { ...historySearch, sessionId: "caller-a" };
+  await b.request("session_history", query);
+  supervisor.store.markActorStarted("caller-a", 1);
+  await a.request("update_activity", { streaming: true });
+  const seeded = refreshes;
+  for (let i = 0; i < 3; i++) {
+    frames.push({ type: "message", id: `new-${i}`, parentId: frames.at(-1).id, timestamp: "2026-01-01T00:00:01Z",
+      message: { role: "user", content: "newneedle" } });
+    await writeFile(file, frames.map(JSON.stringify).join("\n") + "\n");
+    const pending = await b.request("session_history", { ...query, refresh: false });
+    assert.equal(pending.results[0].entryId, "seed");
+    assert.equal(pending.freshness.maintenancePendingSources, 1);
+  }
+  assert.equal(refreshes, seeded, "busy mutations do not occupy the publication tail");
+  const strict = await b.request("session_history", query);
+  assert.equal(strict.complete, true); assert.equal(strict.freshness.maintenancePendingSources, 0);
+  const unchangedBusy = await b.request("session_history", { ...query, refresh: false });
+  assert.equal(unchangedBusy.freshness.pendingSources, 0);
+  assert.equal(unchangedBusy.freshness.maintenancePendingSources, 0, "busy alone does not imply pending coverage");
+  frames.push({ type: "message", id: "last", parentId: frames.at(-1).id, timestamp: "2026-01-01T00:00:02Z",
+    message: { role: "user", content: "finalneedle" } });
+  await writeFile(file, frames.map(JSON.stringify).join("\n") + "\n");
+  const beforeSettle = refreshes;
+  await a.request("update_activity", { streaming: false });
+  for (let i = 0; i < 100; i++) {
+    const result = await b.request("session_history", { ...query, refresh: false, query: "finalneedle" });
+    if (!result.freshness.maintenancePendingSources) {
+      assert.equal(result.results[0].entryId, "last");
+      assert.equal(refreshes, beforeSettle + 1); return;
+    }
+    await sleep(5);
+  }
+  assert.fail("final settlement did not refresh deferred coverage");
+});
+
+
+test("resumed actor work cancels only automatic maintenance and preserves the committed snapshot", async (t) => {
+  let gate = null;
+  class HeldIndex extends SessionHistoryIndex {
+    async refresh(sources, options) {
+      if (gate) {
+        const current = gate; current.signal = options.signal; current.entered.resolve();
+        await current.release.promise; options.signal.throwIfAborted();
+      }
+      return super.refresh(sources, options);
+    }
+  }
+  const { supervisor, clients: [a, b] } = await ownedHistoryFixture(t, null,
+    { sessionHistoryIndexFactory: options => new HeldIndex(options) });
+  const file = supervisor.store.getSession("caller-a").sessionFile;
+  const frames = [{ type: "session", version: 3, id: "caller-a", timestamp: "2026-01-01T00:00:00Z" },
+    { type: "message", id: "old", parentId: null, timestamp: "2026-01-01T00:00:00Z", message: { role: "user", content: "needle" } }];
+  await writeFile(file, frames.map(JSON.stringify).join("\n") + "\n");
+  const query = { ...historySearch, sessionId: "caller-a" };
+  await b.request("session_history", query);
+  frames.push({ type: "message", id: "new", parentId: "old", timestamp: "2026-01-01T00:00:01Z", message: { role: "user", content: "newneedle" } });
+  await writeFile(file, frames.map(JSON.stringify).join("\n") + "\n");
+  supervisor.store.markActorStarted("caller-a", 1);
+  gate = { entered: Promise.withResolvers(), release: Promise.withResolvers() };
+  const automatic = gate; t.after(() => automatic.release.resolve());
+  await a.request("update_activity", { streaming: false }); await automatic.entered.promise;
+  await a.request("update_activity", { streaming: true });
+  assert.equal(automatic.signal.aborted, true);
+  gate = null; automatic.release.resolve();
+  const old = await b.request("session_history", { ...query, refresh: false });
+  assert.equal(old.results[0].entryId, "old"); assert.equal(old.freshness.maintenancePendingSources, 1);
+  assert.equal(supervisor.status().diagnostics.some(row => row.code === "session_history_maintenance_failed"), false);
+  gate = { entered: Promise.withResolvers(), release: Promise.withResolvers() };
+  const strict = gate; t.after(() => strict.release.resolve());
+  const response = b.request("session_history", query); await strict.entered.promise;
+  await a.request("update_activity", { streaming: true });
+  assert.equal(strict.signal.aborted, false, "automatic cancellation cannot reach a strict caller sharing the tail");
+  gate = null; strict.release.resolve();
+  assert.equal((await response).complete, true);
+});
+
+
+test("more than64 deferred busy sources neither fill the queue nor hide an eligible idle source", async (t) => {
+  const pending = new Set(), refreshed = [];
+  const index = {
+    async refresh(sources) { for (const source of sources) { refreshed.push(source.sessionId); pending.delete(source.sessionId); } return { errors: [] }; },
+    async search({ sessions }) { return { matches: [], truncated: false, pendingSessionIds: sessions.filter(source => pending.has(source.sessionId)).map(source => source.sessionId),
+      freshness: { mode: "indexed", current: false, pendingSources: sessions.filter(source => pending.has(source.sessionId)).length } }; },
+    close() {},
+  };
+  const { supervisor, clients: [client] } = await ownedHistoryFixture(t, index);
+  for (let i = 0; i < 65; i++) {
+    const id = `busy-${i}`; pending.add(id);
+    supervisor.store.createRoot({ sessionId: id, sessionFile: `/public-synthetic/${id}.jsonl`, cwd: supervisor.store.getSession("caller-a").cwd,
+      repositoryRoot: null, name: id, actorToken: `token-${id}`, launch }, 2);
+    supervisor.store.markActorStarted(id, 1); supervisor.store.setActorActivity(id, 1, true);
+  }
+  pending.add("target");
+  // Put the idle source after every busy source in the index's internal coverage result.
+  const search = index.search;
+  index.search = async options => { const result = await search(options); result.pendingSessionIds.sort((a, b) => Number(a === "target") - Number(b === "target")); return result; };
+  const result = await client.request("session_history", { ...historySearch, sessionId: undefined, refresh: false });
+  assert.equal(result.freshness.maintenancePendingSources, 66, "coverage count is not truncated to20 IDs");
+  assert.equal(result.pendingSessionIds, undefined, "internal coverage arrays do not widen public results");
+  await client.request("session_history", { operation: "list", kind: "any", limit: 1 });
+  assert.deepEqual(refreshed, ["target"], "eligible source is admitted even after65 deferred busy sources");
+});
+
+
 test("shutdown cancels and drains maintenance and independent snapshot hydration before closing index", async (t) => {
   const maintenanceEntered = Promise.withResolvers(), snapshotEntered = Promise.withResolvers();
   const releaseMaintenance = Promise.withResolvers(), releaseSnapshot = Promise.withResolvers();
