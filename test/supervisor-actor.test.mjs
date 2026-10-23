@@ -576,6 +576,120 @@ class FakePiActor extends EventEmitter {
   async close() { if (!this.isRunning) return; this.isRunning = false; this.emit("exit", { code: 0, signal: "SIGTERM", expected: true, error: null }); }
 }
 
+
+test("automatic history maintenance defers busy entry events and retries final settlement and passivation", async (t) => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "harness-history-quiescence-"));
+  const skillsPath = path.join(root, "skills"); await mkdir(skillsPath);
+  const actors = new Map(), refreshed = []; let gate = null;
+  const index = { async refresh(sources, { signal }) {
+    refreshed.push(...sources.map(source => source.sessionId));
+    if (gate) { const current = gate; current.signal = signal; current.entered.resolve(); await current.release.promise; signal.throwIfAborted(); }
+    return { errors: [] };
+  }, close() {} };
+  const supervisor = new HarnessSupervisor({ socketPath: path.join(root, "s.sock"), databasePath: path.join(root, "state", "h.sqlite"),
+    pidPath: path.join(root, "s.pid"), skillsPath, actorInactivityMs: 0, sessionHistoryIndex: index,
+    runtimeProvisioner: async () => ({}), logger: { error() {} },
+    actorFactory(options) { const actor = new FakePiActor(options); actors.set(options.session.sessionId, actor); return actor; },
+    processIdentityFactory: async pid => ({ version: 1, pid, processGroup: pid, startTime: "fake", ownerToken: "fake" }),
+    processTerminator: async () => ({ terminated: true }),
+  });
+  await supervisor.start(); t.after(async () => { await supervisor.stop(); await rm(root, { recursive: true, force: true }); });
+  await writeFile(path.join(root, "root.jsonl"), JSON.stringify({ type: "session", version: 3, id: "root", timestamp: "2026-01-01T00:00:00Z" }) + "\n");
+  supervisor.store.createRoot({ sessionId: "root", sessionFile: path.join(root, "root.jsonl"), cwd: root,
+    repositoryRoot: null, name: "root", actorToken: "token", launch: {} }, 1);
+  const browser = new HarnessClient({ socketPath: supervisor.socketPath, heartbeatMs: 0 });
+  await browser.start({ registrationType: "register_client", clientInstanceId: "history-quiescence" }); t.after(() => browser.stop());
+  await browser.request("revive_session", { sessionId: "root" });
+  const worker = await eventually(() => supervisor.store.getSession("root").lifecycle === "resident" && actors.get("root"));
+  worker.emit("event", { type: "agent_start" });
+  for (let i = 0; i < 5; i++) worker.emit("event", { type: "entry_appended", entryId: `busy-${i}` });
+  await new Promise(resolve => setImmediate(resolve));
+  assert.deepEqual(refreshed, [], "entry appends cannot run verified-prefix refresh during actor work");
+  worker.emit("event", { type: "agent_settled" });
+  await eventually(() => refreshed.length >= 1);
+  assert.equal(refreshed.length, 1);
+  gate = { entered: Promise.withResolvers(), release: Promise.withResolvers() };
+  const compaction = gate; t.after(() => compaction.release.resolve());
+  worker.emit("event", { type: "entry_appended", entryId: "before-compaction" }); await compaction.entered.promise;
+  worker.emit("event", { type: "compaction_start" });
+  assert.equal(compaction.signal.aborted, true, "recorded manual compaction work cancels maintenance without agent_start");
+  gate = null; compaction.release.resolve();
+  // Drain cancellation while work remains live; the end event must retry on its own.
+  await new Promise(resolve => setImmediate(resolve));
+  worker.emit("event", { type: "compaction_end" });
+  await eventually(() => refreshed.length === 3);
+  gate = { entered: Promise.withResolvers(), release: Promise.withResolvers() };
+  const automatic = gate; t.after(() => automatic.release.resolve());
+  worker.emit("event", { type: "entry_appended", entryId: "idle-change" }); await automatic.entered.promise;
+  const input = await browser.request("submit_input", { sessionId: "root", message: "public synthetic input", behavior: "auto", clientRequestId: "resume" });
+  assert.equal(input.accepted, true, "input admission is independent of the held automatic refresh");
+  assert.equal(automatic.signal.aborted, true, "input admission cancels maintenance before the next agent_start");
+  gate = null; automatic.release.resolve();
+  await eventually(() => worker.submits.length === 1);
+  assert.equal(supervisor.store.getActorInput(input.inputId, "root").state, "accepted");
+  await browser.request("stop_session", { sessionId: "root" });
+  await eventually(() => refreshed.length === 5);
+  assert.deepEqual(refreshed, Array(5).fill("root"), "work-end and passivation retry without a retained dirty item");
+  supervisor.store.createRoot({ sessionId: "idle-retirement", sessionFile: path.join(root, "idle-retirement.jsonl"), cwd: root,
+    repositoryRoot: null, name: "idle-retirement", actorToken: "idle-token", launch: {} }, 1);
+  await browser.request("revive_session", { sessionId: "idle-retirement" });
+  const successor = await eventually(() => supervisor.store.getSession("idle-retirement").lifecycle === "resident" && actors.get("idle-retirement"));
+  await new Promise(resolve => setImmediate(resolve));
+  gate = { entered: Promise.withResolvers(), release: Promise.withResolvers() };
+  const retiring = gate; t.after(() => retiring.release.resolve());
+  successor.emit("event", { type: "entry_appended", entryId: "before-retirement" }); await retiring.entered.promise;
+  const close = successor.close.bind(successor), closeEntered = Promise.withResolvers();
+  successor.close = async () => {
+    closeEntered.resolve(retiring.signal.aborted);
+    await close();
+  };
+  const stopping = browser.request("stop_session", { sessionId: "idle-retirement" });
+  let cancelledBeforeClose;
+  try { cancelledBeforeClose = await closeEntered.promise; }
+  finally { gate = null; retiring.release.resolve(); await stopping; }
+  assert.equal(cancelledBeforeClose, true, "retirement cancels automatic maintenance before closing an idle actor");
+});
+
+
+test("queued actor startup defers automatic history without occupying publication capacity", async (t) => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "harness-history-queued-"));
+  const skillsPath = path.join(root, "skills"); await mkdir(skillsPath);
+  const entered = Promise.withResolvers(), release = Promise.withResolvers(), refreshed = [];
+  let current = false;
+  const supervisor = new HarnessSupervisor({ socketPath: path.join(root, "s.sock"), databasePath: path.join(root, "state", "h.sqlite"),
+    pidPath: path.join(root, "s.pid"), skillsPath, actorInactivityMs: 0, maxConcurrentStarts: 1,
+    runtimeProvisioner: async () => ({}), logger: { error() {} },
+    sessionHistoryIndex: {
+      async refresh(sources) { for (const source of sources) if (source.sessionId === "queued") { refreshed.push(source.sessionId); current = true; } return { errors: [] }; },
+      async search() { return { matches: [], truncated: false, pendingSessionIds: current ? [] : ["queued"], freshness: { pendingSources: current ? 0 : 1 } }; }, close() {},
+    },
+    actorFactory(options) {
+      const actor = new FakePiActor(options), start = actor.start.bind(actor);
+      if (options.session.sessionId === "blocker") actor.start = async () => { entered.resolve(); await release.promise; return start(); };
+      return actor;
+    },
+    processIdentityFactory: async pid => ({ version: 1, pid, processGroup: pid, startTime: "fake", ownerToken: "fake" }),
+    processTerminator: async () => ({ terminated: true }),
+  });
+  await supervisor.start(); t.after(async () => { release.resolve(); await supervisor.stop(); await rm(root, { recursive: true, force: true }); });
+  for (const id of ["blocker", "queued", "observer"]) supervisor.store.createRoot({ sessionId: id, sessionFile: path.join(root, `${id}.jsonl`),
+    cwd: root, repositoryRoot: null, name: id, actorToken: `token-${id}`, launch: {} }, 1);
+  const browser = new HarnessClient({ socketPath: supervisor.socketPath, heartbeatMs: 0 });
+  await browser.start({ registrationType: "register_client", clientInstanceId: "history-queued" }); t.after(() => browser.stop());
+  const observer = new HarnessClient({ socketPath: supervisor.socketPath, heartbeatMs: 0 });
+  await observer.start({ registrationType: "register_actor", sessionId: "observer", sessionFile: path.join(root, "observer.jsonl"),
+    cwd: root, repositoryRoot: null, actorToken: "token-observer", actorGeneration: 1 }); t.after(() => observer.stop());
+  await browser.request("revive_session", { sessionId: "blocker" }); await entered.promise;
+  await browser.request("revive_session", { sessionId: "queued" });
+  const pending = await observer.request("session_history", { operation: "search", refresh: false, sessionId: "queued", query: "public synthetic",
+    kind: "any", includeDeleted: false, includeCurrent: false, roles: ["user", "assistant"], limit: 1, sort: "newest", snippetChars: 80 });
+  assert.equal(pending.freshness.maintenancePendingSources, 1);
+  assert.equal(supervisor.status().capacity.queued, 1);
+  assert.deepEqual(refreshed, [], "queued startup is busy before launching-set membership");
+  release.resolve(); await eventually(() => current);
+  assert.deepEqual(refreshed, ["queued"], "startup completion independently retries deferred maintenance");
+});
+
 class RetryPiActor extends FakePiActor {
   prompts = [];
   async request(type, fields = {}, timeoutMs) {

@@ -558,6 +558,48 @@ test("real prefix reads and incremental FTS transactions stop on cancellation wi
 });
 
 
+test("snapshot coverage keeps the full internal pending set beyond the recovery-admission limit", async (t) => {
+  const { root, databasePath } = await fixture(t);
+  const index = new SessionHistoryIndex({ databasePath }); t.after(() => index.close());
+  const sessions = Array.from({ length: 65 }, (_, i) => source(`missing-${i}`, path.join(root, `missing-${i}.jsonl`)));
+  const result = await index.search({ sessions, query: "public synthetic", snapshot: true });
+  assert.equal(result.freshness.pendingSources, 65);
+  assert.equal(result.pendingSessionIds.length, 65, "the supervisor can deduplicate the complete caller-scoped coverage count");
+});
+
+
+test("verified append refresh reads the accepted prefix again for every changed fingerprint", async (t) => {
+  const { id, sessionFile, databasePath } = await fixture(t), sessions = [source(id, sessionFile)];
+  await writeFile(sessionFile, [header(id), message("padding", null, "toolResult", "x".repeat(256 * 1024)),
+    message("seed", "padding", "user", "public synthetic seed")].map(JSON.stringify).join("\n") + "\n");
+  const index = new SessionHistoryIndex({ databasePath }); t.after(() => index.close());
+  await index.refresh(sessions);
+  const originalOpen = fs.open; let bytesRead = 0;
+  fs.open = async function(file, ...args) {
+    const handle = await originalOpen.call(this, file, ...args);
+    if (file === sessionFile) {
+      const read = handle.read.bind(handle);
+      handle.read = async (...args) => { const result = await read(...args); bytesRead += result.bytesRead; return result; };
+    }
+    return handle;
+  };
+  syncBuiltinESMExports();
+  const samples = [];
+  try {
+    for (let i = 0; i < 3; i++) {
+      const line = JSON.stringify(message(`append-${i}`, i ? `append-${i - 1}` : "seed", "user", "public synthetic append")) + "\n";
+      await appendFile(sessionFile, line);
+      const before = bytesRead; await index.refresh(sessions);
+      const archiveBytes = (await stat(sessionFile)).size;
+      const refreshBytes = bytesRead - before;
+      assert.equal(refreshBytes, archiveBytes, "verified reuse hashes the entire accepted prefix plus the new suffix");
+      samples.push({ appendBytes: Buffer.byteLength(line), archiveBytes, refreshBytes });
+    }
+  } finally { fs.open = originalOpen; syncBuiltinESMExports(); }
+  t.diagnostic(JSON.stringify(samples));
+});
+
+
 test("indexed snapshot queries do not refresh and safely hydrate an appended older branch", async (t) => {
   const { id, sessionFile, databasePath } = await fixture(t), sessions = [source(id, sessionFile)];
   const reader = new CountingReader(), index = new SessionHistoryIndex({ databasePath, reader }); t.after(() => index.close());

@@ -616,7 +616,7 @@ export class SessionHistoryIndex {
           || !this.#receiptsMatch(session.sessionId, db)) { changed++; pending.add(session.sessionId); }
       } catch { unavailable.add(session.sessionId); pending.add(session.sessionId); }
     }
-    return { pendingSessionIds: [...pending].slice(0, 20),
+    return { pendingSessionIds: [...pending],
       freshness: { mode: "indexed", current: false, branch: "indexed", sources: sessions.length,
       indexedSources: indexed, changedSources: changed, missingSources: missing,
       unavailableSources: unavailable.size, pendingSources: pending.size,
