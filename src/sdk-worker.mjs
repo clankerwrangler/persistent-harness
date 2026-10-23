@@ -178,11 +178,13 @@ export class SDKWorker {
   #closed;
   #entryIndexPreparation;
   #idleMemoryReduction;
-  constructor({ session, coordinator, runner, resources, sdk, models, projectContext, broker, publish, lifecycle, entryIndexCachePath, reduceMemory = reduceIdleMemory }) {
+  constructor({ session, coordinator, runner, resources, sdk, models, projectContext, broker, publish, lifecycle, entryIndexCachePath, publishSourceWatermark, reduceMemory = reduceIdleMemory }) {
     Object.assign(this, { session, coordinator, runner, resources, sdk, models, projectContext, broker, publish, lifecycle, entryIndexCachePath, reduceMemory });
     this.unsubscribeService = session.subscribe((event) => {
       if (["session_info_changed", "thinking_level_changed"].includes(event.type)) publish(event);
     });
+    this.unsubscribeSource = publishSourceWatermark && typeof session.sessionManager.subscribeSourceWatermark === "function"
+      ? session.sessionManager.subscribeSourceWatermark(publishSourceWatermark) : null;
   }
   cancelIdleMemory(token) {
     const current = this.#idleMemoryReduction;
@@ -381,6 +383,7 @@ export class SDKWorker {
     this.cancelIdleMemory();
     this.cancelEntryIndex();
     if (!this.#closed) {
+      this.unsubscribeSource?.();
       this.broker.close();
       this.#closed = (async () => {
         try { await this.coordinator.close(); }
@@ -520,7 +523,8 @@ export async function bootstrapSDKWorker({ argv = [], cwd = process.cwd(), env =
       runner, resources, promptCapture, publish: emit, basePromptOptions, onTiming,
       automaticCompactionAllowed: createAutomaticCompactionPermission(eventBus),
       isProjectTrusted: () => settings.isProjectTrusted() });
-    worker = new SDKWorker({ session, coordinator, runner, resources, sdk, models, projectContext, broker, publish: emit, lifecycle, entryIndexCachePath });
+    worker = new SDKWorker({ session, coordinator, runner, resources, sdk, models, projectContext, broker, publish: emit, lifecycle, entryIndexCachePath,
+      publishSourceWatermark: watermark => publish({ type: "source_watermark", watermark }) });
     await coordinator.start();
     if (options.name !== undefined) session.setSessionName(options.name);
     await runner.emit({ type: "session_start", reason: "startup" });

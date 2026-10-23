@@ -58,6 +58,14 @@ status estimation. These extend Pi's existing public owners; they are not a
 replacement manager or an installed-runtime patch. Stock 0.99.1 remains compatible
 but does not provide these payload bounds.
 
+Suffix-only automatic history maintenance additionally uses the optional
+`SessionManager.getSourceWatermark()` / `subscribeSourceWatermark()` capability
+and the existing bounded-retention source hash. Its coalesced non-secret owner
+cursor is metadata, not archive completeness evidence; observer failure cannot
+turn a committed append into a failed write. Older SDKs, cold/unknown sources and
+strict reconciliation use canonical verification. No new setting, editing
+restriction or replacement owner is introduced; see [Session-history retrieval](ARCHITECTURE.md#session-history-retrieval).
+
 The harness selects the source path only when the required supported surfaces
 exist. Extensions must opt into source handlers to avoid their own eager array
 boundary; default hooks and explicit full-value APIs remain complete. Packaging,

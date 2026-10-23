@@ -46,6 +46,7 @@ import { sessionSidecarPaths, publishActorGenerationSkillGrant } from "./session
 import { SessionHistoryIndex } from "./session-history-index.mjs";
 import { retryIntentForRequest, KERNEL_RELOAD_COMMAND, retryBranchMessage, SESSION_ACTION_TIMEOUT_MS } from "./session-actions.mjs";
 import { DEFAULT_PROMPT_PREFLIGHT_TIMEOUT_MS, PiSessionActor } from "./session-actor.mjs";
+import { normalizeSourceWatermark } from "./source-watermark.mjs";
 import { VisibleTranscriptReader } from "./visible-transcript-reader.mjs";
 import { HarnessStore } from "./store.mjs";
 import { PythonRuntimeManager, runtimeVersions } from "./python-runtime.mjs";
@@ -1306,7 +1307,8 @@ export class HarnessSupervisor {
       timer.unref();
       try {
         const result = await this.sessionHistoryIndex.refresh([{ sessionId, sessionFile: session.sessionFile,
-          sanitizePresentation: session.kind === "root" && session.depth === 0 }], { signal: controller.signal });
+          sanitizePresentation: session.kind === "root" && session.depth === 0 }], { signal: controller.signal, automatic: true,
+          sourceWatermark: this.#actors.get(sessionId)?.sourceWatermark ?? null });
         if (result.errors.length) throw new Error("canonical history source could not be refreshed");
         if (this.#sessionHistoryMaintenanceFailure?.sessionId === sessionId) this.#sessionHistoryMaintenanceFailure = null;
       } finally { clearTimeout(timer); }
@@ -2328,6 +2330,13 @@ export class HarnessSupervisor {
 
   #onActorEvent(sessionId, record, frame) {
     if (this.#actors.get(sessionId) !== record) return;
+    if (frame?.type === "source_watermark") {
+      const session = this.store.getSession(sessionId);
+      record.sourceWatermark = session?.sessionFile
+        ? normalizeSourceWatermark(frame.watermark, { sessionId, sessionFile: session.sessionFile }) : null;
+      this.#queueHistoryMaintenance(sessionId, { invalidate: true });
+      return; // Internal source metadata never enters event rings, histories, clients or root output.
+    }
     if (["session_tree", "session_compact", "entry_appended"].includes(frame?.type)) this.#queueHistoryMaintenance(sessionId, { invalidate: true });
     if (frame?.type === "agent_start") {
       this.#cancelHistoryMaintenance(sessionId);

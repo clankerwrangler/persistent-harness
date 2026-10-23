@@ -470,11 +470,26 @@ the former three-second deadline without reviving a transcript actor.
 cancellation, unchanged strict-caller availability, independent snapshots, dirty
 coverage retention, and close/drain. The positive finite check covers 388 states;
 `Busy` and `Resume` controls fail their intended invariants. Serial synthetic
-index/supervisor fixtures verify full-prefix read bytes after small appends,
+index/supervisor fixtures verify canonical recovery's full-prefix read bytes,
 more than 64 deferred sources without queue starvation, exact pending counts,
 strict cancellation isolation, input admission during held maintenance, and
-unconditional settlement/compaction-end/passivation retries. This is contention
-relief: it does not certify append-only writer ownership or remove prefix I/O.
+unconditional settlement/compaction-end/passivation retries.
+
+`OwnedAppendIndex` separately checks coalesced contiguous owner cursors, durable
+unverified-prefix provenance, restart/failure recovery, and strict bypass of
+both database fingerprints and reader caches. Its positive check covers 1322
+states; `Volatile`, `Cursor`, `Strict` and `Reader` controls fail their intended
+invariants. This is an indexed/current=false contract, not a proof of exclusive
+writers or a coherent historical physical-file instant. Synthetic byte counters
+and the explicit real SDK `test/fixtures/owned-append-integration.mjs` verify
+suffix-only reads for normal/custom/label/session-info appends, full strict and
+branch recovery, observer failure isolation and shutdown unsubscribe. Index
+fixtures cover same-fingerprint unverified prefixes, rewrite plus growth, cold
+cache/digest/owner recovery, complete receipt-inventory ambiguity, citation span
+checks, and populated v3 migration preserving documents, FTS and nonempty receipt
+dependencies without archive rescanning. Supervisor fixtures verify latest
+normalized hints, retired-record fencing and absence from client/replay output.
+These checks do not claim activation or remove canonical recovery's prefix I/O.
 
 `ConversationBirthOrder` models text/progress births, arbitrary event arrival,
 equal-millisecond sequence order, prefix rebase, immutable identity, embedded
