@@ -379,6 +379,8 @@ export class HarnessSupervisor {
   #sessionHistoryDiagnostic;
   #sessionHistoryTail = Promise.resolve();
   #sessionHistoryJobs = new Set();
+  #sessionHistoryMaintenance = new Map();
+  #sessionHistoryMaintenanceFailure = null;
   #rootOutput;
   #cronStore;
   #cronScheduler;
@@ -718,7 +720,10 @@ export class HarnessSupervisor {
       const registered = this.store.registerActor(params); state.role = "actor"; state.sessionId = params.sessionId; state.generation = params.actorGeneration;
       const old = this.#actorConnections.get(state.sessionId); this.#actorConnections.set(state.sessionId, state); if (old && old !== state) old.socket.end();
       const record = this.#actors.get(state.sessionId);
-      if (record?.generation === state.generation) record.messageTransportRepairAttempted = false;
+      if (record?.generation === state.generation) {
+        record.messageTransportRepairAttempted = false;
+        this.#queueHistoryMaintenance(state.sessionId, { invalidate: true });
+      }
       this.#resolveActorConnectionWaiters(state);
       setImmediate(() => {
         this.#deliverPendingOutgoingHistory(state);
@@ -762,7 +767,7 @@ export class HarnessSupervisor {
       this.#retryChildExitMessages();
       return { recorded: true };
     }
-    if (type === "update_activity") { const session = this.store.setActorActivity(state.sessionId, state.generation, params.streaming); this.#observeNotifications(state.sessionId); this.#syncPassivationTimers(); this.#broadcastNavigator("activity_changed"); return { session }; }
+    if (type === "update_activity") { const session = this.store.setActorActivity(state.sessionId, state.generation, params.streaming); if (!params.streaming) this.#queueHistoryMaintenance(state.sessionId, { invalidate: true }); this.#observeNotifications(state.sessionId); this.#syncPassivationTimers(); this.#broadcastNavigator("activity_changed"); return { session }; }
     if (type === "update_progress_heading") return this.#updateProgressHeading(state, params);
     if (type === "record_progress_entry") {
       const record = this.#actors.get(state.sessionId);
@@ -1248,6 +1253,46 @@ export class HarnessSupervisor {
     }
     return sessions;
   }
+  #queueHistoryMaintenance(sessionId, { invalidate = false } = {}) {
+    if (this.#stoppingPromise || !this.sessionHistoryIndex) return;
+    const pending = this.#sessionHistoryMaintenance.get(sessionId);
+    if (pending) { if (invalidate) pending.again = true; return; }
+    // One publication owner, bounded/coalesced work, no actor activation. Queued
+    // sessions are resolved again at execution, so deletion cannot revive them.
+    if (this.#sessionHistoryMaintenance.size >= 64) return;
+    const item = { again: false }, controller = new AbortController();
+    this.#sessionHistoryMaintenance.set(sessionId, item);
+    const job = { state: null, controller };
+    this.#sessionHistoryJobs.add(job);
+    const operation = this.#sessionHistoryTail.then(async () => {
+      controller.signal.throwIfAborted();
+      const session = this.store.getSession(sessionId);
+      if (!session?.sessionFile || session.lifecycle === "deleted") return;
+      // Recovery has a separate finite budget. It never delays a snapshot
+      // query and never silently converts that query into a refresh.
+      const timer = setTimeout(() => controller.abort(new Error("history maintenance deadline exceeded")), 60_000);
+      timer.unref();
+      try {
+        const result = await this.sessionHistoryIndex.refresh([{ sessionId, sessionFile: session.sessionFile,
+          sanitizePresentation: session.kind === "root" && session.depth === 0 }], { signal: controller.signal });
+        if (result.errors.length) throw new Error("canonical history source could not be refreshed");
+        if (this.#sessionHistoryMaintenanceFailure?.sessionId === sessionId) this.#sessionHistoryMaintenanceFailure = null;
+      } finally { clearTimeout(timer); }
+    }).finally(() => {
+      this.#sessionHistoryJobs.delete(job);
+      this.#sessionHistoryMaintenance.delete(sessionId);
+      if (item.again) this.#queueHistoryMaintenance(sessionId);
+    });
+    job.done = operation;
+    this.#sessionHistoryTail = operation.catch(() => {
+      if (!this.#stoppingPromise) {
+        this.#sessionHistoryMaintenanceFailure = { sessionId, code: "session_history_maintenance_failed",
+          message: "background history refresh did not complete; indexed coverage may be pending" };
+        this.logger.error?.(this.#sessionHistoryMaintenanceFailure.message);
+      }
+    });
+  }
+
   async #sessionHistory(state, params) {
     const callerId = state.sessionId;
     try {
@@ -1258,13 +1303,14 @@ export class HarnessSupervisor {
       this.#sessionHistoryJobs.add(job);
       const timer = setTimeout(() => controller.abort(new Error("session history deadline exceeded")), this.sessionHistoryTimeoutMs);
       timer.unref();
-      // One history owner spans refresh and hydration. Cancellation belongs to
-      // this caller only; queued callers retain their own budget and signal.
-      const operation = this.#sessionHistoryTail.then(async () => {
+      // Strict refresh shares the maintenance publication owner. Snapshot
+      // readers pin committed WAL state independently; cancellation stays local.
+      const operation = (params.refresh ? this.#sessionHistoryTail : Promise.resolve()).then(async () => {
         controller.signal.throwIfAborted();
         return this.#sessionHistoryRequest(callerId, params, controller.signal);
       }).finally(() => { clearTimeout(timer); this.#sessionHistoryJobs.delete(job); });
-      this.#sessionHistoryTail = operation.catch(() => {});
+      job.done = operation;
+      if (params.refresh) this.#sessionHistoryTail = operation.catch(() => {});
       return await operation;
     }
     catch (error) {
@@ -1286,27 +1332,51 @@ export class HarnessSupervisor {
     if (!this.sessionHistoryIndex) throw requestFailure("session_history_unavailable", "session history index is unavailable");
     const sources = sessions.map((session) => ({ sessionId: session.sessionId, sessionFile: session.sessionFile,
       sanitizePresentation: session.kind === "root" && session.depth === 0 }));
-    const refresh = await this.sessionHistoryIndex.refresh(sources, { signal });
+    const refresh = params.refresh ? await this.sessionHistoryIndex.refresh(sources, { signal }) : { errors: [] };
     signal?.throwIfAborted();
+    if (params.refresh && !refresh.errors.length && sources.some(source => source.sessionId === this.#sessionHistoryMaintenanceFailure?.sessionId)) {
+      this.#sessionHistoryMaintenanceFailure = null;
+    }
     const unavailableSessionIds = refresh.errors.map((item) => item.sessionId).slice(0, 20);
     if (refresh.errors.length) this.logger.error?.(`session history refresh failures: ${JSON.stringify(refresh.errors)}`);
     if (params.operation === "open") {
       if (refresh.errors.length) throw requestFailure("session_history_unavailable",
         "the selected canonical transcript could not be refreshed for history retrieval");
-      const opened = await this.sessionHistoryIndex.open({ session: sources[0], entryId: params.entryId,
-        before: params.before, after: params.after, maxChars: params.maxChars, signal });
+      let opened;
+      try { opened = await this.sessionHistoryIndex.open({ session: sources[0], entryId: params.entryId,
+        before: params.before, after: params.after, maxChars: params.maxChars, signal, snapshot: !params.refresh }); }
+      catch (error) {
+        signal?.throwIfAborted();
+        if (params.refresh) throw error;
+        this.#queueHistoryMaintenance(this.#historyCandidates(callerId, params)[0].sessionId);
+        throw requestFailure("session_history_unavailable", "indexed citation cannot be read safely; use refresh=True to reconcile canonical history");
+      }
       signal?.throwIfAborted();
-      return { operation: "open", session: this.#historySessionView(sessions[0]), ...opened, dataOnly: true, warning };
+      const current = this.#historyCandidates(callerId, params)[0];
+      const { pendingSessionIds = [], ...excerpt } = opened;
+      if (pendingSessionIds.includes(current.sessionId)) this.#queueHistoryMaintenance(current.sessionId);
+      return { operation: "open", session: this.#historySessionView(current), ...excerpt,
+        freshness: opened.freshness ?? { mode: params.refresh ? "current" : "indexed", current: Boolean(params.refresh) },
+        dataOnly: true, warning };
     }
     const found = await this.sessionHistoryIndex.search({ sessions: sources, query: params.query, roles: params.roles,
-      limit: params.limit, sort: params.sort, snippetChars: params.snippetChars, signal });
+      limit: params.limit, sort: params.sort, snippetChars: params.snippetChars, signal, snapshot: !params.refresh });
     signal?.throwIfAborted();
-    const byId = new Map(sessions.map((session) => [session.sessionId, session]));
+    const byId = new Map(this.#historyCandidates(callerId, params).map((session) => [session.sessionId, session]));
+    for (const sessionId of new Set([...(found.pendingSessionIds ?? []), ...(found.unavailableSessionIds ?? [])])) {
+      if (byId.has(sessionId)) this.#queueHistoryMaintenance(sessionId);
+    }
     return { operation: "search", query: params.query,
-      results: found.matches.map(({ score: _score, ...match }) => ({ ...match,
+      results: found.matches.filter(match => byId.has(match.sessionId)).map(({ score: _score, ...match }) => ({ ...match,
         session: this.#historySessionView(byId.get(match.sessionId)),
         locator: `session:${match.sessionId}/entry:${match.entryId}` })),
-      truncated: found.truncated, complete: refresh.errors.length === 0,
+      truncated: found.truncated, complete: Boolean(params.refresh) && refresh.errors.length === 0,
+      freshness: { ...(found.freshness ?? { mode: params.refresh ? "current" : "indexed",
+        current: Boolean(params.refresh) && refresh.errors.length === 0,
+        branch: params.refresh ? "current" : "indexed" }),
+        maintenancePendingSources: sources.filter(source => this.#sessionHistoryMaintenance.has(source.sessionId)).length },
+      ...(found.unavailableSessionIds?.length ? { unavailableSessionIds: found.unavailableSessionIds.filter(id => byId.has(id)),
+        unavailableTruncated: found.unavailableTruncated } : {}),
       ...(unavailableSessionIds.length ? { unavailableSessionIds,
         unavailableTruncated: refresh.errors.length > unavailableSessionIds.length } : {}),
       dataOnly: true, warning };
@@ -1983,6 +2053,7 @@ export class HarnessSupervisor {
     const timestamp = Date.parse(proof.deliveredAt);
     if (!Number.isSafeInteger(timestamp) || timestamp < 0) throw new Error("canonical input delivery timestamp is invalid");
     const changed = this.store.completeActorInput(input.inputId, sessionId, timestamp, proof.entryId);
+    if (changed) this.#queueHistoryMaintenance(sessionId, { invalidate: true });
     this.#actors.get(sessionId)?.liveConversation.remove(input.inputId);
     // Historical incorporation is not active-branch visibility. Publish only the
     // canonical row from this read, never a reconstruction of submitted text.
@@ -2222,6 +2293,7 @@ export class HarnessSupervisor {
 
   #onActorEvent(sessionId, record, frame) {
     if (this.#actors.get(sessionId) !== record) return;
+    if (["agent_settled", "session_tree", "session_compact", "entry_appended"].includes(frame?.type)) this.#queueHistoryMaintenance(sessionId, { invalidate: true });
     if (frame?.type === "agent_start") {
       this.#cancelIdlePreparation(sessionId, record);
       record.entryIndexIdleAttempted = false;
@@ -2871,7 +2943,9 @@ export class HarnessSupervisor {
     const navigator = this.#store ? this.#navigator() : { sessions: [], navigatorTotal: 0, navigatorTruncated: false };
     const daemon = { running: Boolean(this.#server), pid: process.pid, startedAt: this.#startedAt, socketPath: this.socketPath, databasePath: this.databasePath, logPath: this.logPath, protocolVersion: PROTOCOL_VERSION, schemaVersion: this.#store?.schemaVersion };
     return { ...daemon, daemon, ...navigator, capacity: { resident: this.#actors.size - this.#startingActors.size, starting: this.#startingActors.size, queued: this.#startQueue.length, maxResident: this.maxResidentActors, maxConcurrentStarts: this.maxConcurrentStarts }, usage: this.#store?.getUsageSummary?.(), counts: { ...(this.#store?.getOperationalCounts?.() ?? {}), cron: this.#cronStore?.getOperationalCounts?.() ?? { jobs: {}, runs: {} } }, diagnostics: [...(this.#store?.diagnose?.() ?? []), ...(this.#skillCatalogDiagnostic ? [this.#skillCatalogDiagnostic] : []),
-      ...(this.#sessionHistoryDiagnostic ? [this.#sessionHistoryDiagnostic] : [])], limits: this.#limits() };
+      ...(this.#sessionHistoryDiagnostic ? [this.#sessionHistoryDiagnostic] : []),
+      ...(this.#sessionHistoryMaintenanceFailure ? [{ code: this.#sessionHistoryMaintenanceFailure.code,
+        message: this.#sessionHistoryMaintenanceFailure.message }] : [])], limits: this.#limits() };
   }
   async stop() {
     if (this.#stoppingPromise) return this.#stoppingPromise;
@@ -2894,6 +2968,7 @@ export class HarnessSupervisor {
       if (this.#socketLinkTarget) await unlinkSocketLinkIfOwned(this.socketPath, this.#socketLinkTarget);
       await unlinkIfOwned(this.pidPath, this.#pidIdentity); await this.#log("daemon_stopped", { pid: process.pid }); await this.#logTail;
       await this.#sessionHistoryTail;
+      await Promise.allSettled([...this.#sessionHistoryJobs].map(job => job.done));
       this.#closeSessionHistoryIndex();
       clearInterval(this.#notificationTimer); this.#notifications?.close(); this.#notifications = undefined;
       this.#cronStore?.close(); this.#cronStore = undefined;

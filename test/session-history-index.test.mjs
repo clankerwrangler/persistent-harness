@@ -556,3 +556,103 @@ test("real prefix reads and incremental FTS transactions stop on cancellation wi
   assert.equal(inserts, 1, "only the appended row needs indexing"); assert.deepEqual(snapshot(), before);
   await index.refresh(sessions); assert.equal((await index.search({ sessions, query: "abort-row" })).matches[0].entryId, "new");
 });
+
+
+test("indexed snapshot queries do not refresh and safely hydrate an appended older branch", async (t) => {
+  const { id, sessionFile, databasePath } = await fixture(t), sessions = [source(id, sessionFile)];
+  const reader = new CountingReader(), index = new SessionHistoryIndex({ databasePath, reader }); t.after(() => index.close());
+  await writeFile(sessionFile, [header(id), message("old", null, "user", "snapshot anchor")].map(JSON.stringify).join("\n") + "\n");
+  await index.refresh(sessions); const reads = reader.reads;
+  await appendFile(sessionFile, JSON.stringify(message("padding", "old", "toolResult", "x".repeat(2 * 1024 * 1024))) + "\n"
+    + JSON.stringify(message("branch", null, "user", "newbranch newest")) + "\n");
+  const originalOpen = fs.open; let bytesRead = 0;
+  fs.open = async function(file, ...args) {
+    const handle = await originalOpen.call(this, file, ...args);
+    if (file === sessionFile) {
+      const read = handle.read.bind(handle);
+      handle.read = async (...args) => { const result = await read(...args); bytesRead += result.bytesRead; return result; };
+    }
+    return handle;
+  };
+  syncBuiltinESMExports();
+  let old;
+  try { old = await index.search({ sessions, query: "anchor", snapshot: true }); }
+  finally { fs.open = originalOpen; syncBuiltinESMExports(); }
+  assert.ok(bytesRead > 0 && bytesRead < 1024, `only the selected canonical entry was read: ${bytesRead} bytes`);
+  assert.equal(old.matches[0].entryId, "old"); assert.equal(old.freshness.branch, "indexed");
+  assert.equal(old.freshness.current, false); assert.equal(old.freshness.changedSources, 1);
+  assert.equal((await index.search({ sessions, query: "newest", snapshot: true })).matches.length, 0);
+  assert.equal(reader.reads, reads, "snapshot lookup must not reconstruct the archive");
+  await index.refresh(sessions);
+  assert.equal((await index.search({ sessions, query: "anchor", snapshot: true })).matches.length, 0);
+  assert.equal((await index.search({ sessions, query: "newest", snapshot: true })).matches[0].entryId, "branch");
+});
+
+test("snapshot hydration excludes rewritten spans, replacement and changed receipt renderings explicitly", async (t) => {
+  const f = await fixture(t), { id, sessionFile, databasePath } = f, sessions = [source(id, sessionFile)];
+  let receipt = null;
+  const reader = new VisibleTranscriptReader({ inputReceiptReader: () => receipt });
+  const index = new SessionHistoryIndex({ databasePath, reader }); t.after(() => index.close());
+  const bytes = [header(id), message("entry", null, "user", "oldword\n\n<!-- persistent-harness-input:test -->")].map(JSON.stringify).join("\n") + "\n";
+  await writeFile(sessionFile, bytes); await index.refresh(sessions);
+  receipt = { inputId: "test", sessionId: id };
+  let found = await index.search({ sessions, query: "oldword", snapshot: true });
+  assert.equal(found.matches.length, 0); assert.deepEqual(found.unavailableSessionIds, [id]);
+  receipt = null;
+  await writeFile(sessionFile, bytes.replace("oldword", "newword"));
+  found = await index.search({ sessions, query: "oldword", snapshot: true });
+  assert.equal(found.matches.length, 0); assert.deepEqual(found.unavailableSessionIds, [id]);
+  const replacement = path.join(f.root, "replacement"); await writeFile(replacement, bytes); await rename(replacement, sessionFile);
+  found = await index.search({ sessions, query: "oldword", snapshot: true });
+  assert.equal(found.matches.length, 0); assert.deepEqual(found.unavailableSessionIds, [id]);
+  await writeFile(sessionFile, "");
+  found = await index.search({ sessions, query: "oldword", snapshot: true });
+  assert.equal(found.matches.length, 0); assert.deepEqual(found.unavailableSessionIds, [id]);
+});
+
+test("snapshot readers pin committed source and FTS rows across a yielding maintenance transaction", async (t) => {
+  const { id, sessionFile, databasePath } = await fixture(t), sessions = [source(id, sessionFile)];
+  const index = new SessionHistoryIndex({ databasePath }); t.after(() => index.close());
+  await writeFile(sessionFile, [header(id), message("old", null, "user", "committed anchor")].map(JSON.stringify).join("\n") + "\n");
+  await index.refresh(sessions);
+  let parent = "old"; const appended = [];
+  for (let i = 0; i < 256; i++) { appended.push(message(`new${i}`, parent, "user", "uncommitted addition")); parent = `new${i}`; }
+  await appendFile(sessionFile, appended.map(JSON.stringify).join("\n") + "\n");
+  const originalPrepare = DatabaseSync.prototype.prepare; let queries;
+  DatabaseSync.prototype.prepare = function(sql) {
+    const statement = originalPrepare.call(this, sql);
+    if (sql.startsWith("INSERT INTO message_fts")) {
+      const run = statement.run.bind(statement);
+      statement.run = (...args) => {
+        const result = run(...args);
+        queries ??= Promise.all([
+          index.search({ sessions, query: "anchor", snapshot: true }),
+          index.search({ sessions, query: "addition", snapshot: true }),
+        ]);
+        return result;
+      };
+    }
+    return statement;
+  };
+  try {
+    await index.refresh(sessions);
+    const [old, added] = await queries;
+    assert.equal(old.matches[0].entryId, "old"); assert.equal(added.matches.length, 0);
+    assert.equal(old.freshness.changedSources, 1, "freshness belongs to the same committed source version");
+  } finally { DatabaseSync.prototype.prepare = originalPrepare; }
+  assert.ok((await index.search({ sessions, query: "addition", snapshot: true })).matches.length);
+});
+
+
+test("an empty or damaged snapshot reports coverage/failure without invoking index recovery", async (t) => {
+  const { id, sessionFile, databasePath } = await fixture(t), sessions = [source(id, sessionFile)];
+  const index = new SessionHistoryIndex({ databasePath }); t.after(() => index.close());
+  const missing = await index.search({ sessions, query: "needle", snapshot: true });
+  assert.equal(missing.freshness.missingSources, 1); assert.equal(missing.matches.length, 0);
+  await writeFile(sessionFile, [header(id), message("old", null, "user", "needle")].map(JSON.stringify).join("\n") + "\n");
+  await index.refresh(sessions);
+  const db = new DatabaseSync(databasePath); t.after(() => db.close());
+  db.exec("DROP TABLE message_fts");
+  await assert.rejects(index.search({ sessions, query: "needle", snapshot: true }));
+  assert.equal(db.prepare("SELECT count(*) AS count FROM sources").get().count, 1, "ordinary query cannot discard/rebuild the index");
+});

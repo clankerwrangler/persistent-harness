@@ -16,12 +16,12 @@ test("session history protocol is exact, bounded, and operation-specific", () =>
   });
   assert.deepEqual(request({ operation: "search", query: "auth refactor", roles: ["assistant"], limit: 3,
     sort: "newest", snippetChars: 240, kind: "root", includeDeleted: true, includeCurrent: true }), {
-    operation: "search", query: "auth refactor", sessionId: null, kind: "root", includeDeleted: true,
+    operation: "search", refresh: false, query: "auth refactor", sessionId: null, kind: "root", includeDeleted: true,
     includeCurrent: true, roles: ["assistant"], limit: 3, sort: "newest", snippetChars: 240,
   });
   assert.deepEqual(request({ operation: "open", sessionId: "session", entryId: "entry", before: 0, after: 8,
     maxChars: 4096, includeDeleted: true }), {
-    operation: "open", sessionId: "session", entryId: "entry", includeDeleted: true, includeCurrent: false,
+    operation: "open", refresh: false, sessionId: "session", entryId: "entry", includeDeleted: true, includeCurrent: false,
     before: 0, after: 8, maxChars: 4096,
   });
 

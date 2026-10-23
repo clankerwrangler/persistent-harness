@@ -88,10 +88,10 @@ print("session-history-contract-ok")
   assert.match(execution.stdout, /session-history-contract-ok/);
   assert.deepEqual(calls, [
     { operation: "list", kind: "root", includeDeleted: true, includeCurrent: true, limit: 2 },
-    { operation: "search", query: "rollback", kind: "child", includeDeleted: true,
+    { operation: "search", refresh: false, query: "rollback", kind: "child", includeDeleted: true,
       includeCurrent: true, roles: ["assistant"], limit: 3, sort: "newest", snippetChars: 240,
       sessionId: "session-1" },
-    { operation: "open", includeDeleted: true, includeCurrent: true, sessionId: "session-1",
+    { operation: "open", refresh: false, includeDeleted: true, includeCurrent: true, sessionId: "session-1",
       entryId: "entry-1", before: 1, after: 2, maxChars: 4096 },
   ]);
 });
@@ -127,7 +127,7 @@ test("actual Python skill to host to authenticated history RPC survives work bey
     manifest: manifestForSkills(catalog.skills), maxOutputBytes: 8192, hostHandlers: createHostHandlers({ cwd: root, getClient: () => client }) });
   await kernel.start(); const start = performance.now();
   const result = await kernel.execute(`
-result = await session_history(operation="search", query="needle", session_id="target", limit=1, snippet_chars=80)
+result = await session_history(operation="search", query="needle", session_id="target", limit=1, snippet_chars=80, refresh=True)
 assert result["complete"] is True
 assert result["results"][0]["citation"] == {"sessionId": "target", "entryId": "answer"}
 print("history-rpc-over-three-seconds-ok")

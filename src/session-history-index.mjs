@@ -547,30 +547,30 @@ export class SessionHistoryIndex {
     return { indexed, unchanged, removed, errors };
   }
 
-  #receiptsMatch(sessionId) {
-    const dependencies = this.#db.prepare("SELECT input_id, receipt_hash FROM receipt_dependencies WHERE session_id = ?").all(sessionId);
+  #receiptsMatch(sessionId, db = this.#db) {
+    const dependencies = db.prepare("SELECT input_id, receipt_hash FROM receipt_dependencies WHERE session_id = ?").all(sessionId);
     return this.reader.historyReceiptsMatch(sessionId, dependencies);
   }
 
-  async #projection(session, entries, signal) {
+  async #projection(session, entries, signal, { db = this.#db, snapshot = false } = {}) {
     signal?.throwIfAborted();
-    const source = this.#db.prepare("SELECT * FROM sources WHERE session_id = ?").get(session.sessionId);
+    const source = db.prepare("SELECT * FROM sources WHERE session_id = ?").get(session.sessionId);
     const accepted = sourceFingerprint(source);
     const check = async () => {
       signal?.throwIfAborted();
-      if (!this.#receiptsMatch(session.sessionId)) throw new Error("history receipt dependency changed; refresh required");
-      if (!sameFingerprint(accepted, fingerprint(await stat(session.sessionFile, { bigint: true })))) {
+      if (!this.#receiptsMatch(session.sessionId, db)) throw new Error("history receipt dependency changed; refresh required");
+      if (!snapshot && !sameFingerprint(accepted, fingerprint(await stat(session.sessionFile, { bigint: true })))) {
         throw new Error("canonical Pi transcript changed during history hydration");
       }
     };
     await check();
-    const cached = this.#getCachedProjection(session);
+    const cached = snapshot ? null : this.#getCachedProjection(session);
     let messages;
     if (cached) {
       const ids = new Set(entries.map(row => row.entry_id));
       messages = cached.filter(message => ids.has(message.id));
     } else {
-      const projection = await this.reader.readHistoryEntries({ ...session, fingerprint: accepted, entries, signal });
+      const projection = await this.reader.readHistoryEntries({ ...session, fingerprint: accepted, entries, signal, snapshot });
       messages = projection.messages.map(message => searchableMessage(message, session.sanitizePresentation));
     }
     const byId = new Map(messages.map(message => [message.id, message]));
@@ -585,15 +585,49 @@ export class SessionHistoryIndex {
     return result;
   }
 
-  #indexedSession(session) {
-    const source = this.#db.prepare("SELECT * FROM sources WHERE session_id = ?").get(session.sessionId);
+  #indexedSession(session, db = this.#db) {
+    const source = db.prepare("SELECT * FROM sources WHERE session_id = ?").get(session.sessionId);
     return source && source.session_file === session.sessionFile
       && Number(source.sanitize_presentation) === Number(session.sanitizePresentation);
+  }
+
+  async #withSnapshot(operation) {
+    // A separate WAL reader pins only committed rows while maintenance can
+    // yield inside its publication transaction. Never recover/rebuild here.
+    if (this.databasePath === ":memory:") throw new Error("indexed snapshots require a persistent history database");
+    const db = new DatabaseSync(this.databasePath, { readOnly: true });
+    try { db.exec("BEGIN"); return await operation(db); }
+    finally { try { db.exec("ROLLBACK"); } finally { db.close(); } }
+  }
+
+  async #coverage(sessions, db, signal, unavailable = new Set()) {
+    let indexed = 0, changed = 0, missing = 0, oldest = null, newest = null;
+    const pending = new Set();
+    for (const session of sessions) {
+      signal?.throwIfAborted();
+      const source = db.prepare("SELECT * FROM sources WHERE session_id = ?").get(session.sessionId);
+      if (!source || source.session_file !== session.sessionFile
+        || Number(source.sanitize_presentation) !== Number(session.sanitizePresentation)) { missing++; pending.add(session.sessionId); continue; }
+      indexed++;
+      oldest = oldest === null ? source.indexed_at : Math.min(oldest, source.indexed_at);
+      newest = newest === null ? source.indexed_at : Math.max(newest, source.indexed_at);
+      try {
+        if (!sameFingerprint(sourceFingerprint(source), fingerprint(await stat(session.sessionFile, { bigint: true })))
+          || !this.#receiptsMatch(session.sessionId, db)) { changed++; pending.add(session.sessionId); }
+      } catch { unavailable.add(session.sessionId); pending.add(session.sessionId); }
+    }
+    return { pendingSessionIds: [...pending].slice(0, 20),
+      freshness: { mode: "indexed", current: false, branch: "indexed", sources: sessions.length,
+      indexedSources: indexed, changedSources: changed, missingSources: missing,
+      unavailableSources: unavailable.size, pendingSources: pending.size,
+      oldestIndexedAt: oldest === null ? null : new Date(oldest).toISOString(),
+      newestIndexedAt: newest === null ? null : new Date(newest).toISOString() } };
   }
 
   /** Search indexed metadata, then hydrate bounded plain snippets from canonical projections. */
   async search(options = {}) {
     this.#assertOpen();
+    if (options.snapshot) return this.#withSnapshot(db => this.#searchOnce({ ...options, db }));
     try { return await this.#searchOnce(options); }
     catch (error) {
       if (!this.#isDatabaseFailure(error)) throw error;
@@ -604,7 +638,7 @@ export class SessionHistoryIndex {
   }
 
   async #searchOnce({ sessions, query, roles = ["user", "assistant"], limit = 10,
-    sort = "relevance", snippetChars = 320, signal } = {}) {
+    sort = "relevance", snippetChars = 320, signal, db = this.#db, snapshot = false } = {}) {
     signal?.throwIfAborted();
     const allowed = normalizedSessions(sessions);
     if (!Array.isArray(roles) || roles.length < 1 || roles.length > 2
@@ -615,8 +649,12 @@ export class SessionHistoryIndex {
     snippetChars = boundedInteger(snippetChars, "snippetChars", 16, MAX_SNIPPET_CHARS, 320);
     if (!SORTS.has(sort)) throw new TypeError("sort must be relevance, newest, or oldest");
     const parsed = parseSessionHistoryQuery(query);
-    const permitted = allowed.filter((session) => this.#indexedSession(session));
-    if (!permitted.length) return { query, matches: [], truncated: false };
+    const permitted = allowed.filter((session) => this.#indexedSession(session, db));
+    const unavailable = new Set();
+    const finish = async (matches, truncated) => ({ query, matches, truncated,
+      ...(snapshot ? { ...await this.#coverage(allowed, db, signal, unavailable),
+        unavailableSessionIds: [...unavailable].slice(0, 20), unavailableTruncated: unavailable.size > 20 } : {}) });
+    if (!permitted.length) return finish([], false);
     const sessionById = new Map(permitted.map((session) => [session.sessionId, session]));
     const sessionPlaceholders = permitted.map(() => "?").join(", ");
     const rolePlaceholders = roles.map(() => "?").join(", ");
@@ -630,16 +668,22 @@ export class SessionHistoryIndex {
       bm25(message_fts) AS score FROM message_fts JOIN documents d ON d.document_id = message_fts.rowid
       WHERE message_fts MATCH ? AND d.session_id IN (${sessionPlaceholders})
         AND d.role IN (${rolePlaceholders}) ORDER BY ${ordering} LIMIT ?`;
-    const rows = this.#db.prepare(sql).all(parsed.match,
+    const rows = db.prepare(sql).all(parsed.match,
       ...permitted.map((session) => session.sessionId), ...roles, candidateLimit);
     const projections = new Map();
     const matches = [];
     for (const row of rows) {
       const session = sessionById.get(row.session_id);
       if (!session) continue;
+      if (unavailable.has(session.sessionId)) continue;
       let messages = projections.get(session.sessionId);
       if (!messages) {
-        messages = await this.#projection(session, rows.filter(item => item.session_id === session.sessionId), signal);
+        try { messages = await this.#projection(session, rows.filter(item => item.session_id === session.sessionId), signal, { db, snapshot }); }
+        catch (error) {
+          signal?.throwIfAborted();
+          if (!snapshot || this.#isDatabaseFailure(error)) throw error;
+          unavailable.add(session.sessionId); continue;
+        }
         projections.set(session.sessionId, messages);
       }
       const message = messages.find((item) => item.id === row.entry_id && item.role === row.role);
@@ -656,26 +700,31 @@ export class SessionHistoryIndex {
       if (matches.length > limit) break;
     }
     const truncated = matches.length > limit || rows.length === candidateLimit;
-    return { query, matches: matches.slice(0, limit), truncated };
+    return finish(matches.slice(0, limit), truncated);
   }
 
   /** Open one active visible message with bounded nearest chronological context. */
-  async open({ session, entryId, before = 2, after = 2, maxChars = 8_000, signal } = {}) {
+  async open(options = {}) {
+    this.#assertOpen();
+    return options.snapshot ? this.#withSnapshot(db => this.#openOnce({ ...options, db })) : this.#openOnce(options);
+  }
+
+  async #openOnce({ session, entryId, before = 2, after = 2, maxChars = 8_000, signal, db = this.#db, snapshot = false } = {}) {
     signal?.throwIfAborted();
     this.#assertOpen();
     const selected = normalizedSession(session);
-    if (!this.#indexedSession(selected)) throw new Error("session is not present in the allowed history index");
+    if (!this.#indexedSession(selected, db)) throw new Error("session is not present in the allowed history index");
     if (typeof entryId !== "string" || !entryId || entryId.length > 128) {
       throw new TypeError("entryId must be a non-empty string of at most 128 characters");
     }
     before = boundedInteger(before, "before", 0, 8, 2);
     after = boundedInteger(after, "after", 0, 8, 2);
     maxChars = boundedInteger(maxChars, "maxChars", 1, MAX_OPEN_CHARS, 8_000);
-    const target = this.#db.prepare("SELECT ordinal FROM documents WHERE session_id = ? AND entry_id = ?").get(selected.sessionId, entryId);
+    const target = db.prepare("SELECT ordinal FROM documents WHERE session_id = ? AND entry_id = ?").get(selected.sessionId, entryId);
     if (!target) throw new Error("entry does not exist on the active visible transcript branch");
-    const rows = this.#db.prepare("SELECT * FROM documents WHERE session_id = ? AND ordinal BETWEEN ? AND ? ORDER BY ordinal")
+    const rows = db.prepare("SELECT * FROM documents WHERE session_id = ? AND ordinal BETWEEN ? AND ? ORDER BY ordinal")
       .all(selected.sessionId, Math.max(0, target.ordinal - before), target.ordinal + after);
-    const messages = await this.#projection(selected, rows, signal);
+    const messages = await this.#projection(selected, rows, signal, { db, snapshot });
     const targetIndex = messages.findIndex((message) => message.id === entryId);
     if (targetIndex < 0) throw new Error("entry does not exist on the active visible transcript branch");
     const desiredStart = Math.max(0, targetIndex - before);
@@ -711,6 +760,7 @@ export class SessionHistoryIndex {
     return {
       sessionId: selected.sessionId,
       entryId,
+      ...(snapshot ? await this.#coverage([selected], db, signal) : {}),
       messages: opened,
       truncated,
       truncatedBefore,

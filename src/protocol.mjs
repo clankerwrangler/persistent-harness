@@ -246,13 +246,14 @@ function sessionHistory(params) {
   if (!["list", "search", "open"].includes(operation)) throw new ProtocolError("invalid_request", "params.operation must be list, search, or open");
   const common = new Set(["operation", "sessionId", "kind", "includeDeleted", "includeCurrent"]);
   const allowed = operation === "list" ? new Set([...common, "limit"])
-    : operation === "search" ? new Set([...common, "query", "roles", "limit", "sort", "snippetChars"])
-      : new Set(["operation", "sessionId", "entryId", "includeDeleted", "includeCurrent", "before", "after", "maxChars"]);
+    : operation === "search" ? new Set([...common, "query", "roles", "limit", "sort", "snippetChars", "refresh"])
+      : new Set(["operation", "sessionId", "entryId", "includeDeleted", "includeCurrent", "before", "after", "maxChars", "refresh"]);
   exact(value, allowed, "params");
   const includeDeleted = value.includeDeleted === undefined ? false : bool(value.includeDeleted, "params.includeDeleted");
   const includeCurrent = value.includeCurrent === undefined ? false : bool(value.includeCurrent, "params.includeCurrent");
+  const refresh = value.refresh === undefined ? false : bool(value.refresh, "params.refresh");
   if (operation === "open") {
-    return { operation, sessionId: string(value.sessionId, "params.sessionId", 128),
+    return { operation, refresh, sessionId: string(value.sessionId, "params.sessionId", 128),
       entryId: string(value.entryId, "params.entryId", 128), includeDeleted, includeCurrent,
       before: value.before === undefined ? 2 : integer(value.before, "params.before", 0, 8),
       after: value.after === undefined ? 2 : integer(value.after, "params.after", 0, 8),
@@ -272,7 +273,7 @@ function sessionHistory(params) {
   if (!["relevance", "newest", "oldest"].includes(sort)) throw new ProtocolError("invalid_request", "params.sort must be relevance, newest, or oldest");
   const query = utf8(value.query, "params.query", 512);
   if (/[\u0000-\u001F\u007F-\u009F]/u.test(query)) throw new ProtocolError("invalid_request", "params.query must not contain control characters");
-  return { operation, query, sessionId, kind, includeDeleted, includeCurrent, roles, limit, sort,
+  return { operation, refresh, query, sessionId, kind, includeDeleted, includeCurrent, roles, limit, sort,
     snippetChars: value.snippetChars === undefined ? 320 : integer(value.snippetChars, "params.snippetChars", 80, 800) };
 }
 

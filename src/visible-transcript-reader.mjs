@@ -129,14 +129,21 @@ export class VisibleTranscriptReader {
   #receiptHash(receipt) { return createHash("sha256").update(JSON.stringify(receipt ?? null)).digest("hex"); }
 
   /** Hydrate only rows of an already verified active-branch index version. */
-  async readHistoryEntries({ sessionFile, sessionId, fingerprint, entries, sanitizePresentation, signal }) {
+  async readHistoryEntries({ sessionFile, sessionId, fingerprint, entries, sanitizePresentation, signal, snapshot = false }) {
     if (!Array.isArray(entries) || entries.length > 1000) throw new Error("history hydration exceeds the entry limit");
     const handle = await open(sessionFile, "r");
     try {
+      const observed = transcriptFingerprint(await handle.stat({ bigint: true }));
+      // A snapshot citation describes the indexed branch, not the current leaf.
+      // Append changes timestamps/size; identity, bounded entry digests and a
+      // stable read still prove the requested canonical bytes.
+      if (snapshot && (observed.dev !== fingerprint.dev || observed.ino !== fingerprint.ino
+        || BigInt(observed.size) < BigInt(fingerprint.size))) throw new Error("indexed history source was replaced or truncated");
+      const accepted = snapshot ? observed : fingerprint;
       const check = async () => {
         signal?.throwIfAborted();
-        if (!sameTranscriptFingerprint(fingerprint, transcriptFingerprint(await handle.stat({ bigint: true })))
-          || !sameTranscriptFingerprint(fingerprint, transcriptFingerprint(await fileStat(sessionFile, { bigint: true })))) {
+        if (!sameTranscriptFingerprint(accepted, transcriptFingerprint(await handle.stat({ bigint: true })))
+          || !sameTranscriptFingerprint(accepted, transcriptFingerprint(await fileStat(sessionFile, { bigint: true })))) {
           throw new Error("canonical Pi transcript changed during history hydration");
         }
       };
