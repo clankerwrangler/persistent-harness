@@ -631,7 +631,12 @@ export class HarnessSupervisor {
 
   #closeForProtocolError(state, error) {
     if (state.closing || state.cleaned) return;
-    if (!this.#write(state, protocolErrorFrame(error), () => state.socket.destroy())) state.socket.destroy();
+    // Flush the rejection before closing; destroy() can discard a completed write.
+    // A peer that does not finish the close cannot retain the connection indefinitely.
+    const timer = setTimeout(() => state.socket.destroy(), 1_000);
+    timer.unref();
+    state.socket.once("close", () => clearTimeout(timer));
+    if (!this.#write(state, protocolErrorFrame(error), () => state.socket.end())) state.socket.destroy();
     state.closing = true;
     state.socket.pause();
   }
@@ -1254,7 +1259,7 @@ export class HarnessSupervisor {
     return sessions;
   }
   #queueHistoryMaintenance(sessionId, { invalidate = false } = {}) {
-    if (this.#stoppingPromise || !this.sessionHistoryIndex) return;
+    if (this.#stoppingPromise || typeof this.sessionHistoryIndex?.refresh !== "function") return;
     const pending = this.#sessionHistoryMaintenance.get(sessionId);
     if (pending) { if (invalidate) pending.again = true; return; }
     // One publication owner, bounded/coalesced work, no actor activation. Queued

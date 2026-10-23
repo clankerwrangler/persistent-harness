@@ -316,6 +316,20 @@ test("ordinary RPC queries an indexed snapshot without waiting for strict archiv
 });
 
 
+test("optional disabled history index does not admit maintenance on settlement", async (t) => {
+  const errors = []; let closed = 0;
+  const disabled = { close() { closed++; } };
+  const { supervisor, clients: [client] } = await ownedHistoryFixture(t, disabled,
+    { logger: { error(message) { errors.push(message); } } });
+  supervisor.store.markActorStarted("caller-a", 1);
+  await client.request("update_activity", { streaming: false });
+  await client.request("session_history", { operation: "list", kind: "any", limit: 10 });
+  await sleep(20);
+  assert.deepEqual(errors, []);
+  assert.equal(supervisor.status().diagnostics.some(item => item.code === "session_history_maintenance_failed"), false);
+  await supervisor.stop(); assert.equal(closed, 1);
+});
+
 test("settlement maintenance coalesces without blocking snapshot queries or waking actors", async (t) => {
   const entered = Promise.withResolvers(), release = Promise.withResolvers(); let hold = false, refreshes = 0;
   class HeldIndex extends SessionHistoryIndex {

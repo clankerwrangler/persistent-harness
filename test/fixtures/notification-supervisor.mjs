@@ -52,6 +52,9 @@ export async function fixture(t, options = {}) {
   const supervisor = new HarnessSupervisor({ socketPath: path.join(dir, "run", "h.sock"), databasePath: path.join(dir, "state", "h.sqlite"),
     pidPath: path.join(dir, "run", "h.pid"), skillsPath, actorInactivityMs: 0, notificationIdleMs: 70, notificationTickMs: 10,
     backgroundJobsDirectory: path.join(dir, "jobs"), titleGenerator: null,
+    // Projection-only notification readers do not implement the history-index contract.
+    ...(options.transcriptReader && !Object.hasOwn(options, "sessionHistoryIndex") && !Object.hasOwn(options, "sessionHistoryIndexFactory")
+      ? { sessionHistoryIndex: { close() {} } } : {}),
     runtimeProvisioner: async () => ({}), actorFactory: value => { const actor = new Actor(value); actors.set(value.session.sessionId, actor); return actor; },
     processIdentityFactory: async pid => ({ version: 1, pid, processGroup: pid, startTime: "fake", ownerToken: "fake" }),
     processTerminator: async () => ({ terminated: true }), logger: { error: message => errors.push(String(message)), log() {} }, ...options });

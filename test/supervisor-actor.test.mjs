@@ -2173,3 +2173,53 @@ for (const mode of ["stop", "delete", "shutdown"]) test(`late delivery rejection
   submitGate.resolve(); await retiring;
   assert.deepEqual(failurePublications, [], "intentional retirement keeps the original cancellation outcome");
 });
+
+
+test("protocol rejection flushes during history maintenance and bounds half-open peers", { timeout: 10_000 }, async (t) => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "harness-protocol-maintenance-"));
+  const socketPath = path.join(root, "run", "h.sock"), sessionFile = path.join(root, "actor.jsonl");
+  await writeFile(sessionFile, JSON.stringify({ type: "session", version: 3, id: "actor", timestamp: "2026-01-01T00:00:00Z", cwd: root })
+    + "\n" + JSON.stringify({ type: "message", id: "entry", parentId: null, timestamp: "2026-01-01T00:00:00Z",
+      message: { role: "user", content: "x".repeat(64 * 1024) } }) + "\n");
+  const entered = Promise.withResolvers(), release = Promise.withResolvers(); let reads = 0;
+  const index = {
+    async refresh(_sessions, { signal }) {
+      entered.resolve();
+      for (let i = 0; i < 200; i++) { signal.throwIfAborted(); await readFile(sessionFile); reads++; }
+      await release.promise; signal.throwIfAborted(); return { errors: [] };
+    },
+    close() {},
+  };
+  const supervisor = new HarnessSupervisor({ socketPath, databasePath: path.join(root, "state", "h.sqlite"),
+    pidPath: path.join(root, "run", "h.pid"), sessionHistoryIndex: index, actorInactivityMs: 0, logger: { error() {} } });
+  await supervisor.start();
+  const actor = new HarnessClient({ socketPath, heartbeatMs: 0 }); let peer;
+  t.after(async () => { release.resolve(); peer?.destroy(); await actor.stop(); await supervisor.stop(); await rm(root, { recursive: true, force: true }); });
+  supervisor.store.createRoot({ sessionId: "actor", sessionFile, cwd: root, repositoryRoot: null,
+    name: "Before", actorToken: "fixture-token", launch: {} }, 1);
+  supervisor.store.markActorStarted("actor", 1);
+  await actor.start({ registrationType: "register_actor", sessionId: "actor", sessionFile, cwd: root,
+    repositoryRoot: null, actorToken: "fixture-token", actorGeneration: 1 });
+  await actor.request("update_activity", { streaming: false }); await entered.promise;
+  await eventually(() => reads >= 2);
+  peer = net.createConnection({ path: socketPath, allowHalfOpen: true });
+  const decoder = new JsonLineDecoder(), frames = [], errors = [];
+  peer.on("data", chunk => frames.push(...decoder.push(chunk))); peer.on("error", error => errors.push(error));
+  await once(peer, "connect");
+  const frame = (id, type, params) => encodeFrame({ version: PROTOCOL_VERSION, id, type, params });
+  peer.write(frame("register", "register_client", { clientInstanceId: "half-open-protocol-peer" }));
+  await eventually(() => frames.some(item => item.id === "register" && item.ok));
+  peer.write(Buffer.concat([
+    frame("invalid", "cron_job", { action: "report", runId: "none", disposition: "no_finding", body: "not accepted" }),
+    frame("must-not-admit", "rename_session", { sessionId: "actor", name: "After" }),
+  ]));
+  await eventually(() => frames.some(item => item.type === "protocol_error"));
+  const rejection = frames.find(item => item.type === "protocol_error");
+  assert.equal(rejection.code, "invalid_request"); assert.match(rejection.message, /no_finding does not accept a body/);
+  assert.equal(supervisor.store.getSession("actor").name, "Before", "closing rejects later pipelined admission");
+  assert.equal(peer.writableEnded, false, "the peer deliberately leaves its write side open");
+  await new Promise(resolve => setTimeout(resolve, 1_150));
+  const writeError = await new Promise(resolve => peer.write(frame("late", "heartbeat", {}), error => resolve(error)));
+  assert.ok(writeError || errors.length || peer.destroyed, "the forced-close deadline retires a non-cooperating peer");
+  assert.equal((await actor.request("get_status")).running, true);
+});
