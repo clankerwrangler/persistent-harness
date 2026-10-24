@@ -92,11 +92,16 @@ test("real slim RPC keeps one text identity when an early native prefix rebases 
   const remainderStart = await until(() => f.rawEvents.find((event) => event.type === "message_start" && event.message.role === "assistant"
     && event.message.id !== originalStart.message.id && event.message.content[0]?.text === "B"), "open B moved to a new segment");
   const resultEvent = await until(() => f.rawEvents.find((event) => event.type === "tool_execution_end" && event.toolCallId === callId), "real native Python execution before provider completion");
-  assert.equal(resultEvent.isError, false); assert.match(JSON.stringify(resultEvent.result), /EARLY_PREFIX_TOOL_RESULT/);
+  assert.equal(resultEvent.isError, false); assert.equal("result" in resultEvent, false, "Supervised RPC omits duplicate result bodies");
+  await until(() => f.rawEvents.some(event => event.type === "message_end" && event.message?.role === "toolResult"
+    && event.message.toolCallId === callId), "original native result is committed before provider completion");
   const prefixEntries = await f.entries();
+  const prefixResults = prefixEntries.filter(entry => entry.message?.role === "toolResult" && entry.message.toolCallId === callId);
+  assert.equal(prefixResults.length, 1);
+  assert.equal(prefixResults[0].message.isError, false); assert.equal(prefixResults[0].message.toolName, "ipython");
+  assert.match(JSON.stringify(prefixResults[0].message.content), /EARLY_PREFIX_TOOL_RESULT/);
   assert(prefixEntries.some((entry) => entry.message?.role === "assistant" && entry.message.id === originalStart.message.id
     && entry.message.content.some((part) => part.type === "toolCall" && part.id === callId && part.async === true)), "Early execution has its actual canonical prefix");
-  assert(prefixEntries.some((entry) => entry.message?.role === "toolResult" && entry.message.toolCallId === callId), "The real result is canonical while the provider remains open");
   const rebased = await f.visible(); f.proof.rebased = rebased;
   f.send(response, { type: "response.output_text.delta", output_index: 2, content_index: 0, delta: "2" });
   f.done(response, 2, "B2");
