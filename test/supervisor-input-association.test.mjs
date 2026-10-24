@@ -32,13 +32,13 @@ test("unresolved input remains pending without stopping startup or unrelated adm
   const start = Promise.withResolvers(); const actors = [];
   const view = { messages: [], history: [], leafId: null, inputIds: [], inputEntries: {}, inputDeliveries: {},
     inputAssociationStates: { "ambiguous-input": "unresolved" }, truncated: false, historyPage: { hasMore: false, nextCursor: null, branchId: "fixture" } };
-  const diagnostics = [];
+  const diagnostics = [], proofReads = [];
   const logPath = path.join(directory, "supervisor.jsonl");
   const socketPath = path.join(directory, "supervisor.sock");
   const supervisor = new HarnessSupervisor({ socketPath, databasePath: path.join(directory, "harness.sqlite"),
     pidPath: path.join(directory, "supervisor.pid"), logPath, skillsPath, actorInactivityMs: 0,
     backgroundJobsDirectory: path.join(directory, "background"), runtimeProvisioner: async () => ({}),
-    transcriptReader: { read: async () => structuredClone(view) }, sessionHistoryIndex: { close() {} },
+    transcriptReader: { read: async options => { proofReads.push(options); return structuredClone(view); } }, sessionHistoryIndex: { close() {} },
     logger: { error: (value) => diagnostics.push(String(value)) },
     actorFactory: (options) => { const actor = new InputActor(options, start.promise); actors.push(actor); return actor; },
     processIdentityFactory: async (pid) => ({ version: 1, pid, processGroup: pid, startTime: "fixture", ownerToken: "fixture" }),
@@ -74,7 +74,11 @@ test("unresolved input remains pending without stopping startup or unrelated adm
   assert.deepEqual(retained.images, pending.images); assert.equal(retained.delivery.deliveredAt, null);
   assert.equal(supervisor.store.getActorInput(incorporated.inputId, sessionId).entryId, "inactive-original");
   assert.equal(supervisor.store.getActorInput("absent-input", sessionId).state, "accepted");
+  assert(proofReads.some(options => Array.isArray(options.inputProofIds)
+    && options.inputProofIds.includes("ambiguous-input") && options.inputProofIds.includes("incorporated-input")),
+    "pending reconciliation selects exact pending IDs, never provisional page associations");
   const publicView = await client.request("get_visible_messages", { sessionId });
+  assert.equal(proofReads.at(-1).inputProofIds, "page");
   assert.equal(Object.hasOwn(publicView, "inputAssociationStates"), false, "Private association status must not enter the public DTO");
   assert.equal(Object.hasOwn(publicView, "inputDeliveries"), false);
   assert.equal(publicView.messages.find((message) => message.id === pending.inputId).delivery.deliveredAt, null);
@@ -168,5 +172,51 @@ for (const observed of ["unresolved", "proven", "absent"]) {
       assert.equal(input.state, "completed"); assert.equal(input.entryId, "late-canonical-original");
       assert.equal(input.message, undefined);
     }
+  });
+}
+
+
+for (const state of ["proven", "unresolved"]) {
+  test(`pending input admitted during a held scoped read gets fresh ${state} reconciliation`, { timeout: 20_000 }, async t => {
+    const directory = await mkdtemp(path.join(os.tmpdir(), "input-scope-race-"));
+    const skillsPath = path.join(directory, "skills"); await mkdir(skillsPath);
+    const ready = Promise.withResolvers(), entered = Promise.withResolvers(), release = Promise.withResolvers(), actors = [], scopes = [];
+    let held = false, incorporated;
+    const supervisor = new HarnessSupervisor({ socketPath: path.join(directory, "supervisor.sock"),
+      databasePath: path.join(directory, "harness.sqlite"), pidPath: path.join(directory, "supervisor.pid"),
+      logPath: path.join(directory, "events.jsonl"), skillsPath, actorInactivityMs: 0,
+      backgroundJobsDirectory: path.join(directory, "background"), runtimeProvisioner: async () => ({}),
+      transcriptReader: { read: async options => {
+        const ids = [...options.inputProofIds]; scopes.push(ids);
+        if (!held && ids.includes("first-input")) { held = true; entered.resolve(); await release.promise; }
+        const included = ids.includes("late-incorporated");
+        return { messages: [], history: [], leafId: null, truncated: false,
+          inputIds: included && state === "proven" ? ["late-incorporated"] : [], inputEntries: {},
+          inputAssociationStates: included ? { "late-incorporated": state } : {},
+          inputDeliveries: included && state === "proven" ? { "late-incorporated": { entryId: "historical-entry",
+            deliveredAt: new Date(incorporated.acceptedAt + 1).toISOString() } } : {} };
+      } }, sessionHistoryIndex: { close() {} }, logger: { error() {} },
+      actorFactory: options => { const actor = new InputActor(options, ready.promise); actors.push(actor); return actor; },
+      processIdentityFactory: async pid => ({ version: 1, pid, processGroup: pid, startTime: "fixture", ownerToken: "fixture" }),
+      processTerminator: async () => ({ terminated: true }) });
+    let client;
+    t.after(async () => { release.resolve(); ready.resolve(); await client?.stop(); await supervisor.stop(); await rm(directory, { recursive: true, force: true }); });
+    await supervisor.start(); client = new HarnessClient({ socketPath: supervisor.socketPath, heartbeatMs: 0 });
+    await client.start({ registrationType: "register_client", clientInstanceId: `scope-race-${state}` });
+    const { admission } = await client.request("create_root", { cwd: directory, repositoryRoot: null, name: "Scoped input race",
+      provider: null, model: null, thinkingLevel: null });
+    const sessionId = admission.sessionId;
+    supervisor.store.createActorInput(sessionId, { inputId: "first-input", message: "A genuinely absent first input" });
+    ready.resolve(); await entered.promise;
+    incorporated = supervisor.store.createActorInput(sessionId, { inputId: "late-incorporated", message: "Already canonical or ambiguous" });
+    release.resolve();
+    await eventually(() => actors[0]?.submits.length > 0);
+    await client.request("get_actor_state", { sessionId });
+    await eventually(() => state === "proven"
+      ? supervisor.store.getActorInput(incorporated.inputId, sessionId).state === "completed" || actors[0].submits.some(input => input.inputId === incorporated.inputId)
+      : scopes.some(ids => ids.includes(incorporated.inputId)) || actors[0].submits.some(input => input.inputId === incorporated.inputId));
+    assert.deepEqual(actors[0].submits.map(input => input.inputId), ["first-input"], "an ID outside the awaited proof scope cannot be submitted as absent");
+    assert(scopes.slice(1).some(ids => ids.includes(incorporated.inputId)), "the newly pending ID needs a fresh targeted physical proof request");
+    assert.equal(supervisor.store.getActorInput(incorporated.inputId, sessionId).state, state === "proven" ? "completed" : "queued");
   });
 }

@@ -1,5 +1,9 @@
 import assert from "node:assert/strict";
-import { appendFile, mkdtemp, rename, rm, writeFile } from "node:fs/promises";
+import fs, { appendFile, mkdtemp, readFile, rename, rm, writeFile } from "node:fs/promises";
+import { syncBuiltinESMExports } from "node:module";
+import { HarnessStore } from "../src/store.mjs";
+import { actorInputRenderEvidence, createActorInputAssociation } from "../src/conversation-projection.mjs";
+import { actorInputCustomPayload } from "../src/protocol.mjs";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -639,4 +643,187 @@ test("embedded births survive cold pagination and stay on their active canonical
   assert.equal(branch.history.find(row => row.kind === "progress").timelineSequence, 1);
   assert.notEqual(branch.historyPage.branchId, initial.historyPage.branchId);
   await assert.rejects(reader.read({ ...args, before: initial.historyPage.nextCursor }), { code: "history_cursor_stale" });
+});
+
+// Count actual canonical FileHandle reads, not process rchar (which includes RPC).
+async function canonicalReadBytes(file, operation) {
+  const original = fs.open; let bytes = 0;
+  fs.open = async function(name, ...args) {
+    const handle = await original.call(this, name, ...args);
+    if (name === file) { const read = handle.read.bind(handle);
+      handle.read = async (...args) => { const result = await read(...args); bytes += result.bytesRead; return result; }; }
+    return handle;
+  };
+  syncBuiltinESMExports();
+  try { return { value: await operation(), bytes }; }
+  finally { fs.open = original; syncBuiltinESMExports(); }
+}
+
+async function receiptFixture(t) {
+  const { root, file, id } = await fixture(t);
+  const store = new HarnessStore(path.join(root, "harness.sqlite")); t.after(() => store.close());
+  store.createRoot({ sessionId: id, sessionFile: file, cwd: root, name: "Public fixture", actorToken: "public-fixture", launch: {} });
+  const body = "x".repeat(256 * 1024), inputId = "large-old-input";
+  const legacy = message("old", null, "user", `${body}\n\n<!-- persistent-harness-input:${inputId} -->`);
+  store.createActorInput(id, { inputId, message: body }, 1767225600000);
+  store.completeActorInput(inputId, id, 1767225600000, "old");
+  const input = message("selected", "old", "user", "Selected input"); input.message.id = "selected-input";
+  input.message.content.push({ type: "image", mimeType: "image/png", data: PNG_1X1 });
+  store.createActorInput(id, { inputId: input.message.id, message: "Selected input", images: [{ type: "image", mimeType: "image/png", data: PNG_1X1 }] }, 1767225600000);
+  store.completeActorInput(input.message.id, id, 1767225600000, "selected");
+  const answer = message("answer", "selected", "assistant", "Public answer");
+  const entries = [header(id), legacy, input, answer];
+  await writeFile(file, entries.map(entry => JSON.stringify(entry) + "\n").join(""));
+  const reader = new VisibleTranscriptReader({ inputReceiptReader: (iid, sid) => store.getActorInput(iid, sid, { includeDigest: true }) });
+  await reader.read({ sessionFile: file, sessionId: id });
+  return { root, file, id, store, reader, entries, source: { sessionFile: file, sessionId: id } };
+}
+
+test("page scope leaves old receipt payloads cold and preserves exact full-proof page boundaries", async t => {
+  const f = await receiptFixture(t);
+  const large = f.entries[1];
+  const compact = actorInputRenderEvidence(large);
+  assert(Buffer.byteLength(JSON.stringify(compact)) < 512, "retained matching facts do not scale with prompt bytes");
+  assert(!JSON.stringify(compact).includes("x".repeat(128)));
+  const page = await canonicalReadBytes(f.file, () => f.reader.read({ ...f.source, publicView: true, maxMessages: 1, inputProofIds: "page" }));
+  assert.equal(page.bytes, 0, "an unchanged assistant-only page must not reread old receipt payloads");
+  assert.deepEqual(page.value.inputIds, [], "unselected render associations are not delivery evidence");
+  for (const maxMessages of [1, 2, 3, 4]) for (const maxBytes of [1024, 4096, 10000]) {
+    const options = { ...f.source, publicView: true, maxMessages, maxBytes };
+    const full = await f.reader.read(options), scoped = await f.reader.read({ ...options, inputProofIds: "page" });
+    for (const field of ["messages", "history", "historyPage", "truncated"]) assert.deepEqual(scoped[field], full[field], `${field}: ${maxMessages}/${maxBytes}`);
+    if (full.historyPage.nextCursor) {
+      const before = full.historyPage.nextCursor;
+      const oldFull = await f.reader.read({ ...options, before }), oldScoped = await f.reader.read({ ...options, before, inputProofIds: "page" });
+      for (const field of ["messages", "history", "historyPage", "truncated"]) assert.deepEqual(oldScoped[field], oldFull[field]);
+    }
+  }
+  const defaults = await canonicalReadBytes(f.file, () => f.reader.read(f.source));
+  assert(defaults.bytes >= 256 * 1024, "full/default proof semantics remain unchanged");
+  const suffix = JSON.stringify(message("suffix", "answer", "assistant", "New suffix")) + "\n";
+  await appendFile(f.file, suffix);
+  const advanced = await canonicalReadBytes(f.file, () => f.reader.read({ ...f.source, publicView: true, maxMessages: 1, inputProofIds: "page" }));
+  assert.equal(advanced.bytes, Buffer.byteLength(suffix));
+  t.diagnostic(JSON.stringify({ unchangedPageBytes: page.bytes, fullProofBytes: defaults.bytes, suffixBytes: advanced.bytes, compactEvidenceBytes: Buffer.byteLength(JSON.stringify(compact)) }));
+});
+
+test("targeted delivery, retry, image and family reads physically validate only their operation", async t => {
+  const f = await receiptFixture(t), selectedSpan = Buffer.byteLength(JSON.stringify(f.entries[2]));
+  const delivery = await canonicalReadBytes(f.file, () => f.reader.read({ ...f.source, inputProofIds: ["selected-input"] }));
+  assert.equal(delivery.bytes, selectedSpan); assert.equal(delivery.value.inputEntries["selected-input"], "selected");
+  assert.deepEqual(delivery.value.inputIds, ["selected-input"]);
+  const image = await canonicalReadBytes(f.file, () => f.reader.readImage({ ...f.source, entryId: "selected", index: 0 }));
+  assert.equal(image.bytes, selectedSpan); assert.equal(image.value.data, PNG_1X1);
+  const retry = await canonicalReadBytes(f.file, () => f.reader.resolveRetryInput({ ...f.source, assistantId: "answer" }));
+  assert.equal(retry.bytes, selectedSpan * 2); assert.equal(retry.value.input.message, "Selected input");
+  const family = { type: "custom_message", customType: INCOMING_AGENT_MESSAGE_TYPE, id: "family-entry", parentId: "answer", timestamp: "2026-01-01T00:00:00Z",
+    content: "Sender:\nPublic family body", details: { messageId: "family-proof", senderId: "sender", senderName: "Sender", relationship: "parent", body: "Public family body" } };
+  await appendFile(f.file, JSON.stringify(family) + "\n");
+  await f.reader.read({ ...f.source, inputProofIds: [] });
+  const familyRead = await canonicalReadBytes(f.file, () => f.reader.read({ ...f.source, inputProofIds: [], familyMessageId: "family-proof" }));
+  assert.equal(familyRead.bytes, Buffer.byteLength(JSON.stringify(family)));
+  assert.equal(familyRead.value.familyMessages["family-proof"].body, "Public family body");
+  const raw = await readFile(f.file, "utf8");
+  await writeFile(f.file, raw.replaceAll("Public family body", "Edited family body"));
+  await assert.rejects(f.reader.read({ ...f.source, inputProofIds: [], familyMessageId: "family-proof" }), /canonical input source changed/);
+});
+
+test("selected page and delivery proofs reject rewritten spans and inactive same-input ambiguity", async t => {
+  const f = await receiptFixture(t);
+  const raw = await readFile(f.file, "utf8");
+  await writeFile(f.file, raw.replace("Selected input", "Modified input"));
+  await assert.rejects(f.reader.read({ ...f.source, inputProofIds: ["selected-input"] }), /canonical input source changed/);
+  await f.reader.read({ ...f.source, inputProofIds: [] });
+  await writeFile(f.file, raw);
+  await assert.rejects(f.reader.read({ ...f.source, inputProofIds: ["selected-input"] }), /canonical input source changed/);
+  await f.reader.read({ ...f.source, inputProofIds: [] });
+  const duplicate = structuredClone(f.entries[2]); duplicate.id = "inactive-duplicate"; duplicate.parentId = "old";
+  await appendFile(f.file, JSON.stringify(duplicate) + "\n" + JSON.stringify(message("active-again", "answer", "assistant", "Active branch")) + "\n");
+  // Clearing the delivered-entry hint keeps both canonical-ID candidates eligible.
+  const base = f.store.getActorInput("selected-input", f.id, { includeDigest: true });
+  const reader = new VisibleTranscriptReader({ inputReceiptReader: (iid, sid) => iid === "selected-input" ? { ...base, entryId: null } : f.store.getActorInput(iid, sid, { includeDigest: true }) });
+  const scoped = await reader.read({ ...f.source, inputProofIds: ["selected-input"] });
+  assert.equal(scoped.inputAssociationStates["selected-input"], "unresolved");
+  assert.deepEqual(scoped.inputIds, []);
+});
+
+test("provisional matching tracks receipt-only changes and matches exact legacy/custom body-image rules", async t => {
+  const f = await receiptFixture(t);
+  const inputId = "small-legacy", original = message("legacy-small", "answer", "user", `small body\n\n<!-- persistent-harness-input:${inputId} -->`);
+  original.message.content.push({ type: "image", mimeType: "image/png", data: PNG_1X1 });
+  let receipt = { sessionId: f.id, inputId, source: "user", origin: null, acceptedAt: 1767225600000, message: "small body", images: [{ type: "image", mimeType: "image/png", data: PNG_1X1 }], entryId: null };
+  const customReceipt = { ...receipt, inputId: "custom", source: "cron", origin: { jobId: "job", runId: "run" }, clientMessageId: "receipt-client" };
+  // Historical custom entries may omit a client ID that was later added to the receipt.
+  const payload = actorInputCustomPayload({ ...customReceipt, clientMessageId: null });
+  const custom = { type: "custom_message", ...payload, id: "custom-entry", parentId: "legacy-small", timestamp: "2026-01-01T00:00:00Z" };
+  for (const entry of [original, custom]) {
+    const proofReceipt = entry === custom ? customReceipt : receipt;
+    for (const patch of [{}, { message: "wrong body" }, { images: [] }, { outcome: "handled" }, { acceptedAt: 1234 }, { source: "background", origin: { jobId: "different" } }]) {
+      const physical = createActorInputAssociation({ sessionId: f.id, inputReceipt: { ...proofReceipt, ...patch } });
+      const provisional = createActorInputAssociation({ sessionId: f.id, inputReceipt: { ...proofReceipt, ...patch } });
+      const evidence = actorInputRenderEvidence(entry);
+      assert(!JSON.stringify(evidence).includes(PNG_1X1), "matching metadata never retains image payloads");
+      physical.add(entry); provisional.addRenderEvidence(evidence);
+      assert.deepEqual(provisional.result(), physical.result());
+    }
+  }
+  await appendFile(f.file, JSON.stringify(original) + "\n");
+  const reader = new VisibleTranscriptReader({ inputReceiptReader: iid => iid === inputId ? receipt : null });
+  const options = { ...f.source, maxMessages: 1, publicView: true, inputProofIds: "page" };
+  assert.equal((await reader.read(options)).messages[0].text, "small body");
+  receipt = { ...receipt, message: "wrong body" };
+  const changed = await reader.read(options);
+  assert(changed.messages[0].text.includes("persistent-harness-input")); assert.deepEqual(changed.inputIds, []);
+  const [scoped, full] = await Promise.all([reader.read({ ...f.source, inputProofIds: [] }), reader.read(f.source)]);
+  assert.deepEqual(scoped.inputIds, []); assert.deepEqual(full.inputIds, []);
+  const raw = await readFile(f.file, "utf8");
+  await writeFile(f.file, raw.replace("small body", "other body"));
+  await assert.rejects(reader.read(options), /canonical input source changed/, "selected legacy/image payloads still receive physical verification");
+});
+
+
+test("page scopes preserve cold/reset/replacement recovery, cursor validation and cross-scope inflight ownership", async t => {
+  const f = await receiptFixture(t), options = { ...f.source, publicView: true, maxMessages: 1, inputProofIds: "page" };
+  const first = await f.reader.read(options);
+  f.reader.clear(f.file);
+  const cold = await f.reader.read(options); assert.deepEqual(cold.messages, first.messages);
+  const replacement = f.file + ".new"; await writeFile(replacement, f.entries.map(entry => JSON.stringify(entry) + "\n").join("")); await rename(replacement, f.file);
+  const replaced = await f.reader.read(options); assert.deepEqual(replaced.messages, first.messages);
+  await assert.rejects(f.reader.read({ ...options, before: first.historyPage.nextCursor }), { code: "history_cursor_stale" });
+  const latest = await f.reader.read(options), anchor = latest.historyPage.nextCursor;
+  const raw = await readFile(f.file, "utf8");
+  const previous = await f.reader.read({ ...options, before: anchor });
+  assert(previous.historyPage.nextCursor);
+  // A public legacy anchor still needs its physical span checked even when no
+  // earlier row remains. Canonical-ID UI matching remains metadata-only.
+  const parts = JSON.parse(Buffer.from(anchor, "base64url")); parts[3] = "large-old-input";
+  const legacyAnchor = Buffer.from(JSON.stringify(parts)).toString("base64url");
+  await writeFile(f.file, raw.replace("x".repeat(16), "y".repeat(16)));
+  await assert.rejects(f.reader.read({ ...options, before: legacyAnchor }), /canonical input source changed/);
+  await f.reader.read({ ...f.source, inputProofIds: [] });
+  const [empty, delivery, page] = await Promise.all([
+    f.reader.read({ ...f.source, inputProofIds: [] }),
+    f.reader.read({ ...f.source, inputProofIds: ["selected-input"] }),
+    f.reader.read(options),
+  ]);
+  assert.deepEqual(empty.inputIds, []); assert.deepEqual(delivery.inputIds, ["selected-input"]); assert.deepEqual(page.inputIds, []);
+});
+
+
+test("modern canonical-ID image pages keep original metadata-only polling without private delivery authority", async t => {
+  const f = await receiptFixture(t);
+  const modern = structuredClone(f.entries[2]); modern.parentId = null;
+  await writeFile(f.file, [header(f.id), modern].map(entry => JSON.stringify(entry) + "\n").join(""));
+  f.reader.clear(f.file);
+  await f.reader.read(f.source);
+  const options = { ...f.source, publicView: true, maxMessages: 1 };
+  const original = await canonicalReadBytes(f.file, () => f.reader.read(options));
+  const page = await canonicalReadBytes(f.file, () => f.reader.read({ ...options, inputProofIds: "page" }));
+  assert.equal(original.bytes, 0, "original canonical-ID matching deliberately does not reread expanded/image payloads");
+  assert.equal(page.bytes, original.bytes, "scoped modern UI polling must not add payload reads");
+  for (const field of ["messages", "history", "historyPage", "truncated"]) assert.deepEqual(page.value[field], original.value[field]);
+  assert.deepEqual(page.value.inputIds, []);
+  assert.deepEqual(page.value.inputEntries, {});
+  assert.deepEqual(page.value.inputDeliveries, {});
+  assert.deepEqual(page.value.inputAssociationStates, {});
 });

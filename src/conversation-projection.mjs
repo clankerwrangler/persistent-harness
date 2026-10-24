@@ -115,22 +115,70 @@ function actorInputEntryMatch(entry, receipt) {
   } catch { return null; }
 }
 
-// Per-read verification supports sequential reads without retaining input payloads.
+// Render-only facts live with the parsed candidate, not a delivery-proof cache.
+function matchingDigest(value) {
+  const hash = createHash("sha256");
+  const visit = item => {
+    if (item === null || typeof item !== "object") {
+      hash.update(`${typeof item}:${Object.is(item, -0) ? "-0" : JSON.stringify(item)};`); return;
+    }
+    hash.update(Array.isArray(item) ? `array:${item.length}:` : "object:");
+    for (const key of Object.keys(item).sort()) { hash.update(`${JSON.stringify(key)}:`); visit(item[key]); }
+    hash.update(";");
+  };
+  visit(value); return hash.digest("hex");
+}
+export function actorInputRenderEvidence(entry) {
+  const kind = canonicalUserInputId(entry) ? "user-id" : entry.type === "custom_message" ? "custom" : "legacy-marker";
+  const evidence = { id: entry.id, inputId: inputIdForEntry(entry), timestamp: entry.timestamp, kind };
+  try {
+    if (kind === "legacy-marker") {
+      const content = canonicalActorInputContent(entry);
+      evidence.digests = ["auto", "steer", "follow_up"].map(behavior => actorInputDigest(content.message, JSON.stringify(content.images), behavior));
+    } else if (kind === "custom") {
+      const details = entry.details;
+      canonicalActorInputContent(entry, { ...details, acceptedAt: Date.parse(details.acceptedAt) });
+      evidence.detailsDigest = matchingDigest(details);
+      evidence.hasClientMessageId = details.clientMessageId != null;
+    }
+  } catch { evidence.invalid = true; }
+  return evidence;
+}
+function actorInputRenderMatch(evidence, receipt) {
+  if (evidence.invalid || evidence.inputId !== receipt.inputId
+    || (receipt.entryId != null && receipt.entryId !== evidence.id) || !iso(evidence.timestamp)) return null;
+  try {
+    if (evidence.kind === "legacy-marker") {
+      if (typeof receipt.message === "string") {
+        if (actorInputDigest(receipt.message, JSON.stringify(normalizeInputImages(receipt.images)), "auto") !== evidence.digests[0]) return null;
+      } else if (!evidence.digests.includes(receipt.digest)) return null;
+    }
+    if (evidence.kind === "custom") {
+      const expected = actorInputCustomPayload({ ...receipt, clientMessageId: evidence.hasClientMessageId ? receipt.clientMessageId : null, message: "", images: [] });
+      if (matchingDigest(expected.details) !== evidence.detailsDigest) return null;
+    } else if (["cron", "background"].includes(receipt.source)) actorInputCustomPayload({ ...receipt, message: "", images: [] });
+    return { inputId: receipt.inputId, kind: evidence.kind, source: receipt.source, origin: receipt.origin,
+      acceptedAt: receipt.acceptedAt, clientMessageId: receipt.clientMessageId };
+  } catch { return null; }
+}
+
+// Each physical verifier still reads relevant canonical entries at its trusted boundary.
 export function createActorInputAssociation({ sessionId, inputReceipt: receipt } = {}) {
   const eligible = receipt && sessionId && receipt.sessionId === sessionId && typeof receipt.inputId === "string"
     && receipt.inputId.length > 0 && receipt.inputId.length <= 128 && receipt.outcome !== "handled"
     && Number.isSafeInteger(receipt.acceptedAt) && iso(receipt.acceptedAt)
     && [null, "user", "cron", "background"].includes(receipt.source);
   let strong = null, legacy = null, strongCount = 0, legacyCount = 0, unknownStrong = false, unknownLegacy = false;
+  const addMatch = (entry, proof) => {
+    if (!proof) return;
+    const match = { entryId: entry.id, deliveredAt: entry.timestamp, proof };
+    if (receipt.entryId != null || proof.kind !== "legacy-marker") {
+      strongCount = Math.min(2, strongCount + 1); strong = match;
+    } else { legacyCount = Math.min(2, legacyCount + 1); legacy = match; }
+  };
   return {
-    add(entry) {
-      if (!eligible) return;
-      const proof = actorInputEntryMatch(entry, receipt); if (!proof) return;
-      const match = { entryId: entry.id, deliveredAt: entry.timestamp, proof };
-      if (receipt.entryId != null || proof.kind !== "legacy-marker") {
-        strongCount = Math.min(2, strongCount + 1); strong = match;
-      } else { legacyCount = Math.min(2, legacyCount + 1); legacy = match; }
-    },
+    add(entry) { if (eligible) addMatch(entry, actorInputEntryMatch(entry, receipt)); },
+    addRenderEvidence(evidence) { if (eligible) addMatch(evidence, actorInputRenderMatch(evidence, receipt)); },
     incomplete({ entryId, kind }) {
       if (!eligible || (receipt.entryId != null && receipt.entryId !== entryId)) return;
       if (kind === "custom" && !["cron", "background"].includes(receipt.source)) return;

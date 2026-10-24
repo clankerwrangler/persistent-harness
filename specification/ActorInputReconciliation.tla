@@ -15,6 +15,8 @@ Init == /\ ready = FALSE /\ generation = 1 /\ pending = {"old"}
 
 \* Actor startup takes an append cursor, not historical receipt RPCs. The
 \* supervisor already owns pending reconciliation before every transport submit.
+\* VisibleInputProofs models that reader boundary: compact render evidence never
+\* replaces physical verification of the requested input and its full inventory.
 Start == /\ ~ready /\ ~stopped /\ ready' = TRUE
          /\ UNCHANGED <<generation, pending, proof, accepted, writes, delivered,
                         incremental, admitted, stopped, compacting, startupQueries>>

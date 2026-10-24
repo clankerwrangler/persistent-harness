@@ -305,6 +305,15 @@ The Unix-socket framing and validation contract is in `src/framing.mjs` and `src
 
 The protocol retains session creation, subscription, input admission, stop/revive/delete/rename, kernel reload, model selection, compaction, family messages, schedules, background process notifications, canonical history, telemetry, dialogs, and output streams. Client-neutral conversation projections remain in this repository even though no browser client or HTTP adapter is included.
 
+Bounded conversation pages use compact per-entry input matching facts and current
+receipts to select their ordering, IDs, byte boundary, and cursor. The reader then
+physically checks relevant legacy/custom spans against the complete same-input
+inventory, including inactive candidates, the byte boundary, and cursor anchor.
+Canonical user IDs retain metadata-only UI matching, and pages return no private
+delivery proofs. Delivery and retry check their requested canonical spans; image
+and family admission reads check their targets without unrelated input payloads.
+Full/default and history-index reads retain their complete receipt proof collection.
+
 ### Conversation order
 
 Each public assistant text part and progress row has a host-owned birth stamp.
@@ -354,9 +363,11 @@ supervisor shutdown drain or cancel owned wakes before releasing their state. Re
 from gracefully passivated sessions; explicitly stopped sessions remain stopped.
 Canonical delivery evidence and ambiguous-input replay guards remain authoritative.
 
-Before submitting pending input, the supervisor reconciles its receipt against
-complete canonical history, including inactive branches. Proven incorporation
-completes the receipt without replay; ambiguous incorporation remains pending.
+Before submitting pending input, the supervisor reconciles its receipt against the
+complete same-input canonical inventory, including inactive branches. Resampling
+newly admitted IDs after an awaited read requires a fresh scoped reconciliation
+before absence can permit submission. Proven incorporation completes the receipt
+without replay; ambiguous incorporation remains pending.
 Actor startup takes an append cursor instead of querying every historical input
 receipt again. Subsequent actor appends still use full historical evidence for
 identity resolution and the supervisor verifies the exact entry before delivery.
