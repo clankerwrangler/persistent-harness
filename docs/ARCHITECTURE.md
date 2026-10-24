@@ -185,10 +185,12 @@ Tool contexts retain the SDK-raw projection, not an extension's model view. They
 borrow a plan through the complete task and nested-call drain. Explicit messages
 access creates an owned array that stays valid after task completion and reload;
 finishing releases only the unread borrowed plan. Supervisor-created workers
-explicitly select `supervised-source` end events: source handlers receive the plan,
-legacy in-process listeners still receive full values, and the worker sends the
-same type-only `agent_end` already exposed by supervisor live/history/replay
-surfaces. Direct worker RPC retains full `agent_end.messages` by default.
+explicitly select `supervised-source` events. Source handlers receive the plan;
+in-process listeners and canonical persistence retain full values. Before JSONL
+transport, the worker omits tool arguments, partial/result bodies, tool-result
+message bodies, and turn/agent summaries that the supervisor discards. A tool-result
+`message_end` retains the image-presence signal for canonical image lookup.
+Direct worker RPC retains full values by default.
 
 Archive snapshots retain complete detached records, including opaque extension data and superseded compaction fields. Compaction uses this same copier for full-history guards and extension branch snapshots: object and array containers are detached, while immutable strings are shared instead of reallocated. Preparation snapshots retain structured-clone semantics for file-operation Sets. Their limits are 100,000 entries, 2,000,000 aggregate visited values, and depth 64 from the archive-array root. The 64 Mi UTF-16 code-unit string/key budget applies separately to each record, including its array-slot key, and remains enforced through signature overlays. Both the initial archive copy and the isolated SDK-helper copy use this scope. Type, accessor, cycle, ancestry, signature, and selected historical call/result checks still run before context pruning.
 
