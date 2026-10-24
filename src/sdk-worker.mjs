@@ -116,7 +116,29 @@ export class RpcDialogBroker {
 }
 
 /** Convert public SDK deltas to the stock RPC event shape without cumulative copies. */
-export function toWorkerRpcEvent(event) {
+export function toWorkerRpcEvent(event, { eventMode = "full" } = {}) {
+  if (eventMode === "supervised-source") {
+    // In-process hooks and canonical persistence own full values. Remove only
+    // bodies discarded by the existing supervisor projection, before JSONL.
+    if (["tool_execution_start", "tool_execution_update", "tool_execution_end"].includes(event.type)) {
+      const { args, partialResult, result, ...frame } = event;
+      return frame;
+    }
+    if (["message_start", "message_end"].includes(event.type) && event.message?.role === "toolResult") {
+      const { content, details, structuredContent, nestedCalls, ...message } = event.message;
+      // Keep the existing image-presence signal; canonical history owns bytes.
+      if (event.type === "message_end" && content?.some(part => part?.type === "image")) message.content = [{ type: "image" }];
+      return { ...event, message };
+    }
+    if (event.type === "turn_end") {
+      const { message, toolResults, ...frame } = event;
+      return frame;
+    }
+    if (event.type === "agent_end") {
+      const { messages, ...frame } = event;
+      return frame;
+    }
+  }
   if (event.type !== "message_update") return event;
   const { partial, ...delta } = event.assistantMessageEvent;
   if (["start", "done", "error"].includes(delta.type)) return null;
@@ -480,7 +502,7 @@ export async function bootstrapSDKWorker({ argv = [], cwd = process.cwd(), env =
   let ready = false, worker, session;
   const emit = (event) => {
     if (event.type === "agent_start") { worker?.cancelIdleMemory(); worker?.cancelEntryIndex(); }
-    const frame = toWorkerRpcEvent(event); if (frame) publish(frame);
+    const frame = toWorkerRpcEvent(event, { eventMode }); if (frame) publish(frame);
   };
   runner.onError((error) => { if (!ready) startupErrors.push(error); emit({ type: "extension_error", ...error }); });
   runner.setUIContext(broker.ui, "rpc");

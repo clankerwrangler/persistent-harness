@@ -943,6 +943,9 @@ test("dormant public preparation capture has no provider, transcript, UI or acti
     // Direct fixture writes bypass the coordinator's canonical refresh. Source mode
     // must rebind its borrowed generation before measuring preparation effects.
     if (sourceSdk) worker.session.refreshContext();
+    // Drain coalesced metadata from the fixture writes before measuring capture.
+    // The exact event comparison below still rejects new preparation effects.
+    await new Promise(resolve => setImmediate(resolve));
     const before = structuredClone(manager.getEntries()), leaf = manager.getLeafId();
     const state = structuredClone(worker.session.agent.state.messages), beforeEvents = structuredClone(events);
     worker.coordinator.controller = new AbortController();

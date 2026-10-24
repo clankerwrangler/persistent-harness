@@ -73,9 +73,13 @@ signature, alias, edit, getter/rejection and failure assertions. Navigation,
 compaction and later commits share the canonical public-state refresh, preserving
 selected signature amendments without eager message hydration. Actual source-mode
 worker checks cover mutable public Agent arrays, source/legacy hooks, direct/full
-versus supervised/type-only end events, and SDK status plus automatic threshold
-checks without a veto after append/edit/reload. Tool fixtures cover unread source
-lifetime through nested drain and independent exposed-array ownership.
+versus supervised events, and SDK status plus automatic threshold checks without
+a veto after append/edit/reload. Tool fixtures cover unread source lifetime through
+nested drain and independent exposed-array ownership. `sdk-worker-wire` measures a
+real offline SDK/coordinator JSONL turn and checks exact supervisor live/reconnect
+parity, persisted results, and root/child image delivery. `WorkerResultWire` checks
+full-mode preservation, supervised body omission, unchanged observers and canonical
+results, and image-refresh equivalence; its four fault configurations must fail.
 
 A separately selected source-aware context editor is tested through the actual
 SDK/H/extension request path with accepted shortening and no stock compaction:
