@@ -7,7 +7,7 @@ vars == <<mode, root, image, outcome, step, canonical, hooks, wire, visible, exp
 \* cancelled tool can still commit; cancellation does not fabricate turn_end.
 Kinds == <<"user", "assistant", "toolStart", "toolUpdate", "toolEnd",
            "resultStart", "resultEnd", "turnEnd", "agentEnd", "settled">>
-Payload(k) == IF k \in {"toolEnd", "resultStart", "resultEnd", "turnEnd", "agentEnd"} THEN "full" ELSE "none"
+Payload(k) == IF k \in {"toolStart", "toolUpdate", "toolEnd", "resultStart", "resultEnd", "turnEnd", "agentEnd"} THEN "full" ELSE "none"
 Raw(k) == [kind |-> k, body |-> Payload(k),
            image |-> (image /\ k = "resultEnd"), identity |-> "original",
            text |-> "original", error |-> outcome, usage |-> "original"]

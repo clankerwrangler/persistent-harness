@@ -1,10 +1,12 @@
-import { writeFile } from "node:fs/promises";
+import assert from "node:assert/strict";
+import { readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { slimFixture, until } from "./slim-stream.mjs";
 
 /** Real stock worker, loopback transport, and a held persistent Python call. */
 export async function modelSwitchFixture(t, { maxRequests = 3, readNamespaceOnContinuation = true, holdContinuationResponse = false } = {}) {
-  let releasePath, continuationReleased = false;
+  let releasePath, readyPath, countPath, continuationReleased = false;
+  const heldCallId = "held-python|fc_held-python";
   const call = (id, code, native) => ({ type: "function_call", id: `fc_${id}`, call_id: id,
     name: "ipython", arguments: JSON.stringify({ code }), ...(native ? { async: true } : {}) });
   const complete = (f, response, output) => {
@@ -14,7 +16,11 @@ export async function modelSwitchFixture(t, { maxRequests = 3, readNamespaceOnCo
   const f = await slimFixture(t, "model-switch", ({ response, index, send, item }) => {
     if (index === 1) {
       const code = `import os, time
+from pathlib import Path
+counter = Path(${JSON.stringify(countPath)})
+counter.write_text(str(int(counter.read_text()) + 1) if counter.exists() else "1")
 persistent_probe = 41
+Path(${JSON.stringify(readyPath)}).write_text("HOLD_STARTED " + str(persistent_probe))
 print("HOLD_STARTED", flush=True)
 while not os.path.exists(${JSON.stringify(releasePath)}): time.sleep(0.05)
 print("HOLD_DONE", persistent_probe)`;
@@ -37,12 +43,24 @@ print("HOLD_DONE", persistent_probe)`;
     }
   }, { models: ["gpt-6-astra", "gpt-6.1-sol"], maxRequests });
   releasePath = path.join(f.cwd, "release-tool");
+  readyPath = path.join(f.cwd, "held-tool-ready"); countPath = path.join(f.cwd, "held-execute-count");
   t.after(() => writeFile(releasePath, "release").catch(() => {}));
   const inference = () => f.client.request("get_session_inference", { sessionId: f.sessionId });
   return { ...f, inference,
     async start() {
       await f.client.request("submit_input", { sessionId: f.sessionId, message: "Test model switching with retained Python", behavior: "auto", clientRequestId: "model-switch-input" });
-      await until(() => f.rawEvents.some(e => e.type === "tool_execution_update" && JSON.stringify(e.partialResult).includes("HOLD_STARTED")), "Python reaches its held execution");
+      // The tool owns readiness; tool_start precedes execution, and compact RPC
+      // deliberately carries no partial-result body.
+      const ready = await until(() => readFile(readyPath, "utf8").catch(error => {
+        if (error.code === "ENOENT") return false;
+        throw error;
+      }), "Python reaches its held execution");
+      assert.equal(ready, "HOLD_STARTED 41");
+      assert.equal(await readFile(countPath, "utf8"), "1");
+      await until(() => f.rawEvents.some(e => e.type === "tool_execution_start" && e.toolCallId === heldCallId), "matching compact tool start reaches RPC");
+      assert.equal(f.rawEvents.filter(e => e.type === "tool_execution_start" && e.toolCallId === heldCallId).length, 1);
+      assert.equal(f.rawEvents.some(e => e.type === "tool_execution_end" && e.toolCallId === heldCallId), false);
+      assert.equal((await f.entries()).some(entry => entry.message?.role === "toolResult" && entry.message.toolCallId === heldCallId), false);
     },
     finishStream() {
       const response = f.responses[0];
@@ -59,7 +77,16 @@ print("HOLD_DONE", persistent_probe)`;
       }
     },
     async releaseTool() { await writeFile(releasePath, "release"); },
-    async toolFinished() { await until(() => f.rawEvents.some(e => e.type === "message_end" && e.message?.role === "toolResult" && e.message.toolCallId.startsWith("held-python")), "held tool finishes"); },
+    async toolFinished() {
+      await until(() => f.rawEvents.some(e => e.type === "message_end" && e.message?.role === "toolResult" && e.message.toolCallId === heldCallId), "held tool finishes");
+      const results = (await f.entries()).filter(entry => entry.message?.role === "toolResult" && entry.message.toolCallId === heldCallId);
+      assert.equal(results.length, 1); assert.equal(results[0].message.isError, false);
+      assert.match(JSON.stringify(results[0].message.content), /HOLD_DONE 41/);
+      assert.equal(await readFile(countPath, "utf8"), "1", "The real held Python effect runs once");
+      const ends = f.rawEvents.filter(e => e.type === "tool_execution_end" && e.toolCallId === heldCallId);
+      assert.equal(ends.length, 1); assert.equal(ends[0].isError, false);
+      assert.equal("result" in ends[0], false, "Canonical history owns the result body");
+    },
     async settled() { await until(() => f.events.some(e => e.type === "agent_settled"), "model-switch settlement"); },
   };
 }
