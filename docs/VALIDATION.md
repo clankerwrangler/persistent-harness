@@ -440,6 +440,16 @@ appends during registration, complete-history ambiguity, and offline reporting;
 a real stock-worker test requires native, legacy, and custom historical pending
 receipts to complete through supervisor reconciliation without reinjection.
 
+`VisibleInputProofs` checks operation-scoped physical validation, complete inactive
+candidate inventory, render-only page evidence, newly admitted queue IDs, and
+metadata-only canonical-ID UI matching. Its authority, inventory, scope, pending,
+and modern-page fault configurations must fail. Reader byte counters compare warm
+pages and appends against full/default reads, preserve page/cursor parity, and
+reject relevant legacy/custom rewrites. Held supervisor reads verify fresh
+reconciliation of late proven and ambiguous inputs without duplicate submission.
+Image-bearing canonical-ID pages add no payload reads; delivery/retry and image
+retrieval retain physical target checks. Full index receipt verification is unchanged.
+
 `PendingInputReads` checks ordered receipt/payload snapshots, one-query pending
 reads, payload-free existence and no-op clear, and current queue selection after
 an asynchronous boundary. Its `NPlusOne`, `EagerClear`, and `StaleQueue` controls

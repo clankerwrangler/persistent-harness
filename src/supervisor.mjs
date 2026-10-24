@@ -706,7 +706,8 @@ export class HarnessSupervisor {
 
   async #recordInputDelivery(state, params, input) {
     const session = this.store.getSession(state.sessionId);
-    const transcript = await this.transcriptReader.read({ sessionFile: session.sessionFile, sessionId: state.sessionId });
+    const transcript = await this.transcriptReader.read({ sessionFile: session.sessionFile, sessionId: state.sessionId,
+      inputProofIds: [params.inputId] });
     const proof = transcript.inputDeliveries?.[params.inputId];
     if (!proof || proof.entryId !== params.entryId || Date.parse(proof.deliveredAt) !== Date.parse(params.deliveredAt)) {
       throw new Error("input delivery is not present in the canonical transcript");
@@ -957,7 +958,7 @@ export class HarnessSupervisor {
       if (!session || session.lifecycle === "deleted" || !session.sessionFile) throw new Error("session does not have a canonical Pi transcript");
       const { inputIds: _inputIds, inputEntries: _inputEntries, inputDeliveries: _inputDeliveries, inputAssociationStates: _inputAssociationStates, familyMessages = {}, ...visible } = await this.transcriptReader.read({ sessionFile: session.sessionFile,
         sessionId: session.sessionId, sanitizePresentation: session.kind === "root" && session.depth === 0,
-        maxMessages: params.limit ?? 100, before: params.before ?? null, publicView: true,
+        maxMessages: params.limit ?? 100, before: params.before ?? null, publicView: true, inputProofIds: "page",
         allowToolImages: session.kind === "root" && session.depth === 0 });
       if (params.before) return visible;
       const actor = this.#actors.get(session.sessionId);
@@ -1651,7 +1652,7 @@ export class HarnessSupervisor {
       const session = this.store.getSession(sessionId);
       if (!session?.sessionFile) return;
       const transcript = await this.transcriptReader.read({ sessionFile: session.sessionFile,
-        sessionId, maxMessages: 512, maxBytes: 64 * 1024,
+        sessionId, maxMessages: 512, maxBytes: 64 * 1024, inputProofIds: runs.map(run => run.inputId),
         sanitizePresentation: session.kind === "root" && session.depth === 0 });
       if (!settled()) return;
       for (const run of runs) {
@@ -2112,7 +2113,8 @@ export class HarnessSupervisor {
   async #publishFamilyAdmission(sessionId, messageId) {
     const session = this.store.getSession(sessionId);
     if (!session?.sessionFile || session.lifecycle === "deleted" || this.store.isSessionDeleting(sessionId)) return;
-    const transcript = await this.transcriptReader.read({ sessionFile: session.sessionFile, sessionId });
+    const transcript = await this.transcriptReader.read({ sessionFile: session.sessionFile, sessionId,
+      inputProofIds: [], familyMessageId: messageId });
     const canonical = transcript.familyMessages?.[messageId];
     const route = this.store.getMessage(messageId);
     const message = canonical?.delivery?.state === "delivered" ? projectAgentMessageHistoryMessage(canonical)
@@ -2222,9 +2224,15 @@ export class HarnessSupervisor {
       this.#cancelIdlePreparation(sessionId, record);
       const session = this.store.getSession(sessionId);
       if (!session?.sessionFile) throw new Error("session does not have a canonical Pi transcript");
-      let transcript = await this.transcriptReader.read({ sessionFile: session.sessionFile, sessionId });
-      let recordedInputIds = new Set(transcript.inputIds ?? []);
-      let associations = transcript.inputAssociationStates ?? {};
+      let transcript, recordedInputIds, associations, reconciledIds;
+      const reconcile = async ids => {
+        const scope = new Set(ids);
+        const snapshot = await this.transcriptReader.read({ sessionFile: session.sessionFile, sessionId, inputProofIds: [...scope] });
+        transcript = snapshot; reconciledIds = scope;
+        recordedInputIds = new Set(snapshot.inputIds ?? []);
+        associations = snapshot.inputAssociationStates ?? {};
+      };
+      await reconcile(this.store.listPendingActorInputs(sessionId).map(input => input.inputId));
       for (const input of this.store.listPendingActorInputs(sessionId)) {
         if (associations[input.inputId] === "unresolved") {
           await this.#log("actor_input_unresolved", { sessionId, inputId: input.inputId });
@@ -2233,9 +2241,16 @@ export class HarnessSupervisor {
       while (this.#actors.get(sessionId) === record && !record.expectedLifecycle && !this.store.isSessionDeleting(sessionId)) {
         const pendingInputs = this.store.listPendingActorInputs(sessionId);
         if (pendingInputs.length === 0) return;
+        if (pendingInputs.some(input => !reconciledIds.has(input.inputId))) {
+          await reconcile(pendingInputs.map(input => input.inputId));
+          continue; // Resample after the awaited read; admission may have expanded its scope again.
+        }
         let progressed = false;
         for (const input of pendingInputs) {
           if (record.expectedLifecycle || this.store.isSessionDeleting(sessionId)) return;
+          // A late command reconciliation can replace the local scope. Resample
+          // rather than treating an ID outside it as proven canonical absence.
+          if (!reconciledIds.has(input.inputId)) { progressed = true; break; }
           // Ambiguous historical incorporation is not permission to submit again.
           if (associations[input.inputId] === "unresolved") continue;
           if (recordedInputIds.has(input.inputId)) {
@@ -2258,9 +2273,7 @@ export class HarnessSupervisor {
             const admitted = this.store.getActorInput(input.inputId, sessionId);
             if (admitted?.state !== "completed" && !(admitted?.state === "accepted" && admitted.acceptedGeneration === record.generation)) {
               // Command preflight can observe new canonical evidence without accepting input.
-              transcript = await this.transcriptReader.read({ sessionFile: session.sessionFile, sessionId });
-              recordedInputIds = new Set(transcript.inputIds ?? []);
-              associations = transcript.inputAssociationStates ?? {};
+              await reconcile([...this.store.listPendingActorInputs(sessionId).map(pending => pending.inputId), input.inputId]);
               if (associations[input.inputId] === "unresolved") {
                 await this.#log("actor_input_unresolved", { sessionId, inputId: input.inputId });
                 continue;

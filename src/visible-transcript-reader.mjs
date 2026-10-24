@@ -2,8 +2,9 @@ import { open, stat as fileStat } from "node:fs/promises";
 import { constants } from "node:fs";
 import { createHash } from "node:crypto";
 import path from "node:path";
+import { isDeepStrictEqual } from "node:util";
 import { MAX_INPUT_REQUEST_BYTES, normalizeInputImages } from "./input-images.mjs";
-import { inputIdForEntry, canonicalUserInputId, cleanHarnessInput, createActorInputAssociation, associateVisibleInput, projectVisibleMessage, assistantMessageParts, sortVisibleHistory } from "./conversation-projection.mjs";
+import { inputIdForEntry, canonicalUserInputId, cleanHarnessInput, createActorInputAssociation, actorInputRenderEvidence, associateVisibleInput, projectVisibleMessage, assistantMessageParts, sortVisibleHistory } from "./conversation-projection.mjs";
 import { sanitizePresentationText } from "./presentation-directive.mjs";
 import { selectIncomingFamilyMessages, projectAgentMessageEntry } from "./agent-message-projection.mjs";
 import { projectProgressEntry } from "./progress-projection.mjs";
@@ -179,11 +180,13 @@ export class VisibleTranscriptReader {
     } finally { await handle.close(); }
   }
 
-  async #readSnapshot({ sessionFile, sessionId, maxMessages = 512, maxBytes = 48 * 1024, sanitizePresentation = false, includeTitleTurn = false, before = null, publicView = false, verifySource = false, historyIndex = false, allowToolImages = false, signal, sourceWatermark = null, ownedAppendBase = null, forceFull = false }) {
+  async #readSnapshot({ inputProofIds = null, familyMessageId = null, sessionFile, sessionId, maxMessages = 512, maxBytes = 48 * 1024, sanitizePresentation = false, includeTitleTurn = false, before = null, publicView = false, verifySource = false, historyIndex = false, allowToolImages = false, signal, sourceWatermark = null, ownedAppendBase = null, forceFull = false }) {
+    // Internal call-site scope, not a protocol/configuration option. Own it across awaits.
+    if (Array.isArray(inputProofIds)) inputProofIds = [...new Set(inputProofIds)];
     const cursor = before === null ? null : parseHistoryCursor(before);
     const filePath = path.resolve(sessionFile);
-    const options = { sessionFile: filePath, sessionId, maxMessages, maxBytes, sanitizePresentation, includeTitleTurn, before, publicView, verifySource, historyIndex, allowToolImages, signal, sourceWatermark, ownedAppendBase, forceFull };
-    const projectionKey = JSON.stringify([sessionId, maxMessages, maxBytes, sanitizePresentation, includeTitleTurn, before, publicView, verifySource, historyIndex, allowToolImages, sourceWatermark, ownedAppendBase, forceFull]);
+    const options = { inputProofIds, familyMessageId, sessionFile: filePath, sessionId, maxMessages, maxBytes, sanitizePresentation, includeTitleTurn, before, publicView, verifySource, historyIndex, allowToolImages, signal, sourceWatermark, ownedAppendBase, forceFull };
+    const projectionKey = JSON.stringify([sessionId, inputProofIds, familyMessageId, maxMessages, maxBytes, sanitizePresentation, includeTitleTurn, before, publicView, verifySource, historyIndex, allowToolImages, sourceWatermark, ownedAppendBase, forceFull]);
     const active = this.#inflight.get(filePath);
     if (active) {
       // Independently owned history requests must never share an abort signal.
@@ -198,7 +201,7 @@ export class VisibleTranscriptReader {
       return trailing;
     }
     const state = { promise: null, trailing: new Map() };
-    state.promise = this.#read(filePath, sessionId, { maxMessages, maxBytes, sanitizePresentation, includeTitleTurn, cursor, publicView, verifySource, historyIndex, allowToolImages, signal, sourceWatermark, ownedAppendBase, forceFull })
+    state.promise = this.#read(filePath, sessionId, { inputProofIds, familyMessageId, maxMessages, maxBytes, sanitizePresentation, includeTitleTurn, cursor, publicView, verifySource, historyIndex, allowToolImages, signal, sourceWatermark, ownedAppendBase, forceFull })
       .catch((error) => { if (!verifySource && error.code !== "history_cursor_stale") this.#records.delete(filePath); throw error; })
       .finally(() => { if (this.#inflight.get(filePath) === state) this.#inflight.delete(filePath); });
     this.#inflight.set(filePath, state);
@@ -217,7 +220,7 @@ export class VisibleTranscriptReader {
     if (!Number.isSafeInteger(maxBytes) || maxBytes < 1 || maxBytes > 64 * 1024 * 1024
       || !Number.isSafeInteger(maxEntries) || maxEntries < 1 || maxEntries > 100_000) throw new Error("context fork snapshot bounds are invalid");
     const filePath = path.resolve(sessionFile);
-    await this.read({ sessionFile: filePath, sessionId });
+    await this.read({ sessionFile: filePath, sessionId, inputProofIds: [] });
     const record = this.#records.get(filePath);
     if (!record) throw new Error("context fork source is unavailable");
     const ids = [...this.#activeEntryIds(record, leafId)].reverse();
@@ -250,7 +253,7 @@ export class VisibleTranscriptReader {
   }
 
   async resolveRetryTurn({ sessionFile, sessionId, assistantId }) {
-    const snapshot = await this.#readSnapshot({ sessionFile, sessionId });
+    const snapshot = await this.#readSnapshot({ sessionFile, sessionId, inputProofIds: [] });
     return this.#retryTurn(snapshot.record, assistantId, snapshot.projection.leafId);
   }
 
@@ -280,12 +283,13 @@ export class VisibleTranscriptReader {
   }
 
   async resolveRetryInput({ sessionFile, sessionId, assistantId }) {
-    const snapshot = await this.#readSnapshot({ sessionFile, sessionId });
+    const snapshot = await this.#readSnapshot({ sessionFile, sessionId, inputProofIds: [] });
     const turn = this.#retryTurn(snapshot.record, assistantId, snapshot.projection.leafId);
     const entry = await this.#readCanonicalEntry(snapshot.record, turn.userId);
     const inputId = inputIdForEntry(entry);
     const inputReceipt = inputId ? this.inputReceiptReader?.(inputId, sessionId) : null;
-    return { ...turn, input: canonicalRetryInput(entry, { sessionId, inputReceipt, inputAssociation: snapshot.associations.get(inputId) }) };
+    const associations = await this.#inputAssociations(snapshot.record, undefined, undefined, { inputIds: new Set([inputId]), physical: true });
+    return { ...turn, input: canonicalRetryInput(entry, { sessionId, inputReceipt, inputAssociation: associations.get(inputId) }) };
   }
 
   async #readCanonicalEntry(record, entryId, { handle: sharedHandle, signal } = {}) {
@@ -314,7 +318,7 @@ export class VisibleTranscriptReader {
 
   async readImage({ sessionFile, sessionId, entryId, index, sanitizePresentation = false, allowToolImages = false }) {
     const filePath = path.resolve(sessionFile);
-    await this.read({ sessionFile: filePath, sessionId, sanitizePresentation });
+    await this.read({ sessionFile: filePath, sessionId, sanitizePresentation, inputProofIds: [] });
     const record = this.#records.get(filePath);
     const selected = record?.entries.get(entryId);
     const reference = selected?.item?.kind === "message" ? selected.item.message.images?.[index]?.ref : undefined;
@@ -334,12 +338,12 @@ export class VisibleTranscriptReader {
     return image;
   }
 
-  async #inputAssociations(record, handle, signal, dependencies = null) {
+  async #inputAssociations(record, handle, signal, { dependencies = null, inputIds = null, provisional = false, physical = false } = {}) {
     const associations = new Map();
-    if (!this.inputReceiptReader && !dependencies) return associations;
+    if ((!this.inputReceiptReader && !dependencies) || inputIds?.size === 0) return associations;
     const groups = new Map();
     for (const entry of record.entries.values()) {
-      const candidate = entry.inputCandidate; if (!candidate) continue;
+      const candidate = entry.inputCandidate; if (!candidate || inputIds && !inputIds.has(candidate.inputId)) continue;
       const group = groups.get(candidate.inputId) ?? [];
       group.push(entry); groups.set(candidate.inputId, group);
     }
@@ -355,10 +359,14 @@ export class VisibleTranscriptReader {
         if (candidate.kind !== "user-id" && entry.source.length > MAX_INPUT_REQUEST_BYTES) {
           verifier.incomplete({ entryId: candidate.entry.id, kind: candidate.kind }); continue;
         }
-        // Canonical user identity neither rereads nor retains expanded payloads.
-        const canonical = candidate.kind === "user-id" ? candidate.entry
-          : await this.#readCanonicalEntry(record, candidate.entry.id, { handle, signal });
-        verifier.add(canonical);
+        if (provisional) verifier.addRenderEvidence(candidate.evidence);
+        else {
+          // Full/index identity matching stays metadata-only for canonical user IDs.
+          // Explicit delivery/retry IDs must also validate canonical-ID physical spans.
+          const canonical = candidate.kind === "user-id" && !physical ? candidate.entry
+            : await this.#readCanonicalEntry(record, candidate.entry.id, { handle, signal });
+          verifier.add(canonical);
+        }
       }
       associations.set(inputId, verifier.result());
     }
@@ -415,7 +423,13 @@ export class VisibleTranscriptReader {
       }
       if (!record.headerValidated) throw new Error(`canonical Pi transcript header is incomplete: ${filePath}`);
       const receiptDependencies = bounds.historyIndex ? [] : null;
-      const associations = await this.#inputAssociations(record, handle, bounds.signal, receiptDependencies);
+      const pageScoped = bounds.inputProofIds === "page";
+      const selectedInputIds = Array.isArray(bounds.inputProofIds) ? new Set(bounds.inputProofIds) : null;
+      const associations = await this.#inputAssociations(record, handle, bounds.signal,
+        { dependencies: receiptDependencies, inputIds: selectedInputIds, provisional: pageScoped, physical: selectedInputIds !== null });
+      if (bounds.familyMessageId) for (const [id, entry] of record.entries) {
+        if (entry.item?.familyMessageId === bounds.familyMessageId) await this.#readCanonicalEntry(record, id, { handle, signal: bounds.signal });
+      }
       const visible = this.#visibleBranch(record, bounds, associations);
       const title = bounds.includeTitleTurn
         ? { titleTurn: rootTitleExcerpt(firstCompletedTitleTurn(visible.filter((item) => item.kind === "message").map((item) => item.message))),
@@ -432,6 +446,23 @@ export class VisibleTranscriptReader {
       }
       const page = bounds.historyIndex ? { ...historyProjection(visible), truncated: false } : boundVisibleHistory(visible.slice(0, end), bounds);
       if (end > 0 && page.history.length === 0) throw historyError("history_page_too_small", "history row exceeds the page byte limit");
+      if (pageScoped) {
+        // Include a byte-rejected boundary row and the cursor anchor: their exact
+        // association can change page membership, byte accounting, and identity.
+        const boundary = page.truncated && page.history.length < bounds.maxMessages ? 1 : 0;
+        const relevant = visible.slice(Math.max(0, end - page.history.length - boundary), end + (bounds.cursor ? 1 : 0));
+        const ids = new Set(relevant.map(item => item.kind === "message"
+          ? record.entries.get(item.message.entryId ?? item.message.id)?.inputCandidate?.inputId : null).filter(Boolean));
+        // UI canonical IDs keep their original metadata-only matching contract;
+        // legacy/custom candidates still validate physical spans for every relevant ID.
+        const verified = await this.#inputAssociations(record, handle, bounds.signal, { inputIds: ids });
+        for (const id of ids) if (!isDeepStrictEqual(associations.get(id), verified.get(id))) {
+          throw new Error("canonical input association changed during page verification");
+        }
+        // A page is rendering only. In particular, metadata-only canonical-ID
+        // associations must never escape as physical delivery evidence.
+        associations.clear();
+      }
       const hasMore = page.truncated;
       const historyPage = { hasMore, nextCursor: hasMore ? historyCursor(record, page.history[0].id) : null, branchId: record.branchId };
       const proven = [...associations].filter(([, result]) => result.state === "proven");
@@ -527,6 +558,7 @@ export class VisibleTranscriptReader {
     const candidateId = typeof inputId === "string" && inputId && inputId.length <= 128 ? inputId : null;
     const authoritativeUser = Boolean(canonicalUserInputId(entry));
     const inputCandidate = candidateId ? { inputId: candidateId,
+      evidence: authoritativeUser || source.length <= MAX_INPUT_REQUEST_BYTES ? actorInputRenderEvidence(entry) : null,
       kind: authoritativeUser ? "user-id" : entry.type === "custom_message" ? "custom" : "legacy-marker",
       entry: { id: entry.id, type: entry.type, timestamp: entry.timestamp,
         ...(authoritativeUser ? { message: { role: "user", id: candidateId } } : {}) } } : null;
