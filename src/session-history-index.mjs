@@ -433,7 +433,7 @@ export class SessionHistoryIndex {
           maxMessages: UNBOUNDED_MESSAGES,
           maxBytes: UNBOUNDED_BYTES,
           sanitizePresentation: session.sanitizePresentation,
-          verifySource: true, historyIndex: true, signal, sourceWatermark, ownedAppendBase, forceFull,
+          verifySource: true, historyIndex: true, familyDeliveryOnly: true, signal, sourceWatermark, ownedAppendBase, forceFull,
         });
         const after = fingerprint(await stat(session.sessionFile, { bigint: true }));
         if (!sameFingerprint(before, after)) {

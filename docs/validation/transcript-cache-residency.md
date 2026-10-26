@@ -137,6 +137,97 @@ Small reproduction scripts, exact JSON samples, model logs, and private test
 receipts are retained at
 `/workspace/handoffs/supervisor-transcript-cache-20261026/`.
 
+
+## Session-open projection scope
+
+The session-open correction follows the cache change at `6b144a24`. Compact
+payload retention exposed an unbounded operation: every page hydrated every
+historical incoming family body to populate `familyMessages`, although UI
+reconciliation consumes only delivery state. Long histories could spend seconds
+reading those spans on every open and could exhaust the 256 MiB fixture heap.
+
+`get_visible_messages` now requests internal delivery-only family evidence from
+active-branch compact metadata. Its bounded page still hydrates selected payloads.
+The existing `familyMessageId` admission read physically validates matching source
+entries and returns only that family's complete canonical row, reusing the verified
+payload when hydration needs it. Default reads without an ID retain complete
+family bodies. Internal title, input delivery, index, branch, image, and retry
+consumers that discard the family map also request delivery-only evidence. This
+option is not exposed through the protocol or settings.
+
+Incoming context metadata derives `entryId` from its canonical source ID and
+`delivery.deliveredAt` from its render time instead of retaining duplicate strings.
+Expanded rows are structurally equal to the original projection. The 64 MiB
+aggregate admission bound and every source, receipt, cursor, and watermark guard
+remain unchanged. Out-of-page metadata evidence is for rendering; selected spans
+and explicit admission keep physical verification.
+
+Before implementation, `SessionOpenProjection` checked delivery-only, full, and
+single-family requests, compact-field reconstruction, page hydration scope,
+source/cursor fences, and cache ownership. TLC generated **251 states**, found
+**187 distinct states**, and reached depth **7**, with no error. Eight fault
+controls fail their intended invariants with exit 12. This scoped model abstracts
+payloads and filesystem operations; the existing cache/hydration models remain.
+
+The focused gate passes **116 tests**, zero failures or skips, across the same
+nine files listed in [Focused integration](#focused-integration). The new
+ownership regression fails on `6b144a24` with **1,010,422 historical bytes** read
+for an assistant-only warm page; the correction reads **0 bytes**. It also checks
+complete default output, selected older-page hydration, single-family physical
+scope, rewritten-span rejection, and in-flight isolation between result scopes.
+The supervisor check requires delivery-only UI reads.
+
+### Actual open-call measurements
+
+`test/benchmarks/session-open.mjs` drives real `HarnessClient` requests through an
+isolated supervisor, without starting actors. It performs an initial read, a
+passive subscription and second read, then the reopened pair. Its 360,000 ms
+client deadline matches the existing WebUI launcher; no runtime deadline changes.
+Each comparison uses separate processes with a 256 MiB fixture heap and synthetic
+public data. Both fixtures have **70,050 entries / 14,010 incoming family rows**,
+long ordinary/family text, and hidden tool results. The larger fixture includes
+210-character peer labels and 23,500-unit tool payloads.
+
+| Fixture | `09d8c883` | Corrected |
+| --- | ---: | ---: |
+| 157,153,705 B: initial RPC | 7,544 ms | 3,534 ms |
+| Same: second/reopened RPCs | 147–157 ms | 123–197 ms |
+| Same: warm canonical reads | 0 B / 0 entries | 83,799 B / 9 entries |
+| Same: admitted accounted bytes | Unbounded legacy owner | 59,632,976 B |
+| 809,484,949 B: initial RPC | 7,780 ms | 6,195 ms |
+| Same: second/reopened RPCs | 203–218 ms | 96–146 ms |
+| Same: warm canonical reads | 0 B / 0 entries | 76,048 B / 8 entries |
+| Same: admitted accounted bytes | Unbounded legacy owner | 65,096,876 B |
+
+Unmodified `6b144a24` exhausts the 256 MiB fixture heap on the smaller long-family
+fixture. Corrected warm reads hydrate only selected spans, not the complete
+history. Both fixtures remain admitted below 67,108,864 accounted bytes. Natural
+corrected RSS samples span 181–265 MB, including transient work; no explicit GC
+or live process collection is used. Cold file scanning remains proportional to
+canonical source bytes. Timing samples are not universal latency guarantees.
+
+Complete public pages are independently `deepStrictEqual` across the baseline
+and correction. Stable recursive-key digests match for every initial, subscribed,
+and reopened result. Raw JSON property insertion order differs after metadata
+reconstruction; row order, text, delivery fields, and pagination are unchanged.
+
+To run the benchmark against a source checkout, use private fixture directories:
+
+```sh
+PRIVATE=$(mktemp -d)
+mkdir "$PRIVATE/home" "$PRIVATE/agent"
+HOME="$PRIVATE/home" PI_CODING_AGENT_DIR="$PRIVATE/agent" \
+  PI_HARNESS_PRESENTATION_NAMESPACE=harness \
+  node --max-old-space-size=256 test/benchmarks/session-open.mjs \
+  "$PWD" family-long "$PRIVATE/public-page.json"
+rm -rf "$PRIVATE"
+```
+
+Use `family-representative` for the larger tool/label axis. Model logs, complete
+public-page comparisons, benchmark samples, and test receipts are retained at
+`/workspace/handoffs/session-open-latency-20261026/source/`. No production source,
+settings, limits, service, or activation changes are part of this correction.
+
 ## Activation boundary
 
 The observed live cache owner is the main supervisor Node isolate (PID 7,

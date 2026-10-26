@@ -6,7 +6,7 @@ import path from "node:path";
 import test from "node:test";
 import { VisibleTranscriptReader, boundVisibleHistory } from "../src/visible-transcript-reader.mjs";
 import { projectVisibleMessage, assistantMessageParts, sortVisibleHistory } from "../src/conversation-projection.mjs";
-import { projectAgentMessageEntry, selectIncomingFamilyMessages, CHILD_CREATION_ENTRY_TYPE } from "../src/agent-message-projection.mjs";
+import { projectAgentMessageEntry, selectIncomingFamilyMessages, CHILD_CREATION_ENTRY_TYPE, AGENT_MESSAGE_ENTRY_TYPE, INCOMING_AGENT_MESSAGE_TYPE } from "../src/agent-message-projection.mjs";
 import { projectProgressEntry } from "../src/progress-projection.mjs";
 
 const PNG = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=";
@@ -218,4 +218,62 @@ test("eviction and clear during selected-span hydration preserve the leased resu
     assert.deepEqual(latest.messages.map(m => m.id), ["new"]);
     assert.equal(leased.messages[0].text, "old".repeat(2000), "refresh does not mutate returned output");
   } finally { release(); fs.open = original; syncBuiltinESMExports(); }
+});
+
+
+function incoming(id, parentId, familyMessageId, body) {
+  return { type: "custom_message", customType: INCOMING_AGENT_MESSAGE_TYPE, id, parentId,
+    timestamp: "2026-01-01T00:00:00Z", content: `Public reviewer:\n${body}`, display: true,
+    details: { messageId: familyMessageId, senderId: "reviewer", senderName: "Public reviewer", relationship: "sibling", body } };
+}
+
+test("delivery-only family evidence keeps historical bodies cold without changing pages or full reads", async t => {
+  const f = await fixture(t), body = 'Public synthetic \\"😀\n'.repeat(150), entries = [];
+  entries.push(incoming("abandoned", null, "inactive", body));
+  for (let i = 0; i < 120; i++) entries.push(incoming(`family-${i}`, i ? `family-${i-1}` : null, `route-${i}`, body));
+  const receipt = { type: "custom", customType: AGENT_MESSAGE_ENTRY_TYPE, id: "receipt", parentId: entries.at(-1).id,
+    timestamp: "2026-01-01T00:00:00Z", data: { messageId: "unadmitted", direction: "from", peerId: "reviewer",
+      peerName: "Public reviewer", relationship: "sibling", body } };
+  entries.push(receipt, message("latest", "receipt", "assistant", "Latest public answer"));
+  await f.put(entries);
+  const reader = new VisibleTranscriptReader(), options = { ...f.args, publicView: true, inputProofIds: "page", maxMessages: 1 };
+  await reader.read({ ...options, familyDeliveryOnly: true });
+  const scoped = await bytesFor(f.file, () => reader.read({ ...options, familyDeliveryOnly: true }));
+  assert.equal(scoped.bytes, 0, "latest assistant-only page must not hydrate any historical family payload");
+  assert.equal(Object.keys(scoped.value.familyMessages).length, 120);
+  assert.equal(scoped.value.familyMessages.inactive, undefined);
+  assert.equal(scoped.value.familyMessages.unadmitted, undefined);
+  for (const row of Object.values(scoped.value.familyMessages)) assert.deepEqual(row, {
+    delivery: { state: "delivered", deliveredAt: "2026-01-01T00:00:00.000Z" },
+  });
+  const full = await bytesFor(f.file, () => reader.read(options));
+  assert(full.bytes > 120 * Buffer.byteLength(body), "the default read still returns every requested full family body");
+  const expected = reference(entries.slice(1), options);
+  for (let i = 0; i < 120; i++) assert.deepEqual(full.value.familyMessages[`route-${i}`], expected[i]);
+  for (const field of ["messages", "history", "historyPage", "truncated", "inputIds", "inputEntries", "inputDeliveries"])
+    assert.deepEqual(scoped.value[field], full.value[field]);
+  const targeted = await bytesFor(f.file, () => reader.read({ ...options, familyMessageId: "route-0" }));
+  assert.deepEqual(Object.keys(targeted.value.familyMessages), ["route-0"]);
+  assert.deepEqual(targeted.value.familyMessages["route-0"], expected[0]);
+  assert.equal(targeted.bytes, Buffer.byteLength(JSON.stringify(entries[1])), "explicit family admission validates and hydrates only its requested span");
+  const before = scoped.value.historyPage.nextCursor;
+  const page = await bytesFor(f.file, () => reader.read({ ...options, before, familyDeliveryOnly: true }));
+  assert.deepEqual(page.value.history, [expected[119]]);
+  assert.equal(page.bytes, Buffer.byteLength(JSON.stringify(entries[120])), "an older family page hydrates only its selected source span");
+  // In-flight keys must not coalesce delivery-only and full result contracts.
+  const [limited, complete] = await Promise.all([
+    reader.read({ ...options, familyDeliveryOnly: true }), reader.read(options),
+  ]);
+  assert.equal(limited.familyMessages["route-0"].body, undefined);
+  assert.equal(complete.familyMessages["route-0"].body, body);
+  // Metadata-only rendering is not a whole-source audit. Selected payloads and
+  // explicit family admission keep the existing physical source verification.
+  const source = await readFile(f.file, "utf8");
+  await writeFile(f.file, source.replaceAll("Public synthetic", "Edited synthetic"));
+  assert.equal((await reader.read({ ...options, familyDeliveryOnly: true })).messages[0].text, "Latest public answer");
+  const physicalReader = new VisibleTranscriptReader();
+  await writeFile(f.file, source); await physicalReader.read({ ...options, familyDeliveryOnly: true });
+  await writeFile(f.file, source.replaceAll("Public synthetic", "Edited synthetic"));
+  await assert.rejects(reader.read({ ...options, familyDeliveryOnly: true, before }), /canonical input source changed/);
+  await assert.rejects(physicalReader.read({ ...options, familyDeliveryOnly: true, familyMessageId: "route-0" }), /canonical input source changed/);
 });
