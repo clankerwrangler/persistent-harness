@@ -54,6 +54,35 @@ These are same-user local processes, not a multi-tenant security boundary. The P
 
 Root scratch ownership is attached to the existing root session row, not to actor generations or shared family labels. Canonical ancestry supplies descendant paths. Root tombstoning and pending cleanup intent share the store transaction; existing process ownership and background-completion monitoring gate later reclamation. Restart preserves the tombstone and retries cleanup, never the deleted actor's input. See [Root session scratch](OPERATIONS.md#root-session-scratch) for bounds and recovery.
 
+## Automatic Python cold residency
+
+Each existing `PythonKernel` owns one optional pressure-maintenance timer,
+independent of provider/actor activity. Its 30-second cadence survives small
+ordinary cells; execution and scheduled/active checkpoints, host calls and
+close pause or cancel advice for priority. A 100 ms safe dwell follows activity.
+Only bounded mapping metadata can survive a pause, with process/epoch reply
+fencing and fresh ownership, lock and hot-reference checks before each batch.
+The existing FIFO owns at most one batch. Actor Node reclamation is unchanged.
+
+On supported Linux kernels, private anonymous mappings can receive `MADV_COLD`,
+then `MADV_PAGEOUT` after a one-second reference-observation interval. The helper
+uses cache-aware RAM/high-threshold estimates and swap room, never swap as RAM
+credit. Normal cells choose no tool, script or memory budget. Work bounds are
+1 MiB per syscall, 4 MiB/10 ms cooperative batches, at most 1 GiB per advice phase,
+256 mapping descriptors and 512 KiB per metadata scan. A syscall can exceed the
+cooperative time target and cannot be preempted. Hot, locked, changed, oversized,
+unsupported or unknown ranges/conditions are skipped; normal execution continues.
+
+The private additive ready field `coldResidencyVersion=1` gates this optional
+control path and resets with each process. Legacy/unknown peers receive no cold
+command. The existing actor-scoped `kernel.status` exposes optional version-1
+`coldMemory` metadata through a fixed numeric/state projection; it does not collect
+namespace values, names, addresses or another kernel's state. The operation changes neither namespace generation nor checkpoints,
+pointers, aliases or object state. Process swap is cold residency, not durable
+restart recovery or whole-process graph release. RSS reduction can leave physical
+pages in reclaimable swap cache; it is not an equal physical-memory saving or an
+OOM guarantee. See [verified boundaries and measurements](validation/kernel-cold-residency.md).
+
 ## Python namespace checkpoints
 
 Each eligible top-level binding keeps its own dill serialization, payload file,

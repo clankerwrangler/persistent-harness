@@ -36,6 +36,26 @@ const MIME_TYPES = new Map([
   [".pdf", "application/pdf"],
 ]);
 
+const COLD_MEMORY_STATES = new Set(["none", "deferred", "cancelled", "mark", "waiting", "pageout", "complete",
+  "small", "hot", "no-swap", "no-pressure", "unsupported", "unreclaimable", "unavailable"]);
+function coldMemoryStatus(kernel) {
+  if (!kernel?.isRunning) return undefined;
+  try {
+    const value = kernel.coldMemoryStats;
+    if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+    const read = key => Object.getOwnPropertyDescriptor(value, key)?.value;
+    if (read("version") !== 1) return undefined;
+    const state = read("state");
+    const result = { version: 1, state: COLD_MEMORY_STATES.has(state) ? state : "unavailable" };
+    for (const key of ["calls", "markedBytes", "pageoutBytes", "durationNs", "rssBefore", "rssAfter", "swapBefore", "swapAfter",
+      "adviceDurationNs", "maxAdviceDurationNs", "totalDurationNs", "maxStepDurationNs"]) {
+      const number = read(key);
+      if (Number.isSafeInteger(number) && number >= 0) result[key] = number;
+    }
+    return result;
+  } catch { return undefined; }
+}
+
 function requireRecord(value, context) {
   if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error(`${context} must be an object`);
   return value;
@@ -976,7 +996,9 @@ export function createHostHandlers({ cwd, scratch = null, getClient, getContext 
 
     "kernel.status"() {
       const kernel = getKernel();
-      return { running: Boolean(kernel?.isRunning), busy: Boolean(kernel?.isBusy), restore: getKernelRestore() ?? null };
+      const coldMemory = coldMemoryStatus(kernel);
+      return { running: Boolean(kernel?.isRunning), busy: Boolean(kernel?.isBusy), restore: getKernelRestore() ?? null,
+        ...(coldMemory ? { coldMemory } : {}) };
     },
 
     "kernel.restart"() {

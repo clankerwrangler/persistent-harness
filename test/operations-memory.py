@@ -219,6 +219,23 @@ class Accounting(unittest.TestCase):
         self.assertEqual(host_calls, [("operations.status", {}), ("operations.diagnose", {}),
                                      ("operations.usage", {"windowMinutes": 5}), ("operations.events", {"limit": 8})])
 
+    def test_packaged_operations_uses_shipped_runtime_without_repository_paths(self):
+        import shutil
+        import subprocess
+        with tempfile.TemporaryDirectory(prefix="operations-package-") as root:
+            root=Path(root)
+            runtime=root/"runtime"
+            runtime.mkdir()
+            for name in ("_persistent_harness.py", "_linux_memory.py"):
+                shutil.copyfile(ROOT/"python-runtime"/name,runtime/name)
+            artifact=root/"artifact"
+            artifact.mkdir()
+            shutil.copytree(ROOT/"skills/operations/src/harness_operations",artifact/"harness_operations",ignore=shutil.ignore_patterns("__pycache__"))
+            result=subprocess.run([sys.executable,"-I","-c", "import sys; sys.path[:0]=sys.argv[1:]; import harness_operations as ops; import _linux_memory; value=ops.memory(); assert value['schema_version']==1; assert _linux_memory.__file__.startswith(sys.argv[1]); print('packaged-operations-ok')",str(runtime),str(artifact)],
+                                  text=True,capture_output=True,timeout=5)
+            self.assertEqual(result.returncode,0,result.stderr)
+            self.assertEqual(result.stdout.strip(),"packaged-operations-ok")
+
 
 if __name__ == "__main__":
     unittest.main()
