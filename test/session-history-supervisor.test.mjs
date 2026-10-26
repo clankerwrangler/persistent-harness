@@ -5,6 +5,7 @@ import path from "node:path";
 import test from "node:test";
 import { setTimeout as sleep } from "node:timers/promises";
 import { HarnessClient, HarnessRequestError } from "../src/client.mjs";
+import { VisibleTranscriptReader } from "../src/visible-transcript-reader.mjs";
 import { SessionHistoryIndex } from "../src/session-history-index.mjs";
 import { HarnessSupervisor } from "./fixtures/isolated-supervisor.mjs";
 
@@ -593,4 +594,47 @@ test("unsafe snapshot open queues selected-source recovery and tombstones remain
   const pending = b.request("session_history", { ...historySearch, refresh: false, query: "edited" }).catch(error => error);
   await entered.promise; supervisor.store.deleteSession("target"); release.resolve();
   assert.equal((await pending).code, "session_history_forbidden");
+});
+
+
+test("the shared supervisor reader preserves UI, indexed citations and refresh under byte-cache bypass", async t => {
+  for (const maxCachedBytes of [undefined, 0]) await t.test(maxCachedBytes === 0 ? "uncached" : "default", async t => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "history-cache-boundary-"));
+    let starts = 0;
+    const supervisor = new HarnessSupervisor({ socketPath: path.join(root, "run", "supervisor.sock"),
+      databasePath: path.join(root, "state", "harness.sqlite"), pidPath: path.join(root, "run", "supervisor.pid"),
+      ...(maxCachedBytes === undefined ? {} : { transcriptReader: new VisibleTranscriptReader({ maxCachedBytes }) }),
+      actorFactory: () => { starts += 1; throw new Error("must not revive actors"); }, actorInactivityMs: 0 });
+    await supervisor.start();
+    t.after(async () => { await supervisor.stop(); await rm(root, { recursive: true, force: true }); });
+    const file = path.join(root, "past.jsonl"), observerFile = path.join(root, "observer.jsonl");
+    const frames = [
+      { type: "session", version: 3, id: "past" },
+      { type: "message", id: "question", parentId: null, timestamp: "2026-01-01T00:00:00Z",
+        message: { role: "user", content: [{ type: "text", text: "cobalt narwhal " + "Unicode😀\\\"".repeat(400) }] } },
+      { type: "message", id: "answer", parentId: "question", timestamp: "2026-01-01T00:00:01Z",
+        message: { role: "assistant", content: [{ type: "text", text: "Canonical answer " + "details ".repeat(500) }] } },
+    ];
+    await writeFile(file, frames.map(JSON.stringify).join("\n") + "\n");
+    await writeFile(observerFile, JSON.stringify({ type: "session", id: "observer", version: 3 }) + "\n");
+    for (const [sessionId, sessionFile] of [["past", file], ["observer", observerFile]]) supervisor.store.createRoot({
+      sessionId, sessionFile, cwd: root, repositoryRoot: null, name: sessionId, actorToken: `token-${sessionId}`, launch }, 1);
+    const actor = new HarnessClient({ socketPath: supervisor.socketPath, heartbeatMs: 0 });
+    await actor.start({ registrationType: "register_actor", sessionId: "observer", sessionFile: observerFile,
+      cwd: root, repositoryRoot: null, actorToken: "token-observer", actorGeneration: 1 }); t.after(() => actor.stop());
+    const browser = new HarnessClient({ socketPath: supervisor.socketPath, heartbeatMs: 0 });
+    await browser.start({ registrationType: "register_client", clientInstanceId: "cache-ui" }); t.after(() => browser.stop());
+    const visible = await browser.request("get_visible_messages", { sessionId: "past" });
+    assert.equal(visible.messages.at(-1).text, frames[2].message.content[0].text);
+    const query = { operation: "search", refresh: true, query: '"cobalt narwhal"', sessionId: "past", kind: "any",
+      includeDeleted: false, includeCurrent: false, roles: ["user", "assistant"], limit: 8, sort: "relevance", snippetChars: 160 };
+    const found = await actor.request("session_history", query);
+    assert.deepEqual(found.results[0].citation, { sessionId: "past", entryId: "question" });
+    const opened = await actor.request("session_history", { operation: "open", refresh: true, sessionId: "past", entryId: "question",
+      includeDeleted: false, includeCurrent: false, before: 0, after: 1, maxChars: 16000 });
+    assert.deepEqual(opened.messages.map(m => m.text), frames.slice(1).map(e => e.message.content[0].text));
+    supervisor.transcriptReader.clear(file);
+    assert.deepEqual((await actor.request("session_history", query)).results[0].citation, found.results[0].citation);
+    assert.equal(starts, 0);
+  });
 });

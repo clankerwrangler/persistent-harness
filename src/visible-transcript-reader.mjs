@@ -4,7 +4,8 @@ import { createHash } from "node:crypto";
 import path from "node:path";
 import { isDeepStrictEqual } from "node:util";
 import { MAX_INPUT_REQUEST_BYTES, normalizeInputImages } from "./input-images.mjs";
-import { inputIdForEntry, canonicalUserInputId, cleanHarnessInput, createActorInputAssociation, actorInputRenderEvidence, associateVisibleInput, projectVisibleMessage, assistantMessageParts, sortVisibleHistory } from "./conversation-projection.mjs";
+import { inputIdForEntry, canonicalUserInputId, cleanHarnessInput, createActorInputAssociation, actorInputRenderEvidence, associateVisibleInput, projectVisibleMessage, assistantMessageParts } from "./conversation-projection.mjs";
+import { timelineSequence } from "./conversation-birth.mjs";
 import { sanitizePresentationText } from "./presentation-directive.mjs";
 import { selectIncomingFamilyMessages, projectAgentMessageEntry } from "./agent-message-projection.mjs";
 import { projectProgressEntry } from "./progress-projection.mjs";
@@ -16,6 +17,107 @@ const READ_CHUNK_BYTES = 256 * 1024;
 const MAX_JSONL_LINE_BYTES = 256 * 1024 * 1024;
 const utf8 = new TextDecoder("utf-8", { fatal: true });
 const HISTORY_CURSOR_MAX = 2048;
+
+const DEFAULT_CACHE_BYTES = 64 * 1024 * 1024;
+const HASH_BLOCK_ENTRIES = 1024;
+const INLINE_TEXT_UNITS = 256;
+// One cache owner: Map<id, [parent, offset, length, digest ordinal, render, extras]>.
+const PARENT = 0, OFFSET = 1, LENGTH = 2, DIGEST = 3, RENDER = 4, EXTRAS = 5;
+// Render tuples: [kind flags (1=user, 2=assistant, 0=other), time, text, rare metadata?].
+const DEFAULT_PART = 16;
+
+function cacheWeight(value, limit) {
+  const seen = new WeakSet(), buffers = new Set();
+  let bytes = 0, visits = 0;
+  function visit(item, depth) {
+    if (bytes > limit) return;
+    if (++visits > 65_536 || depth > 64) { bytes = limit + 1; return; }
+    if (typeof item === "string") { bytes += 32 + 2 * item.length; return; }
+    if (item === null || typeof item !== "object") { bytes += 8; return; }
+    if (seen.has(item)) return;
+    seen.add(item);
+    if (Buffer.isBuffer(item)) {
+      bytes += 64;
+      if (!buffers.has(item.buffer)) { buffers.add(item.buffer); bytes += item.buffer.byteLength; }
+    } else if (Array.isArray(item)) {
+      bytes += 64 + 16 * item.length;
+      for (const child of item) { visit(child, depth + 1); if (bytes > limit) break; }
+    } else if (Object.getPrototypeOf(item) === Object.prototype || Object.getPrototypeOf(item) === null) {
+      bytes += 64;
+      for (const key of Object.keys(item)) {
+        bytes += 16 + 32 + 2 * key.length;
+        visit(item[key], depth + 1); if (bytes > limit) break;
+      }
+    } else bytes = limit + 1;
+  }
+  visit(value, 0);
+  return Math.min(bytes, limit + 1);
+}
+
+// Detach retained strings from parsed, potentially enormous JSON source strings.
+// UTF-16 round trips preserve even unpaired surrogates (UTF-8 does not).
+function detached(value) {
+  if (typeof value === "string") return Buffer.from(value, "utf16le").toString("utf16le");
+  if (Array.isArray(value)) return value.map(detached);
+  if (value && typeof value === "object") return Object.fromEntries(Object.entries(value).map(([k, v]) => [k, detached(v)]));
+  return value;
+}
+
+// JSON string payload bytes, excluding quotes. Matches well-formed JSON.stringify,
+// including escaping of controls and lone UTF-16 surrogates, without allocating it.
+function jsonTextBytes(text) {
+  let bytes = 0;
+  for (let i = 0; i < text.length; i += 1) {
+    const c = text.charCodeAt(i);
+    if (c === 34 || c === 92) bytes += 2;
+    else if (c < 32) bytes += [8, 9, 10, 12, 13].includes(c) ? 2 : 6;
+    else if (c < 128) bytes += 1;
+    else if (c < 2048) bytes += 2;
+    else if (c >= 0xd800 && c <= 0xdbff && text.charCodeAt(i + 1) >= 0xdc00 && text.charCodeAt(i + 1) <= 0xdfff) { bytes += 4; i += 1; }
+    else bytes += c >= 0xd800 && c <= 0xdfff ? 6 : 3;
+  }
+  return bytes;
+}
+function textDescriptor(text, assistant = false) {
+  if (text.length <= INLINE_TEXT_UNITS) return text;
+  const sanitized = assistant ? sanitizePresentationText(text).text : text;
+  const clean = cleanHarnessInput(text);
+  return [jsonTextBytes(text), Boolean(text), jsonTextBytes(sanitized), Boolean(sanitized), jsonTextBytes(clean), Boolean(clean)];
+}
+function compactRender(item, entryId) {
+  if (!item) return null;
+  const message = item.kind === "message", value = message ? item.message : item;
+  const field = message ? "text" : item.kind === "progress" ? "summary" : "body";
+  const kind = message && value.role === "user" ? 1 : message && value.role === "assistant" ? 2 : 0;
+  const extra = { ...value };
+  delete extra[field]; delete extra.createdAt;
+  if (kind) { delete extra.role; delete extra.status; }
+  if (value.id === entryId) delete extra.id;
+  if (message && !kind) extra.message = true;
+  const row = [kind, value.createdAt === null ? null : Date.parse(value.createdAt), textDescriptor(value[field] ?? "", kind === 2)];
+  if (Object.keys(extra).length) row.push(extra);
+  return row;
+}
+function expandRender(row, id) {
+  if (!row) return null;
+  const kind = row[0] & 15, extra = row[3] ?? {};
+  const createdAt = row[1] === null ? null : new Date(row[1]).toISOString();
+  const text = typeof row[2] === "string" ? row[2] : "";
+  if (kind || extra.message) {
+    const { message: _, ...metadata } = extra;
+    return { kind: "message", message: { id, ...(kind ? { role: kind === 1 ? "user" : "assistant" } : {}), text, createdAt, ...(kind ? { status: "complete" } : {}), ...metadata } };
+  }
+  return { id, ...extra, createdAt, [extra.kind === "progress" ? "summary" : "body"]: text };
+}
+function defaultPart(row, id) {
+  const item = expandRender(row, id);
+  return { ...item.message, id: `${id}-text-0`, contentIndex: 0, entryId: id };
+}
+function sourceFor(record, node) {
+  const ordinal = node[DIGEST], block = record.sourceHashes[Math.floor(ordinal / HASH_BLOCK_ENTRIES)];
+  const start = (ordinal % HASH_BLOCK_ENTRIES) * 32;
+  return { offset: node[OFFSET], length: node[LENGTH], hash: block.toString("hex", start, start + 32) };
+}
 
 function historyError(code, message) { return Object.assign(new Error(message), { code }); }
 function parseHistoryCursor(value) {
@@ -103,7 +205,7 @@ export function boundVisibleMessages(messages, options) {
 function newRecord(filePath, stat, sessionId, verifySource = false) {
   return {
     filePath, sessionId, dev: stat.dev, ino: stat.ino, offset: 0,
-    headerValidated: false, branchId: null, entries: new Map(), leafId: null,
+    headerValidated: false, branchId: null, entries: new Map(), sourceHashes: [], entryBytes: 0, leafId: null,
     hash: verifySource ? createHash("sha256") : null, fingerprint: null, verified: false,
     pendingParts: [], pendingBytes: 0, pendingLineOffset: null, touchedAt: Date.now(),
   };
@@ -116,8 +218,12 @@ function newRecord(filePath, stat, sessionId, verifySource = false) {
 export class VisibleTranscriptReader {
   #records = new Map();
   #inflight = new Map();
+  #cacheBytes = 0;
+  #maxCachedBytes;
 
-  constructor({ maxCachedSessions = 64, inputReceiptReader = null } = {}) {
+  constructor({ maxCachedSessions = 64, maxCachedBytes = DEFAULT_CACHE_BYTES, inputReceiptReader = null } = {}) {
+    if (!Number.isSafeInteger(maxCachedSessions) || maxCachedSessions < 0 || !Number.isSafeInteger(maxCachedBytes) || maxCachedBytes < 0) throw new Error("invalid transcript cache bounds");
+    this.#maxCachedBytes = maxCachedBytes;
     this.maxCachedSessions = maxCachedSessions;
     this.inputReceiptReader = inputReceiptReader;
   }
@@ -200,17 +306,30 @@ export class VisibleTranscriptReader {
       }
       return trailing;
     }
-    const state = { promise: null, trailing: new Map() };
-    state.promise = this.#read(filePath, sessionId, { inputProofIds, familyMessageId, maxMessages, maxBytes, sanitizePresentation, includeTitleTurn, cursor, publicView, verifySource, historyIndex, allowToolImages, signal, sourceWatermark, ownedAppendBase, forceFull })
-      .catch((error) => { if (!verifySource && error.code !== "history_cursor_stale") this.#records.delete(filePath); throw error; })
+    const state = { promise: null, trailing: new Map(), cacheAllowed: true };
+    state.promise = this.#read(filePath, sessionId, { inputProofIds, familyMessageId, maxMessages, maxBytes, sanitizePresentation, includeTitleTurn, cursor, publicView, verifySource, historyIndex, allowToolImages, signal, sourceWatermark, ownedAppendBase, forceFull }, state)
+      .catch((error) => { if (!verifySource && error.code !== "history_cursor_stale") this.#drop(filePath); throw error; })
       .finally(() => { if (this.#inflight.get(filePath) === state) this.#inflight.delete(filePath); });
     this.#inflight.set(filePath, state);
     return state.promise;
   }
 
   clear(sessionFile) {
-    if (sessionFile) this.#records.delete(path.resolve(sessionFile));
-    else this.#records.clear();
+    const filePath = sessionFile ? path.resolve(sessionFile) : null;
+    for (const [key, state] of this.#inflight) if (!filePath || key === filePath) state.cacheAllowed = false;
+    if (filePath) this.#drop(filePath);
+    else { this.#records.clear(); this.#cacheBytes = 0; }
+  }
+
+  #entry(record, id) {
+    const node = record?.entries.get(id);
+    if (!node) return undefined;
+    const extras = node[EXTRAS];
+    return { parentId: node[PARENT], source: sourceFor(record, node), item: expandRender(node[RENDER], id),
+      inputBoundary: Boolean((node[RENDER]?.[0] & 15) === 1 || extras?.inputBoundary),
+      ...extras,
+      assistantParts: node[RENDER]?.[0] & DEFAULT_PART ? [defaultPart(node[RENDER], id)]
+        : extras?.parts?.map(row => expandRender(row, id).message) };
   }
 
   // Read a fixed active-branch prefix from the same canonical offsets used by
@@ -220,12 +339,11 @@ export class VisibleTranscriptReader {
     if (!Number.isSafeInteger(maxBytes) || maxBytes < 1 || maxBytes > 64 * 1024 * 1024
       || !Number.isSafeInteger(maxEntries) || maxEntries < 1 || maxEntries > 100_000) throw new Error("context fork snapshot bounds are invalid");
     const filePath = path.resolve(sessionFile);
-    await this.read({ sessionFile: filePath, sessionId, inputProofIds: [] });
-    const record = this.#records.get(filePath);
+    const { record } = await this.#readSnapshot({ sessionFile: filePath, sessionId, inputProofIds: [] });
     if (!record) throw new Error("context fork source is unavailable");
     const ids = [...this.#activeEntryIds(record, leafId)].reverse();
     if (ids.length > maxEntries) throw new Error("context fork source exceeds the entry limit");
-    const selected = [{ source: record.headerSource }, ...ids.map((id) => ({ id, ...record.entries.get(id) }))];
+    const selected = [{ source: record.headerSource }, ...ids.map((id) => ({ id, ...this.#entry(record, id) }))];
     if (selected.reduce((total, entry) => total + entry.source.length, 0) > maxBytes) {
       throw new Error("context fork source exceeds the byte limit");
     }
@@ -261,7 +379,7 @@ export class VisibleTranscriptReader {
     if (typeof assistantId !== "string" || !assistantId || assistantId.length > 128) throw new Error("retry target is invalid");
     const active = this.#activeEntryIds(record, leafId);
     const matches = [...active].filter((id) => {
-      const entry = record.entries.get(id);
+      const entry = this.#entry(record, id);
       return entry.item?.kind === "message" && entry.item.message.role === "assistant"
         && (id === assistantId || entry.assistantParts?.some((part) => part.id === assistantId));
     });
@@ -271,10 +389,10 @@ export class VisibleTranscriptReader {
       throw new Error("retry target is not on the active transcript branch");
     }
     assistantId = matches[0];
-    const assistant = record.entries.get(assistantId);
+    const assistant = this.#entry(record, assistantId);
     let id = assistant.parentId;
     while (id !== null) {
-      const entry = record.entries.get(id);
+      const entry = this.#entry(record, id);
       if (!entry) throw new Error("canonical Pi transcript branch has a missing parent");
       if (entry.inputBoundary) return { assistantId, userId: id, branchFromId: entry.parentId };
       id = entry.parentId;
@@ -292,9 +410,9 @@ export class VisibleTranscriptReader {
     return { ...turn, input: canonicalRetryInput(entry, { sessionId, inputReceipt, inputAssociation: associations.get(inputId) }) };
   }
 
-  async #readCanonicalEntry(record, entryId, { handle: sharedHandle, signal } = {}) {
-    const selected = record?.entries.get(entryId);
-    const limit = selected?.inputCandidate?.kind === "user-id" ? MAX_JSONL_LINE_BYTES : MAX_INPUT_REQUEST_BYTES;
+  async #readCanonicalEntry(record, entryId, { handle: sharedHandle, signal, render = false } = {}) {
+    const selected = this.#entry(record, entryId);
+    const limit = render || selected?.inputCandidate?.kind === "user-id" ? MAX_JSONL_LINE_BYTES : MAX_INPUT_REQUEST_BYTES;
     if (!selected?.source || selected.source.length > limit) throw new Error("canonical input source exceeds the input limit");
     const handle = sharedHandle ?? await open(record.filePath, "r");
     try {
@@ -318,9 +436,8 @@ export class VisibleTranscriptReader {
 
   async readImage({ sessionFile, sessionId, entryId, index, sanitizePresentation = false, allowToolImages = false }) {
     const filePath = path.resolve(sessionFile);
-    await this.read({ sessionFile: filePath, sessionId, sanitizePresentation, inputProofIds: [] });
-    const record = this.#records.get(filePath);
-    const selected = record?.entries.get(entryId);
+    const { record } = await this.#readSnapshot({ sessionFile: filePath, sessionId, sanitizePresentation, inputProofIds: [] });
+    const selected = this.#entry(record, entryId);
     const reference = selected?.item?.kind === "message" ? selected.item.message.images?.[index]?.ref : undefined;
     const inputImage = reference && reference.entryId === entryId && reference.index === index;
     const toolImage = allowToolImages && Number.isInteger(index) && index >= 0 && index < selected?.toolImageCount;
@@ -342,10 +459,10 @@ export class VisibleTranscriptReader {
     const associations = new Map();
     if ((!this.inputReceiptReader && !dependencies) || inputIds?.size === 0) return associations;
     const groups = new Map();
-    for (const entry of record.entries.values()) {
-      const candidate = entry.inputCandidate; if (!candidate || inputIds && !inputIds.has(candidate.inputId)) continue;
+    for (const node of record.entries.values()) {
+      const candidate = node[EXTRAS]?.inputCandidate; if (!candidate || inputIds && !inputIds.has(candidate.inputId)) continue;
       const group = groups.get(candidate.inputId) ?? [];
-      group.push(entry); groups.set(candidate.inputId, group);
+      group.push({ inputCandidate: candidate, source: sourceFor(record, node) }); groups.set(candidate.inputId, group);
     }
     for (const [inputId, entries] of groups) {
       signal?.throwIfAborted();
@@ -373,14 +490,21 @@ export class VisibleTranscriptReader {
     return associations;
   }
 
-  async #read(filePath, sessionId, bounds) {
+  async #read(filePath, sessionId, bounds, state) {
     const handle = await open(filePath, "r");
     try {
       bounds.signal?.throwIfAborted();
       const fingerprint = transcriptFingerprint(await handle.stat({ bigint: true }));
       const stat = { dev: Number(fingerprint.dev), ino: Number(fingerprint.ino), size: Number(fingerprint.size) };
-      let record = this.#records.get(filePath);
+      let record = this.#drop(filePath);
       if (bounds.forceFull || !record || record.sessionId !== sessionId || !sameFile(record, stat) || (bounds.verifySource && !record.hash)) record = newRecord(filePath, stat, sessionId, bounds.verifySource);
+      // Cache eviction and follow-up refreshes cannot mutate an operation's
+      // leased snapshot. Append shares immutable nodes, copying only the map,
+      // envelope and the one partially filled digest block that may be written.
+      const appending = record.offset < stat.size;
+      record = { ...record, entries: appending ? new Map(record.entries) : record.entries,
+        sourceHashes: [...record.sourceHashes], pendingParts: [...record.pendingParts], hash: record.hash?.copy() ?? null };
+      if (appending && record.sourceHashes.length) record.sourceHashes[record.sourceHashes.length - 1] = Buffer.from(record.sourceHashes.at(-1));
       const next = bounds.sourceWatermark, base = bounds.ownedAppendBase;
       // Only a previously accepted owner cursor can waive old-byte reconciliation.
       // A shared-reader append may already have advanced this same logical hash.
@@ -402,8 +526,6 @@ export class VisibleTranscriptReader {
         }
         if (hash.digest("hex") !== record.hash.copy().digest("hex")) record = newRecord(filePath, stat, sessionId, bounds.verifySource);
       }
-      if (bounds.verifySource) record = { ...record, entries: new Map(record.entries), incomingMessageIds: new Set(record.incomingMessageIds),
-        pendingParts: [...record.pendingParts], hash: record.hash.copy() };
       const target = stat.size;
       // Observing new metadata is not proof of the cached bytes, even when a
       // non-history consumer sees a same-size rewrite and parses no suffix.
@@ -427,32 +549,35 @@ export class VisibleTranscriptReader {
       const selectedInputIds = Array.isArray(bounds.inputProofIds) ? new Set(bounds.inputProofIds) : null;
       const associations = await this.#inputAssociations(record, handle, bounds.signal,
         { dependencies: receiptDependencies, inputIds: selectedInputIds, provisional: pageScoped, physical: selectedInputIds !== null });
-      if (bounds.familyMessageId) for (const [id, entry] of record.entries) {
-        if (entry.item?.familyMessageId === bounds.familyMessageId) await this.#readCanonicalEntry(record, id, { handle, signal: bounds.signal });
+      if (bounds.familyMessageId) for (const [id, node] of record.entries) {
+        if (node[RENDER]?.[3]?.familyMessageId === bounds.familyMessageId) await this.#readCanonicalEntry(record, id, { handle, signal: bounds.signal });
       }
       const visible = this.#visibleBranch(record, bounds, associations);
-      const title = bounds.includeTitleTurn
-        ? { titleTurn: rootTitleExcerpt(firstCompletedTitleTurn(visible.filter((item) => item.kind === "message").map((item) => item.message))),
-          titleUser: visible.find((item) => item.kind === "message" && item.message.role === "user")?.message.text ?? null }
-        : {};
+      // Full canonical payloads are leased to this operation only, never to #records.
+      const hydrated = new Map();
+      const title = bounds.includeTitleTurn ? await this.#title(record, visible, bounds, associations, handle, hydrated) : {};
       let end = visible.length;
       if (bounds.cursor) {
         const cursor = bounds.cursor;
         if (cursor.sessionId !== record.sessionId || cursor.branchId !== record.branchId) {
           throw historyError("history_cursor_stale", "history changed; load the conversation again");
         }
-        end = visible.findIndex((item) => (item.kind === "message" ? item.message.id : item.id) === cursor.beforeId);
+        end = visible.findIndex(row => this.#rowId(record, row, bounds, associations) === cursor.beforeId);
         if (end < 0) throw historyError("history_cursor_stale", "history changed; load the conversation again");
       }
-      const page = bounds.historyIndex ? { ...historyProjection(visible), truncated: false } : boundVisibleHistory(visible.slice(0, end), bounds);
+      let page;
+      if (bounds.historyIndex) {
+        const items = [];
+        for (const row of visible) items.push(await this.#hydrateRow(record, row, bounds, associations, handle, hydrated));
+        page = { ...historyProjection(items), truncated: false };
+      } else page = await this.#page(record, visible, end, bounds, associations, handle, hydrated);
       if (end > 0 && page.history.length === 0) throw historyError("history_page_too_small", "history row exceeds the page byte limit");
       if (pageScoped) {
         // Include a byte-rejected boundary row and the cursor anchor: their exact
         // association can change page membership, byte accounting, and identity.
         const boundary = page.truncated && page.history.length < bounds.maxMessages ? 1 : 0;
         const relevant = visible.slice(Math.max(0, end - page.history.length - boundary), end + (bounds.cursor ? 1 : 0));
-        const ids = new Set(relevant.map(item => item.kind === "message"
-          ? record.entries.get(item.message.entryId ?? item.message.id)?.inputCandidate?.inputId : null).filter(Boolean));
+        const ids = new Set(relevant.map(row => record.entries.get(row.sourceId)?.[EXTRAS]?.inputCandidate?.inputId).filter(Boolean));
         // UI canonical IDs keep their original metadata-only matching contract;
         // legacy/custom candidates still validate physical spans for every relevant ID.
         const verified = await this.#inputAssociations(record, handle, bounds.signal, { inputIds: ids });
@@ -466,11 +591,17 @@ export class VisibleTranscriptReader {
       const hasMore = page.truncated;
       const historyPage = { hasMore, nextCursor: hasMore ? historyCursor(record, page.history[0].id) : null, branchId: record.branchId };
       const proven = [...associations].filter(([, result]) => result.state === "proven");
+      const familyMessages = {};
+      for (const row of visible) {
+        const item = row.render[3];
+        if (item?.kind === "agent_message" && item.direction === "from" && item.familyMessageId) {
+          familyMessages[item.familyMessageId] = await this.#hydrateRow(record, row, bounds, associations, handle, hydrated);
+        }
+      }
       const projection = { ...page, historyPage, ...title, leafId: record.leafId,
         // Internal read evidence is scoped to this active branch. The supervisor
         // consumes it before bounding pending routes; it never becomes wire history.
-        familyMessages: Object.fromEntries(visible.filter(item => item.kind === "agent_message" && item.direction === "from" && item.familyMessageId)
-          .map(item => [item.familyMessageId, item])),
+        familyMessages,
         inputIds: proven.map(([inputId]) => inputId),
         inputEntries: Object.fromEntries(proven.map(([inputId, result]) => [inputId, result.entryId])),
         inputDeliveries: Object.fromEntries(proven.map(([inputId, result]) => [inputId, { entryId: result.entryId, deliveredAt: result.deliveredAt }])),
@@ -484,13 +615,13 @@ export class VisibleTranscriptReader {
         bounds.signal?.throwIfAborted(); record.verified = !ownedAppend;
       }
       record.fingerprint = fingerprint; record.touchedAt = Date.now();
-      this.#touch(filePath, record); this.#evict();
       if (bounds.historyIndex) {
         projection.sourceEntries = new Map(projection.messages.map(message => {
-          const entry = record.entries.get(message.id);
+          const entryId = message.entryId ?? message.id;
+          const entry = this.#entry(record, entryId);
           return [message.id, { ...entry.source, stripMarker: entry.inputCandidate
             && associations.get(entry.inputCandidate.inputId)?.state === "proven"
-            && associations.get(entry.inputCandidate.inputId)?.entryId === message.id
+            && associations.get(entry.inputCandidate.inputId)?.entryId === entryId
             && associations.get(entry.inputCandidate.inputId)?.proof.kind === "legacy-marker" ? 1 : 0 }];
         }));
         projection.fingerprint = fingerprint;
@@ -501,6 +632,7 @@ export class VisibleTranscriptReader {
         record.indexWatermark = next && next.digest === projection.sourceDigest
           && sameTranscriptFingerprint(next.fingerprint, fingerprint) ? next : null;
       }
+      if (state.cacheAllowed) { this.#touch(filePath, record); this.#evict(); }
       return { projection, record, associations };
     } finally {
       await handle.close();
@@ -576,9 +708,29 @@ export class VisibleTranscriptReader {
     // The image reader revalidates canonical bytes under the input-image bounds.
     const toolImageCount = entry.type === "message" && entry.message?.role === "toolResult" && Array.isArray(entry.message.content)
       ? entry.message.content.filter((part) => part?.type === "image").length : 0;
-    record.entries.set(entry.id, { parentId: entry.parentId, source, inputCandidate, toolImageCount, toolImageMessage: toolImageMessage?.role === "tool_output" ? toolImageMessage : null, assistantParts: assistantMessageParts(entry),
-      inputBoundary: entry.type === "custom_message" || (entry.type === "message" && entry.message?.role === "user"),
-      item: message ? { kind: "message", message } : progress ?? agentMessage ?? null });
+    const row = compactRender(message ? { kind: "message", message } : progress ?? agentMessage ?? null, entry.id);
+    const parts = assistantMessageParts(entry);
+    let defaultParts = false;
+    if (row && parts.length === 1) {
+      const expected = { ...defaultPart(row, entry.id), text: message?.text };
+      defaultParts = isDeepStrictEqual(parts[0], expected);
+      if (defaultParts) row[0] |= DEFAULT_PART;
+    }
+    const extras = {};
+    if (inputCandidate) extras.inputCandidate = inputCandidate;
+    if (entry.type === "custom_message") extras.inputBoundary = true;
+    if (toolImageCount) extras.toolImageCount = toolImageCount;
+    if (toolImageMessage?.role === "tool_output") extras.toolImageMessage = toolImageMessage;
+    if (parts.length && !defaultParts) extras.parts = parts.map(part => compactRender({ kind: "message", message: part }, entry.id));
+    const ordinal = record.entries.size;
+    if (ordinal % HASH_BLOCK_ENTRIES === 0) record.sourceHashes.push(Buffer.alloc(HASH_BLOCK_ENTRIES * 32));
+    record.sourceHashes[Math.floor(ordinal / HASH_BLOCK_ENTRIES)].write(source.hash, (ordinal % HASH_BLOCK_ENTRIES) * 32, 32, "hex");
+    let retained = [entry.parentId, source.offset, source.length, ordinal, row, Object.keys(extras).length ? extras : null];
+    const weight = 64 + cacheWeight(entry.id, this.#maxCachedBytes) + cacheWeight(retained, this.#maxCachedBytes);
+    record.entryBytes = Math.min(this.#maxCachedBytes + 1, record.entryBytes + weight);
+    // An oversized/unsupported graph remains operation-owned, never admitted.
+    if (weight <= this.#maxCachedBytes) retained = detached(retained);
+    record.entries.set(detached(entry.id), retained);
     record.leafId = entry.id;
   }
 
@@ -586,55 +738,169 @@ export class VisibleTranscriptReader {
     const result = new Set(); let id = leafId;
     while (id !== null) {
       if (result.has(id)) throw new Error("canonical Pi transcript branch contains a cycle");
-      result.add(id); const entry = record.entries.get(id);
-      if (!entry) throw new Error("canonical Pi transcript branch has a missing parent");
-      id = entry.parentId;
+      result.add(id); const node = record.entries.get(id);
+      if (!node) throw new Error("canonical Pi transcript branch has a missing parent");
+      id = node[PARENT];
     }
     return result;
   }
 
-  #visibleBranch(record, { sanitizePresentation = false, publicView = false, allowToolImages = false } = {}, associations = new Map()) {
-    const reversed = [];
-    const seen = new Set();
-    let id = record.leafId;
-    while (id !== null) {
-      if (seen.has(id)) throw new Error("canonical Pi transcript branch contains a cycle");
-      seen.add(id);
-      const entry = record.entries.get(id);
-      if (!entry) throw new Error("canonical Pi transcript branch has a missing parent");
-      if (publicView && allowToolImages && entry.toolImageMessage) {
-        reversed.push({ kind: "message", message: entry.toolImageMessage });
-      } else if (publicView && entry.assistantParts?.length) {
-        const parts = entry.assistantParts.map((part) => ({ ...part,
-          text: sanitizePresentation ? sanitizePresentationText(part.text).text : part.text })).filter((part) => part.text);
-        for (const message of parts.reverse()) reversed.push({ kind: "message", message });
-      } else if (entry.item && !(entry.item.kind === "agent_message" && entry.item.direction === "from"
-          && entry.item.delivery?.state === "accepted")) {
-        let item = sanitizePresentation && entry.item.kind === "message" && entry.item.message.role === "assistant"
-          ? { ...entry.item, message: { ...entry.item.message,
-            text: sanitizePresentationText(entry.item.message.text).text } }
-          : entry.item;
-        if (item.kind === "message" && entry.inputCandidate) {
-          item = { ...item, message: associateVisibleInput(item.message, entry.inputCandidate.entry,
-            associations.get(entry.inputCandidate.inputId)) };
-        }
-        if (publicView && item.kind === "message" && item.message.inputId) {
-          item = { ...item, message: { ...item.message, id: item.message.inputId, entryId: item.message.id } };
-        }
-        if (item.kind !== "message" || item.message.role !== "assistant" || item.message.text) reversed.push(item);
-      }
-      id = entry.parentId;
+  #rowAssociation(record, row, associations) {
+    const candidate = row.selector === "primary" && record.entries.get(row.sourceId)[EXTRAS]?.inputCandidate;
+    const association = candidate && associations.get(candidate.inputId);
+    return association?.state === "proven" && association.entryId === row.sourceId ? association : null;
+  }
+
+  #rowId(record, row, bounds, associations) {
+    const association = bounds.publicView && this.#rowAssociation(record, row, associations);
+    return association ? association.proof.inputId : row.part ? `${row.sourceId}-text-0` : row.render[3]?.id ?? row.sourceId;
+  }
+
+  #rowRole(record, row, associations) {
+    const association = this.#rowAssociation(record, row, associations);
+    if (association) return association.proof.source === "cron" ? "scheduled_job" : association.proof.source === "background" ? "background_notification" : "user";
+    const kind = row.render[0] & 15;
+    return kind === 1 ? "user" : kind === 2 ? "assistant" : row.render[3]?.role;
+  }
+
+  #rowItem(record, row, bounds, associations) {
+    if (row.item) return row.item;
+    let item = row.part ? { kind: "message", message: defaultPart(row.render, row.sourceId) } : expandRender(row.render, row.sourceId);
+    if (bounds.sanitizePresentation && item.kind === "message" && item.message.role === "assistant") {
+      item = { ...item, message: { ...item.message, text: sanitizePresentationText(item.message.text).text } };
     }
-    const visible = selectIncomingFamilyMessages(reversed.reverse());
-    return publicView ? sortVisibleHistory(visible) : visible;
+    const candidate = row.selector === "primary" && record.entries.get(row.sourceId)[EXTRAS]?.inputCandidate;
+    if (item.kind === "message" && candidate) item = { ...item, message: associateVisibleInput(item.message, candidate.entry, associations.get(candidate.inputId)) };
+    if (bounds.publicView && item.kind === "message" && item.message.inputId) item = { ...item, message: { ...item.message, id: item.message.inputId, entryId: item.message.id } };
+    return row.item = item;
+  }
+
+  #visibleBranch(record, bounds = {}, associations = new Map()) {
+    const rows = [], families = new Map();
+    const add = (sourceId, selector, render, part = false) => {
+      const row = { sourceId, selector, render, part };
+      const association = this.#rowAssociation(record, row, associations);
+      const assistant = (render[0] & 15) === 2;
+      const variant = association?.proof.kind === "legacy-marker" ? 4 : bounds.sanitizePresentation && assistant ? 2 : 0;
+      row.deferred = Array.isArray(render[2]);
+      row.extraBytes = row.deferred ? render[2][variant] : 0;
+      if (assistant && (row.deferred ? !render[2][variant + 1]
+        : !(bounds.sanitizePresentation ? sanitizePresentationText(render[2]).text : render[2]))) return;
+      // Ordering works directly on compact facts. Only selected output/proof rows
+      // acquire expanded message objects and ISO strings in this operation.
+      row.time = association ? new Date(association.deliveredAt).valueOf() : render[1] === null ? NaN : render[1];
+      rows.push(row);
+      const metadata = render[3];
+      if (metadata?.direction === "from" && metadata.familyMessageId) families.set(row, metadata);
+    };
+    for (const id of [...this.#activeEntryIds(record)].reverse()) {
+      const node = record.entries.get(id), render = node[RENDER], extras = node[EXTRAS];
+      if (bounds.publicView && bounds.allowToolImages && extras?.toolImageMessage) {
+        add(id, "tool", compactRender({ kind: "message", message: extras.toolImageMessage }, id));
+      } else if (bounds.publicView && (render?.[0] & DEFAULT_PART)) {
+        add(id, 0, render, true);
+      } else if (bounds.publicView && extras?.parts?.length) {
+        for (const part of extras.parts) add(id, part[3]?.contentIndex, part);
+      } else if (render) {
+        const metadata = render[3];
+        if (metadata?.kind === "agent_message" && metadata.direction === "from" && metadata.delivery?.state === "accepted") continue;
+        add(id, "primary", render);
+      }
+    }
+    const selected = new Set(selectIncomingFamilyMessages([...families.values()]));
+    const visible = families.size ? rows.filter(row => !families.has(row) || selected.has(families.get(row))) : rows;
+    if (bounds.publicView) visible.sort((a, b) => Number.isFinite(a.time) && Number.isFinite(b.time)
+      ? a.time - b.time || timelineSequence(a.render[3]?.timelineSequence) - timelineSequence(b.render[3]?.timelineSequence) : 0);
+    return visible;
+  }
+
+  async #hydrateRow(record, row, bounds, associations, handle, hydrated) {
+    if (!row.deferred) return this.#rowItem(record, row, bounds, associations);
+    let entry = hydrated.get(row.sourceId);
+    if (!entry) {
+      entry = await this.#readCanonicalEntry(record, row.sourceId, { handle, signal: bounds.signal, render: true });
+      hydrated.set(row.sourceId, entry);
+    }
+    let item;
+    if (typeof row.selector === "number") {
+      const message = assistantMessageParts(entry, { sanitizePresentation: bounds.sanitizePresentation }).find(part => part.contentIndex === row.selector);
+      if (message) item = { kind: "message", message };
+    } else {
+      const message = projectVisibleMessage(entry, { imageReferences: true, sanitizePresentation: bounds.sanitizePresentation, allowToolImages: row.selector === "tool" });
+      item = message ? { kind: "message", message } : projectProgressEntry(entry) ?? projectAgentMessageEntry(entry);
+      const candidate = record.entries.get(row.sourceId)[EXTRAS]?.inputCandidate;
+      if (item?.kind === "message" && candidate) item = { ...item, message: associateVisibleInput(item.message, candidate.entry, associations.get(candidate.inputId)) };
+      if (bounds.publicView && item?.kind === "message" && item.message.inputId) item = { ...item, message: { ...item.message, id: item.message.inputId, entryId: item.message.id } };
+    }
+    if (!item) throw new Error("canonical render source no longer matches its transcript entry");
+    return item;
+  }
+
+  async #page(record, rows, end, bounds, associations, handle, hydrated) {
+    const selected = [];
+    let bytes = Buffer.byteLength(JSON.stringify({ messages: [], history: [] })), messageCount = 0;
+    for (let index = end - 1; index >= 0 && selected.length < bounds.maxMessages; index -= 1) {
+      const row = rows[index], item = this.#rowItem(record, row, bounds, associations);
+      const cost = (item.kind === "message" ? Buffer.byteLength(JSON.stringify(item.message)) + (messageCount ? 1 : 0) : 0)
+        + Buffer.byteLength(JSON.stringify(publicHistoryItem(item))) + (selected.length ? 1 : 0) + row.extraBytes;
+      if (bytes + cost > bounds.maxBytes) {
+        if (!selected.length && (item.kind === "message" || typeof item.body === "string")) selected.push(row);
+        break;
+      }
+      selected.push(row); bytes += cost;
+      if (item.kind === "message") messageCount += 1;
+    }
+    selected.reverse();
+    const items = [];
+    for (const row of selected) items.push(await this.#hydrateRow(record, row, bounds, associations, handle, hydrated));
+    const page = boundVisibleHistory(items, bounds);
+    page.truncated ||= selected.length < end;
+    return page;
+  }
+
+  async #title(record, rows, bounds, associations, handle, hydrated) {
+    let titleUser = null;
+    const messages = rows.filter(row => this.#rowRole(record, row, associations));
+    for (let i = 0; i < messages.length; i += 1) {
+      if (this.#rowRole(record, messages[i], associations) !== "user") continue;
+      const user = (await this.#hydrateRow(record, messages[i], bounds, associations, handle, hydrated)).message;
+      titleUser ??= user.text;
+      if (user.text.startsWith("Automated post-restart continuation:")) continue;
+      for (let j = i + 1; j < messages.length && this.#rowRole(record, messages[j], associations) !== "user"; j += 1) {
+        if (this.#rowRole(record, messages[j], associations) !== "assistant") continue;
+        const assistant = (await this.#hydrateRow(record, messages[j], bounds, associations, handle, hydrated)).message;
+        if (!assistant.text.trim()) continue;
+        const turn = firstCompletedTitleTurn([user, assistant]);
+        if (turn) return { titleTurn: rootTitleExcerpt(turn), titleUser };
+        break;
+      }
+    }
+    return { titleTurn: null, titleUser };
+  }
+
+  #drop(filePath) {
+    const record = this.#records.get(filePath);
+    if (record) { this.#records.delete(filePath); this.#cacheBytes -= record.cacheBytes; }
+    return record;
   }
 
   #touch(filePath, record) {
-    this.#records.delete(filePath);
-    this.#records.set(filePath, record);
+    // Entries are charged once on acceptance. Only the small envelope and any
+    // incomplete frame need re-accounting; Buffer views charge backing stores.
+    if (record.entryBytes > this.#maxCachedBytes || this.maxCachedSessions === 0) return;
+    const envelope = cacheWeight({ ...record, entries: null, hash: null, sourceHashes: null }, this.#maxCachedBytes - record.entryBytes);
+    const bytes = record.entryBytes + envelope + 128 + 64 + 16 * record.sourceHashes.length + record.sourceHashes.reduce((n, block) => n + 64 + block.buffer.byteLength, 0) + (record.hash ? 1024 : 0);
+    if (bytes > this.#maxCachedBytes) return;
+    this.#drop(filePath);
+    record.cacheBytes = bytes;
+    this.#records.set(filePath, record); this.#cacheBytes += bytes;
   }
 
   #evict() {
-    while (this.#records.size > this.maxCachedSessions) this.#records.delete(this.#records.keys().next().value);
+    // Drop only cache ownership. A branch/image/retry operation may still hold
+    // its snapshot, and eviction must never clear or mutate that graph.
+    while (this.#records.size > this.maxCachedSessions || this.#cacheBytes > this.#maxCachedBytes) {
+      this.#drop(this.#records.keys().next().value);
+    }
   }
 }
