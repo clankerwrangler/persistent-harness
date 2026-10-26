@@ -8,7 +8,17 @@ export const MAX_DECODED_IMAGE_BYTES = 64 * 1024 * 1024;
 
 const MAX_BASE64_CHARACTERS = 4 * Math.ceil(MAX_INPUT_IMAGE_BYTES / 3);
 
-const BASE64 = /^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/;
+// Standard padded base64, checked in one linear pass; the equivalent anchored regex
+// took seconds of supervisor time on multi-MiB images.
+function isBase64(text) {
+  if (text.length % 4 !== 0) return false;
+  const padding = text.endsWith("==") ? 2 : text.endsWith("=") ? 1 : 0;
+  for (let index = 0; index < text.length - padding; index += 1) {
+    const code = text.charCodeAt(index);
+    if (!((code >= 65 && code <= 90) || (code >= 97 && code <= 122) || (code >= 48 && code <= 57) || code === 43 || code === 47)) return false;
+  }
+  return true;
+}
 
 function imageDimensions(bytes, mimeType) {
   if (mimeType === "image/png") {
@@ -51,7 +61,7 @@ export function normalizeInputImages(value, { allowMetadata = false } = {}) {
     if (typeof raw.mimeType !== "string" || !INPUT_IMAGE_MIME_TYPES.has(raw.mimeType)) {
       throw new Error(`images[${index}].mimeType must be image/png or image/jpeg`);
     }
-    if (typeof raw.data !== "string" || !raw.data || raw.data.length > MAX_BASE64_CHARACTERS || !BASE64.test(raw.data)) {
+    if (typeof raw.data !== "string" || !raw.data || raw.data.length > MAX_BASE64_CHARACTERS || !isBase64(raw.data)) {
       throw new Error(`images[${index}].data must be bounded canonical base64`);
     }
     const bytes = Buffer.from(raw.data, "base64");
