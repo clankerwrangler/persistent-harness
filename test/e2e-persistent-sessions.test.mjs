@@ -35,7 +35,7 @@ test("Gate P: unified roots and children survive detach, navigate directly, mult
   ]);
   t.after(() => rm(root, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 }));
   const previous = { agentDir: process.env.PI_CODING_AGENT_DIR, auto: process.env.PI_HARNESS_AUTO_INSTALL, base: process.env.HARNESS_FAKE_BASE_URL };
-  process.env.PI_CODING_AGENT_DIR = agentDir; process.env.PI_HARNESS_AUTO_INSTALL ??= "1";
+  process.env.PI_CODING_AGENT_DIR = agentDir; process.env.PI_HARNESS_AUTO_INSTALL ??= "0";
   t.after(() => { for (const [key, value] of Object.entries({ PI_CODING_AGENT_DIR: previous.agentDir, PI_HARNESS_AUTO_INSTALL: previous.auto, HARNESS_FAKE_BASE_URL: previous.base })) { if (value === undefined) delete process.env[key]; else process.env[key] = value; } });
 
   let releaseA; let sawHoldA; const holdASeen = new Promise((resolve) => { sawHoldA = resolve; }); const holdA = new Promise((resolve) => { releaseA = resolve; }); let heldA = false; t.after(() => releaseA?.());

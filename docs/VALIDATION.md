@@ -1,12 +1,19 @@
 # Validation
 
-Install the declared Node dependencies and configure the exact external stock Pi paths from [Dependencies](DEPENDENCIES.md). Tests do not establish live provider compatibility.
+Install the declared Node dependencies, then run the suite. Tests do not establish live provider compatibility.
 
 ```sh
 npm ci --ignore-scripts --no-audit --no-fund
-npm run test:package-load
-npm test
+npm test                  # unit, then integration when Pi and Python are found
+npm run test:unit         # tests that need neither Pi nor Python
+npm run test:integration  # files listed in test/integration-files.txt
+npm run test:native       # native async end-to-end
+npm run test:specs        # TLC model checks against specification/expected-results.json
 ```
+
+`bin/run-tests.mjs` gives every run a private temporary `HOME` and `PI_CODING_AGENT_DIR`, sets `PI_HARNESS_AUTO_INSTALL=0` and `UV_OFFLINE=1` so tests never download a runtime, and points `PI_HARNESS_SKILLS_PATH` at this checkout. It finds stock Pi 0.99.1 under `<agent dir>/runtimes/pi-0.99.1-*` and the managed Python under `<agent dir>/harness/kernel-runtime/environments/` unless `PI_HARNESS_PI_COMMAND`, `PI_HARNESS_PI_MODULE` and `PI_HARNESS_PYTHON` are set. When either is missing, the integration and native groups are skipped with the reason instead of failing.
+
+`bin/check-specs.mjs` runs TLC on every `specification/*.cfg` and compares each outcome (`pass`, `violation`, `error`) with `specification/expected-results.json`; negative controls are recorded as `violation`. Set `TLA2TOOLS` and `JAVA` when the tools are not at `/opt/tla/tla2tools-1.7.4.jar` and on `PATH`. After an intentional model change, rerun the affected configurations with `--record` and review the diff.
 
 The tests use isolated temporary state, fake providers, and local processes. All supervisor tests, including fake-worker tests, need private `HOME` and `PI_CODING_AGENT_DIR`: a temporary database alone does not isolate transcripts or background notifications. The default background directory is `$PI_CODING_AGENT_DIR/state/background-jobs` (otherwise `$HOME/.pi/agent/state/background-jobs`); any explicit `backgroundJobsDirectory` must also be test-private. Never point tests at running service state or live credentials. For offline real-worker checks, set `PI_HARNESS_PYTHON` to an existing compatible interpreter and `PI_HARNESS_AUTO_INSTALL=0`.
 
