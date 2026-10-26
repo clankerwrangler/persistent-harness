@@ -338,6 +338,7 @@ test("schema-2 startup repairs legacy queued work that targets a deleted child",
   const message = store.createMessage("parent", { target: "child", body: "legacy queued steer", deliveryMode: "auto" }, { now: 3 });
   store.recordMessageSenderEntry("parent", { messageId: message.messageId, entryId: "legacy-entry", peerId: "child",
     relationship: "child", body: "legacy queued steer" }, 4);
+  const unrecorded = store.createMessage("child", { target: "parent", body: "sent before its entry was recorded", deliveryMode: "auto" }, { now: 4 });
   store.close();
   const raw = new DatabaseSync(databasePath);
   raw.exec("PRAGMA foreign_keys = ON");
@@ -351,6 +352,8 @@ test("schema-2 startup repairs legacy queued work that targets a deleted child",
   assert.equal(store.getMessage(message.messageId).lastError, "target session was deleted");
   assert.equal(store.getChildTask(admitted.task.taskId).state, "failed");
   assert.equal(store.getChildTask(admitted.task.taskId).error, "child session was deleted before its task completed");
+  assert.equal(store.getMessage(unrecorded.messageId).state, "rejected");
+  assert.equal(store.getMessage(unrecorded.messageId).lastError, "sender session was deleted before its transcript entry was recorded");
   assert.deepEqual(store.diagnose(), []);
 });
 
