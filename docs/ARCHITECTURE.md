@@ -305,9 +305,19 @@ still reads O(archive bytes). Complete inventory and receipt association remain
 required, including after coalesced appends. Ordinary shared-reader observations
 cannot certify prefixes. Metadata traversal and selected legacy receipt reads
 remain; this optimization removes eligible old-prefix byte I/O, not all
-historical work. The reader cache remains session-bounded; complete index
-projections retain the eight-session/4 MiB cap. Aborted or unstable refresh
-cannot publish partial rows.
+historical work. The shared `VisibleTranscriptReader` automatically retains at
+most 64 sessions and 64 MiB of accounted cache ownership, evicting least-recently
+used records. Compact branch/source/render facts and short text (at most 256
+UTF-16 units per field) stay in that one cache; longer text stays in canonical
+JSONL. Normal pages hydrate only selected spans after ID/digest checks. Full
+requested index results, family bodies, title turns, branches, and images remain
+operation-owned. Eviction or clear does not invalidate an active snapshot; clear
+also fences its late cache admission. Oversized records remain readable without
+admission. Accounting includes digest buffers, pending Buffer backing stores,
+metadata, and the known hash owner; it is not a V8 heap or RSS limit. Complete
+index projections retain their separate eight-session/4 MiB cap. Aborted or
+unstable refresh cannot publish partial rows. See the
+[cache verification record](validation/transcript-cache-residency.md).
 
 Snapshot hydration reads only matched entries or open's bounded ordinal window.
 It permits a larger appended file while requiring the same source identity,

@@ -450,6 +450,22 @@ reconciliation of late proven and ambiguous inputs without duplicate submission.
 Image-bearing canonical-ID pages add no payload reads; delivery/retry and image
 retrieval retain physical target checks. Full index receipt verification is unchanged.
 
+`TranscriptCacheResidency` checks aggregate byte/session LRU bounds, detached
+working owners, non-destructive operation leases, and clear admission fences.
+TLC checks 4,134,046 generated states, 723,451 distinct states, and depth 22;
+its five fault configurations must fail. `TranscriptPayloadHydration` checks
+pending backing-store accounting, compact-only cache ownership, operation view
+contracts, digest/fingerprint/cursor fences, and hydration leases through
+abort/clear/eviction. TLC checks 67,720 generated states, 22,426 distinct states,
+and depth 12; its seven fault configurations must fail. View tokens abstract
+concrete rendering rather than proving JavaScript Unicode or ordering semantics.
+Reader differential tests check exact escaped/lone-surrogate/astral text, inline
+boundaries, parts, sanitization, byte limits, and cursor traversal. Other focused
+fixtures exercise pressure, cancellation, replacement, receipt changes, branch,
+image, retry, title, family, full index, and the shared supervisor UI/history API.
+[Commands and measured ownership](validation/transcript-cache-residency.md) also
+record synthetic warm/append I/O and natural process memory without forced GC.
+
 `PendingInputReads` checks ordered receipt/payload snapshots, one-query pending
 reads, payload-free existence and no-op clear, and current queue selection after
 an asynchronous boundary. Its `NPlusOne`, `EagerClear`, and `StaleQueue` controls
