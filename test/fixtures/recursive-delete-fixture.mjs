@@ -33,6 +33,8 @@ export async function deletionFixture(t) {
   const socketPath = path.join(dir, "run", "supervisor.sock");
   fixture.supervisor = new HarnessSupervisor({ socketPath, databasePath: path.join(dir, "state", "harness.sqlite"),
     pidPath: path.join(dir, "run", "supervisor.pid"), skillsPath: path.join(dir, "skills"), backgroundJobsDirectory: path.join(dir, "jobs"),
+    // Scan background completions quickly; until() waits 5 s, the production default interval.
+    backgroundCompletionIntervalMs: 100,
     actorInactivityMs: 0, maxResidentActors: 20, maxConcurrentStarts: 5, titleGenerator: async () => null,
     actorFactory: options => { const actor = new Actor(options, fixture); fixture.actors.set(options.session.sessionId, actor); return actor; },
     runtimeProvisioner: async () => ({}),

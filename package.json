@@ -6,15 +6,18 @@
   "type": "module",
   "description": "Durable, detachable Pi sessions with persistent Python and retained child agents",
   "scripts": {
-    "test": "node bin/package-load-smoke.mjs && node --test --test-concurrency=1 test/*.test.mjs",
+    "test": "node bin/package-load-smoke.mjs && node bin/run-tests.mjs all",
     "test:package-load": "node bin/package-load-smoke.mjs",
-    "test:p0": "node --test --test-concurrency=1 test/pi-session.test.mjs test/session-paths.test.mjs test/session-actor.test.mjs",
-    "test:p1": "node --test --test-concurrency=1 test/protocol.test.mjs test/store-actor.test.mjs test/supervisor-actor.test.mjs",
-    "test:gate-p": "node --test --test-concurrency=1 test/e2e-persistent-sessions.test.mjs test/e2e-actor-recovery.test.mjs",
+    "test:p0": "node bin/run-tests.mjs all test/pi-session.test.mjs test/session-paths.test.mjs test/session-actor.test.mjs",
+    "test:p1": "node bin/run-tests.mjs all test/protocol.test.mjs test/store-actor.test.mjs test/supervisor-actor.test.mjs",
+    "test:gate-p": "node bin/run-tests.mjs all test/e2e-persistent-sessions.test.mjs test/e2e-actor-recovery.test.mjs",
     "install:extension": "node bin/install.mjs install",
     "uninstall:extension": "node bin/install.mjs uninstall",
     "provision:skills": "node bin/provision-skills.mjs",
-    "test:native": "node --test --test-concurrency=1 test/native/e2e-async.test.mjs"
+    "test:native": "node bin/run-tests.mjs native",
+    "test:unit": "node bin/run-tests.mjs unit",
+    "test:integration": "node bin/run-tests.mjs integration",
+    "test:specs": "node bin/check-specs.mjs"
   },
   "bin": {
     "harness-supervisor": "./bin/harness-supervisor.mjs",

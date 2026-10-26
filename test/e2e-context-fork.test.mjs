@@ -156,7 +156,7 @@ test("optional context forks preserve first-turn history with fresh kernels and 
   ]);
   process.env.PI_CODING_AGENT_DIR = agentDir;
   process.env.PI_OFFLINE = "1";
-  process.env.PI_HARNESS_AUTO_INSTALL ??= "1";
+  process.env.PI_HARNESS_AUTO_INSTALL ??= "0";
   await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
   process.env.HARNESS_FORK_BASE_URL = `http://127.0.0.1:${server.address().port}/v1`;
   const socketPath = path.join(root, "run", "supervisor.sock");

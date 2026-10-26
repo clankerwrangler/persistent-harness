@@ -212,7 +212,7 @@ test("teardown discovers actor process groups from supervisor descendants", () =
 test("teardown waits for detached supervisor publication when control is unavailable", { timeout: 30_000 }, async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), "harness-post-restart-publication-"));
   const socketPath = path.join(root, "run", "supervisor.sock"); const databasePath = path.join(root, "state", "harness.sqlite"); const pidPath = path.join(root, "run", "supervisor.pid");
-  const env = { ...sanitizedRestartEnvironment(process.env), PI_HARNESS_SCRATCH_ROOT: path.join(root, "scratch"), PI_CODING_AGENT_DIR: path.join(root, "agent"), PI_HARNESS_AUTO_INSTALL: process.env.PI_HARNESS_AUTO_INSTALL ?? "1" };
+  const env = { ...sanitizedRestartEnvironment(process.env), PI_HARNESS_SCRATCH_ROOT: path.join(root, "scratch"), PI_CODING_AGENT_DIR: path.join(root, "agent"), PI_HARNESS_AUTO_INSTALL: process.env.PI_HARNESS_AUTO_INSTALL ?? "0" };
   let daemon = null;
   const publication = (async () => {
     await sleep(250);
@@ -277,7 +277,7 @@ test("external restart revives and nudges the initiating session exactly once", 
   await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
   const address = server.address(); assert(address && typeof address === "object");
   const env = { ...sanitizedRestartEnvironment(process.env), PI_HARNESS_SCRATCH_ROOT: path.join(root, "scratch"), PI_CODING_AGENT_DIR: agentDir, PI_HARNESS_SOCKET: socketPath, PI_HARNESS_DATABASE: databasePath, PI_HARNESS_PID: pidPath,
-    PI_HARNESS_ACTOR_EXTENSIONS: JSON.stringify([fakeProviderPath]), PI_HARNESS_ACTOR_INACTIVITY_MS: "0", PI_HARNESS_AUTO_INSTALL: process.env.PI_HARNESS_AUTO_INSTALL ?? "1", HARNESS_FAKE_BASE_URL: `http://127.0.0.1:${address.port}/v1` };
+    PI_HARNESS_ACTOR_EXTENSIONS: JSON.stringify([fakeProviderPath]), PI_HARNESS_ACTOR_INACTIVITY_MS: "0", PI_HARNESS_AUTO_INSTALL: process.env.PI_HARNESS_AUTO_INSTALL ?? "0", HARNESS_FAKE_BASE_URL: `http://127.0.0.1:${address.port}/v1` };
   const daemon = spawn(process.execPath, [supervisorBin, "start", "--socket", socketPath, "--db", databasePath, "--pid", pidPath], { env, stdio: ["ignore", "pipe", "pipe"] });
   await waitLine(daemon.stdout); const oldPid = daemon.pid;
   expectedSupervisor = await processIdentity(oldPid); assert(expectedSupervisor);
