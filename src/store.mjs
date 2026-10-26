@@ -328,6 +328,7 @@ const CURRENT_SCHEMA = `
 export class HarnessStore {
   #db;
   #deletingSessions = new Set();
+  #usageSummary = null;
 
   constructor(databasePath, { readOnly = false } = {}) {
     this.#db = new DatabaseSync(databasePath, { readOnly });
@@ -1270,6 +1271,7 @@ export class HarnessStore {
     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
       .run(sessionId, usage.entryId, usage.provider, usage.model, usage.input, usage.output,
         usage.cacheRead, usage.cacheWrite, usage.reasoning, usage.totalTokens, usage.costTotal, now);
+    if (result.changes === 1 && this.#usageSummary) this.#addUsage(usage);
     return { recorded: result.changes === 1 };
   }
 
@@ -1309,22 +1311,47 @@ export class HarnessStore {
   }
 
   getUsageSummary() {
+    // Lifetime totals are loaded once and kept current by recordUsage, so status
+    // polls do not rescan every usage entry (~0.5 s per poll at 321k entries).
+    this.#usageSummary ??= this.#loadUsageSummary();
+    const { totals, models } = this.#usageSummary;
+    const order = (a, b) => (a < b ? -1 : a > b ? 1 : 0);
+    const byModel = [...models.values()]
+      .sort((a, b) => b.totalTokens - a.totalTokens || order(a.provider, b.provider) || order(a.model, b.model))
+      .slice(0, 64).map((row) => ({ ...row }));
+    return { ...totals, byModel };
+  }
+
+  #loadUsageSummary() {
     const total = this.#db.prepare(`SELECT count(*) AS entries, coalesce(sum(input_tokens), 0) AS input_tokens,
       coalesce(sum(output_tokens), 0) AS output_tokens, coalesce(sum(cache_read_tokens), 0) AS cache_read_tokens,
       coalesce(sum(cache_write_tokens), 0) AS cache_write_tokens, coalesce(sum(reasoning_tokens), 0) AS reasoning_tokens,
       coalesce(sum(total_tokens), 0) AS total_tokens, coalesce(sum(cost_total), 0.0) AS cost_total FROM usage_entries`).get();
-    const byModel = this.#db.prepare(`SELECT provider, model, count(*) AS entries, sum(total_tokens) AS total_tokens,
-      sum(cost_total) AS cost_total FROM usage_entries GROUP BY provider, model
-      ORDER BY total_tokens DESC, provider, model LIMIT 64`).all().map((row) => ({
-      provider: row.provider, model: row.model, entries: Number(row.entries),
-      totalTokens: Number(row.total_tokens), costTotal: Number(row.cost_total),
-    }));
-    return {
+    const models = new Map();
+    for (const row of this.#db.prepare(`SELECT provider, model, count(*) AS entries, sum(total_tokens) AS total_tokens,
+      sum(cost_total) AS cost_total FROM usage_entries GROUP BY provider, model`).all()) {
+      models.set(JSON.stringify([row.provider, row.model]), { provider: row.provider, model: row.model,
+        entries: Number(row.entries), totalTokens: Number(row.total_tokens), costTotal: Number(row.cost_total) });
+    }
+    return { models, totals: {
       entries: Number(total.entries), inputTokens: Number(total.input_tokens), outputTokens: Number(total.output_tokens),
       cacheReadTokens: Number(total.cache_read_tokens), cacheWriteTokens: Number(total.cache_write_tokens),
       reasoningTokens: Number(total.reasoning_tokens), totalTokens: Number(total.total_tokens),
-      costTotal: Number(total.cost_total), byModel,
-    };
+      costTotal: Number(total.cost_total),
+    } };
+  }
+
+  #addUsage(usage) {
+    const value = (field) => Number(field ?? 0);
+    const { totals, models } = this.#usageSummary;
+    totals.entries += 1; totals.inputTokens += value(usage.input); totals.outputTokens += value(usage.output);
+    totals.cacheReadTokens += value(usage.cacheRead); totals.cacheWriteTokens += value(usage.cacheWrite);
+    totals.reasoningTokens += value(usage.reasoning); totals.totalTokens += value(usage.totalTokens);
+    totals.costTotal += value(usage.costTotal);
+    const key = JSON.stringify([usage.provider, usage.model]);
+    const row = models.get(key) ?? { provider: usage.provider, model: usage.model, entries: 0, totalTokens: 0, costTotal: 0 };
+    row.entries += 1; row.totalTokens += value(usage.totalTokens); row.costTotal += value(usage.costTotal);
+    models.set(key, row);
   }
 
   getUsageWindow(windowMinutes, observedAt = Date.now()) {

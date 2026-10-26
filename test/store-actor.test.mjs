@@ -808,3 +808,24 @@ test("resident abnormal turns share durable lifecycle receipts without replaying
   store.recordActorTurnFailure("parent", 1, report); assert.equal(store.listMessages().length, 3);
   store.deleteSession("parent"); assert.equal(store.listPendingChildExitMessages().length, 0);
 });
+
+test("lifetime usage summary stays current after it is first read", async (t) => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), "harness-usage-summary-"));
+  const databasePath = path.join(dir, "store.sqlite");
+  const store = new HarnessStore(databasePath);
+  t.after(async () => { store.close(); await rm(dir, { recursive: true, force: true }); });
+  store.createRoot({ sessionId: "root", sessionFile: "/sessions/root.jsonl", cwd: "/workspace", repositoryRoot: null,
+    name: "root", actorToken: "token", launch: launch("root") }, 1);
+  const usage = (entryId, model, totalTokens, costTotal) => ({ entryId, provider: "p", model, input: totalTokens - 1, output: 1,
+    cacheRead: 0, cacheWrite: 0, reasoning: 0, totalTokens, costTotal });
+  store.recordUsage("root", usage("u1", "a", 10, 0.5), 2);
+  assert.equal(store.getUsageSummary().entries, 1);
+  store.recordUsage("root", usage("u2", "b", 30, 0.25), 3);
+  store.recordUsage("root", usage("u2", "b", 999, 9), 4);
+  store.recordUsage("root", usage("u3", "a", 5, 0.25), 5);
+  const current = store.getUsageSummary();
+  assert.deepEqual({ entries: current.entries, totalTokens: current.totalTokens, costTotal: current.costTotal }, { entries: 3, totalTokens: 45, costTotal: 1 });
+  assert.deepEqual(current.byModel.map(({ model, entries, totalTokens }) => [model, entries, totalTokens]), [["b", 1, 30], ["a", 2, 15]]);
+  const reopened = new HarnessStore(databasePath, { readOnly: true });
+  try { assert.deepEqual(current, reopened.getUsageSummary(), "running totals match a full recount"); } finally { reopened.close(); }
+});
