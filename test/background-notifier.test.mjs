@@ -14,11 +14,11 @@ test("background job storage follows the configured agent directory", () => {
   assert.equal(defaultBackgroundJobsDirectory({ PI_CODING_AGENT_DIR: "/tmp/custom-agent" }), "/tmp/custom-agent/state/background-jobs");
 });
 
-async function createJob(directory, id, { sessionId = "session-a", exitCode = 0, signal = null, kind = "launched", owner = true } = {}) {
+async function createJob(directory, id, { sessionId = "session-a", exitCode = 0, signal = null, kind = "launched", owner = true, endedAt = new Date().toISOString() } = {}) {
   const job = path.join(directory, id);
   await mkdir(job, { recursive: true });
   await writeFile(path.join(job, "meta.json"), JSON.stringify({ schema: "background.job.v1", id, name: "bootc-install", kind, ...(owner ? { session_id: sessionId } : {}) }));
-  await writeFile(path.join(job, "exit.json"), JSON.stringify({ exit_code: exitCode, signal, ended_at: new Date().toISOString() }));
+  await writeFile(path.join(job, "exit.json"), JSON.stringify({ exit_code: exitCode, signal, ended_at: endedAt }));
 }
 
 async function eventually(fn, timeoutMs = 2000) {
@@ -492,4 +492,22 @@ test("slow completion dispatch ownership stays bounded without losing later jobs
   await monitor.stop(); assert.equal(new Set(deliveries).size, 130);
   t.diagnostic(JSON.stringify({ dispatches: deliveries.length, unique: new Set(deliveries).size, heldId }));
   for (const id of deliveries) assert.equal(JSON.parse(await readFile(path.join(directory, id, "notification.json"), "utf8")).state, "sent");
+});
+
+test("notified jobs past retention are pruned; recent and undelivered jobs stay", async (t) => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), "background-prune-"));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const old = new Date(Date.now() - 8 * 24 * 60 * 60 * 1000).toISOString();
+  const notify = (id) => writeFile(path.join(directory, id, "notification.json"), JSON.stringify({ version: 1, state: "sent", jobId: id, updatedAt: old }));
+  await createJob(directory, "bg-00000000000a", { endedAt: old }); await notify("bg-00000000000a");
+  await createJob(directory, "bg-00000000000b"); await notify("bg-00000000000b");
+  await createJob(directory, "bg-00000000000c", { endedAt: old });
+  const deliveries = [];
+  const monitor = new BackgroundCompletionMonitor({ directory, intervalMs: 100, dispatch: async (job) => { deliveries.push(job.id); return "sent"; } });
+  monitor.start(); t.after(() => monitor.stop());
+  const exists = (id) => fsPromises.stat(path.join(directory, id)).then(() => true, () => false);
+  await eventually(async () => !(await exists("bg-00000000000a")));
+  assert.equal(await exists("bg-00000000000b"), true, "a recently finished job is kept for lookups");
+  assert.deepEqual(deliveries, ["bg-00000000000c"], "an old but undelivered job is still delivered, not pruned");
+  assert.equal(await exists("bg-00000000000c"), true);
 });

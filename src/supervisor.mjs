@@ -431,7 +431,7 @@ export class HarnessSupervisor {
     cronSchedulerFactory = (options) => new CronScheduler(options),
     backgroundJobsDirectory = defaultBackgroundJobsDirectory(),
     scratchDirectory = process.env.PI_HARNESS_SCRATCH_ROOT || DEFAULT_SCRATCH_DIRECTORY,
-    backgroundCompletionIntervalMs = Number(process.env.PI_HARNESS_BACKGROUND_COMPLETION_TICK_MS ?? 1_000),
+    backgroundCompletionIntervalMs = Number(process.env.PI_HARNESS_BACKGROUND_COMPLETION_TICK_MS ?? 5_000),
     titleGenerator = createRootTitleGenerator(),
     notificationIdleMs = NOTIFICATION_IDLE_MS,
     notificationTickMs = 1_000,

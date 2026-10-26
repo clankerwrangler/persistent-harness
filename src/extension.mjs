@@ -265,7 +265,7 @@ function skillPrompt(skills, nativeAsync = false) {
 
 export function nativeAsyncEnabled(model, enabled = process.env.PI_HARNESS_NATIVE_ASYNC) {
   return enabled === "1" && model?.provider === "openai-codex"
-    && model?.id === "gpt-6-astra" && model?.api === "openai-codex-responses"
+    && model?.api === "openai-codex-responses"
     && model?.compat?.supportsAsyncTools === true;
 }
 
