@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { constants } from "node:fs";
-import { lstat, open, opendir, rename, unlink, writeFile } from "node:fs/promises";
+import { lstat, open, opendir, rename, rm, unlink, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 
@@ -9,6 +9,7 @@ const SESSION_ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
 const MAX_FILE_BYTES = 64 * 1024;
 const MAX_JOBS = 128;
 const NOTIFICATION_FILE = "notification.json";
+const DEFAULT_RETENTION_MS = 7 * 24 * 60 * 60 * 1000;
 
 export function defaultBackgroundJobsDirectory(env = process.env) {
   const root = typeof env.PI_CODING_AGENT_DIR === "string" && env.PI_CODING_AGENT_DIR
@@ -149,12 +150,15 @@ export class BackgroundCompletionMonitor {
   #retryJobs = new Set();
   #onScanComplete;
   #retirementSample;
+  #retentionMs;
 
-  constructor({ directory = defaultBackgroundJobsDirectory(), dispatch, onActiveJobsChanged = () => {}, onScanComplete = () => {}, intervalMs = 1_000, logger = console } = {}) {
+  constructor({ directory = defaultBackgroundJobsDirectory(), dispatch, onActiveJobsChanged = () => {}, onScanComplete = () => {}, intervalMs = 1_000, retentionMs = DEFAULT_RETENTION_MS, logger = console } = {}) {
     if (typeof directory !== "string" || !directory) throw new Error("background jobs directory is required");
     if (typeof dispatch !== "function") throw new Error("background completion dispatch is required");
     if (typeof onActiveJobsChanged !== "function") throw new Error("background activity callback is invalid");
     if (!Number.isInteger(intervalMs) || intervalMs < 100 || intervalMs > 60 * 60 * 1000) throw new Error("background completion interval is invalid");
+    if (!Number.isSafeInteger(retentionMs) || retentionMs < 0) throw new Error("background job retention is invalid");
+    this.#retentionMs = retentionMs;
     this.#directory = path.resolve(directory); this.#dispatch = dispatch; this.#intervalMs = intervalMs; this.#logger = logger;
     this.#onActiveJobsChanged = onActiveJobsChanged;
     this.#onScanComplete = onScanComplete;
@@ -333,6 +337,7 @@ export class BackgroundCompletionMonitor {
         });
         this.#inFlight.set(job.id, delivery);
       }
+      if (!this.#stopped) await this.#pruneFinished(jobs);
       if (!this.#stopped) {
         try { await this.#onScanComplete(); }
         catch { this.#logger.error?.("pending root scratch cleanup could not be checked"); }
@@ -340,5 +345,16 @@ export class BackgroundCompletionMonitor {
     })();
     this.#scanPromise = operation;
     try { await operation; } finally { if (this.#scanPromise === operation) this.#scanPromise = undefined; }
+  }
+
+  async #pruneFinished(jobs) {
+    // Finished, already-notified jobs are history. Keep them for status and log
+    // lookups during the retention window, then remove them so scans stay small.
+    const cutoff = Date.now() - this.#retentionMs;
+    for (const { completed: job } of jobs) {
+      if (!job?.notificationState || this.#inFlight.has(job.id) || !(Date.parse(job.endedAt) < cutoff)) continue;
+      try { await rm(path.join(this.#directory, job.id), { recursive: true, force: true }); }
+      catch { this.#logger.error?.(`background job ${job.id} could not be pruned`); }
+    }
   }
 }

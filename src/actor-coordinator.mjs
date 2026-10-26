@@ -15,7 +15,7 @@ const zeroUsage = () => ({ input: 0, output: 0, cacheRead: 0, cacheWrite: 0, tot
   cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } });
 const clone = value => structuredClone(value);
 const nativeModel = model => process.env.PI_HARNESS_NATIVE_ASYNC === "1" && model?.provider === "openai-codex"
-  && model.id === "gpt-6-astra" && model.api === "openai-codex-responses" && model.compat?.supportsAsyncTools === true;
+  && model.api === "openai-codex-responses" && model.compat?.supportsAsyncTools === true;
 const textOf = content => typeof content === "string" ? content : (content ?? []).filter(p => p.type === "text").map(p => p.text).join("\n");
 function observedProviderTools(payload) {
   if (!payload || typeof payload !== "object" || Object.getOwnPropertyDescriptor(payload, "toJSON")) return null;

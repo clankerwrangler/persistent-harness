@@ -23,11 +23,12 @@ function fixture() {
   return { tools, hooks, owner };
 }
 
-test("native opt-in is exact and does not broaden the Python schema or execution lane", () => {
+test("native opt-in follows the catalog async flag and does not broaden the Python schema or execution lane", () => {
   assert.equal(nativeAsyncEnabled(astra, "1"), true);
+  assert.equal(nativeAsyncEnabled({ ...astra, id: "gpt-6.1-sol" }, "1"), true, "any Codex Responses model the catalog marks async is opted in");
   for (const enabled of [undefined, "", "0", "true", "yes"]) assert.equal(nativeAsyncEnabled(astra, enabled), false);
-  for (const model of [null, { ...astra, id: "gpt-5.6-sol" }, { ...astra, provider: "openai" },
-    { ...astra, api: "openai-responses" }, { ...astra, id: "gpt-6-astra-other" },
+  for (const model of [null, { ...astra, provider: "openai" },
+    { ...astra, api: "openai-responses" }, { ...astra, id: "gpt-6.1-sol", compat: undefined },
     { ...astra, compat: undefined }, { ...astra, compat: { supportsAsyncTools: false } },
     { ...astra, compat: { supportsAsyncTools: "true" } }]) {
     assert.equal(nativeAsyncEnabled(model, "1"), false);
@@ -51,8 +52,8 @@ test("native opt-in is exact and does not broaden the Python schema or execution
     assert.equal(hooks.has("before_agent_start"), false, "shared preparation uses one canonical request hook");
     assert.equal(hooks.has("before_agent_request"), false, "stock Pi has no patched per-request hook");
     assert.equal(typeof owner.prepareRequest, "function", "the sole actor owner invokes request preparation");
-    hooks.get("model_select")({ model: { ...astra, id: "gpt-5.6-sol" } });
-    assert.equal(tools.get("ipython").async, undefined);
+    hooks.get("model_select")({ model: { ...astra, id: "gpt-5.6-sol", compat: {} } });
+    assert.equal(tools.get("ipython").async, undefined, "switching to a model without the catalog flag removes async");
   } finally { delete process.env.PI_HARNESS_NATIVE_ASYNC; }
 });
 
