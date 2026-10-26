@@ -93,10 +93,21 @@ function compactRender(item, entryId) {
   delete extra[field]; delete extra.createdAt;
   if (kind) { delete extra.role; delete extra.status; }
   if (value.id === entryId) delete extra.id;
+  // An admitted incoming context row derives these fields from the canonical
+  // source ID and render time. Do not charge duplicate strings per family row.
+  if (extra.kind === "agent_message" && extra.direction === "from" && extra.delivery?.state === "delivered") {
+    delete extra.entryId;
+    extra.delivery = { state: "delivered" };
+  }
   if (message && !kind) extra.message = true;
   const row = [kind, value.createdAt === null ? null : Date.parse(value.createdAt), textDescriptor(value[field] ?? "", kind === 2)];
   if (Object.keys(extra).length) row.push(extra);
   return row;
+}
+function renderDelivery(row) {
+  const extra = row[3];
+  return extra?.kind === "agent_message" && extra.direction === "from" && extra.delivery?.state === "delivered"
+    ? { ...extra.delivery, deliveredAt: new Date(row[1]).toISOString() } : extra?.delivery;
 }
 function expandRender(row, id) {
   if (!row) return null;
@@ -107,7 +118,10 @@ function expandRender(row, id) {
     const { message: _, ...metadata } = extra;
     return { kind: "message", message: { id, ...(kind ? { role: kind === 1 ? "user" : "assistant" } : {}), text, createdAt, ...(kind ? { status: "complete" } : {}), ...metadata } };
   }
-  return { id, ...extra, createdAt, [extra.kind === "progress" ? "summary" : "body"]: text };
+  return { id, ...extra,
+    ...(extra.kind === "agent_message" && extra.direction === "from" && extra.delivery?.state === "delivered"
+      ? { entryId: id, delivery: renderDelivery(row) } : {}),
+    createdAt, [extra.kind === "progress" ? "summary" : "body"]: text };
 }
 function defaultPart(row, id) {
   const item = expandRender(row, id);
@@ -286,13 +300,13 @@ export class VisibleTranscriptReader {
     } finally { await handle.close(); }
   }
 
-  async #readSnapshot({ inputProofIds = null, familyMessageId = null, sessionFile, sessionId, maxMessages = 512, maxBytes = 48 * 1024, sanitizePresentation = false, includeTitleTurn = false, before = null, publicView = false, verifySource = false, historyIndex = false, allowToolImages = false, signal, sourceWatermark = null, ownedAppendBase = null, forceFull = false }) {
+  async #readSnapshot({ inputProofIds = null, familyMessageId = null, familyDeliveryOnly = false, sessionFile, sessionId, maxMessages = 512, maxBytes = 48 * 1024, sanitizePresentation = false, includeTitleTurn = false, before = null, publicView = false, verifySource = false, historyIndex = false, allowToolImages = false, signal, sourceWatermark = null, ownedAppendBase = null, forceFull = false }) {
     // Internal call-site scope, not a protocol/configuration option. Own it across awaits.
     if (Array.isArray(inputProofIds)) inputProofIds = [...new Set(inputProofIds)];
     const cursor = before === null ? null : parseHistoryCursor(before);
     const filePath = path.resolve(sessionFile);
-    const options = { inputProofIds, familyMessageId, sessionFile: filePath, sessionId, maxMessages, maxBytes, sanitizePresentation, includeTitleTurn, before, publicView, verifySource, historyIndex, allowToolImages, signal, sourceWatermark, ownedAppendBase, forceFull };
-    const projectionKey = JSON.stringify([sessionId, inputProofIds, familyMessageId, maxMessages, maxBytes, sanitizePresentation, includeTitleTurn, before, publicView, verifySource, historyIndex, allowToolImages, sourceWatermark, ownedAppendBase, forceFull]);
+    const options = { inputProofIds, familyMessageId, familyDeliveryOnly, sessionFile: filePath, sessionId, maxMessages, maxBytes, sanitizePresentation, includeTitleTurn, before, publicView, verifySource, historyIndex, allowToolImages, signal, sourceWatermark, ownedAppendBase, forceFull };
+    const projectionKey = JSON.stringify([sessionId, inputProofIds, familyMessageId, familyDeliveryOnly, maxMessages, maxBytes, sanitizePresentation, includeTitleTurn, before, publicView, verifySource, historyIndex, allowToolImages, sourceWatermark, ownedAppendBase, forceFull]);
     const active = this.#inflight.get(filePath);
     if (active) {
       // Independently owned history requests must never share an abort signal.
@@ -307,7 +321,7 @@ export class VisibleTranscriptReader {
       return trailing;
     }
     const state = { promise: null, trailing: new Map(), cacheAllowed: true };
-    state.promise = this.#read(filePath, sessionId, { inputProofIds, familyMessageId, maxMessages, maxBytes, sanitizePresentation, includeTitleTurn, cursor, publicView, verifySource, historyIndex, allowToolImages, signal, sourceWatermark, ownedAppendBase, forceFull }, state)
+    state.promise = this.#read(filePath, sessionId, { inputProofIds, familyMessageId, familyDeliveryOnly, maxMessages, maxBytes, sanitizePresentation, includeTitleTurn, cursor, publicView, verifySource, historyIndex, allowToolImages, signal, sourceWatermark, ownedAppendBase, forceFull }, state)
       .catch((error) => { if (!verifySource && error.code !== "history_cursor_stale") this.#drop(filePath); throw error; })
       .finally(() => { if (this.#inflight.get(filePath) === state) this.#inflight.delete(filePath); });
     this.#inflight.set(filePath, state);
@@ -339,7 +353,7 @@ export class VisibleTranscriptReader {
     if (!Number.isSafeInteger(maxBytes) || maxBytes < 1 || maxBytes > 64 * 1024 * 1024
       || !Number.isSafeInteger(maxEntries) || maxEntries < 1 || maxEntries > 100_000) throw new Error("context fork snapshot bounds are invalid");
     const filePath = path.resolve(sessionFile);
-    const { record } = await this.#readSnapshot({ sessionFile: filePath, sessionId, inputProofIds: [] });
+    const { record } = await this.#readSnapshot({ sessionFile: filePath, sessionId, inputProofIds: [], familyDeliveryOnly: true });
     if (!record) throw new Error("context fork source is unavailable");
     const ids = [...this.#activeEntryIds(record, leafId)].reverse();
     if (ids.length > maxEntries) throw new Error("context fork source exceeds the entry limit");
@@ -371,7 +385,7 @@ export class VisibleTranscriptReader {
   }
 
   async resolveRetryTurn({ sessionFile, sessionId, assistantId }) {
-    const snapshot = await this.#readSnapshot({ sessionFile, sessionId, inputProofIds: [] });
+    const snapshot = await this.#readSnapshot({ sessionFile, sessionId, inputProofIds: [], familyDeliveryOnly: true });
     return this.#retryTurn(snapshot.record, assistantId, snapshot.projection.leafId);
   }
 
@@ -401,7 +415,7 @@ export class VisibleTranscriptReader {
   }
 
   async resolveRetryInput({ sessionFile, sessionId, assistantId }) {
-    const snapshot = await this.#readSnapshot({ sessionFile, sessionId, inputProofIds: [] });
+    const snapshot = await this.#readSnapshot({ sessionFile, sessionId, inputProofIds: [], familyDeliveryOnly: true });
     const turn = this.#retryTurn(snapshot.record, assistantId, snapshot.projection.leafId);
     const entry = await this.#readCanonicalEntry(snapshot.record, turn.userId);
     const inputId = inputIdForEntry(entry);
@@ -436,7 +450,7 @@ export class VisibleTranscriptReader {
 
   async readImage({ sessionFile, sessionId, entryId, index, sanitizePresentation = false, allowToolImages = false }) {
     const filePath = path.resolve(sessionFile);
-    const { record } = await this.#readSnapshot({ sessionFile: filePath, sessionId, sanitizePresentation, inputProofIds: [] });
+    const { record } = await this.#readSnapshot({ sessionFile: filePath, sessionId, sanitizePresentation, inputProofIds: [], familyDeliveryOnly: true });
     const selected = this.#entry(record, entryId);
     const reference = selected?.item?.kind === "message" ? selected.item.message.images?.[index]?.ref : undefined;
     const inputImage = reference && reference.entryId === entryId && reference.index === index;
@@ -549,12 +563,14 @@ export class VisibleTranscriptReader {
       const selectedInputIds = Array.isArray(bounds.inputProofIds) ? new Set(bounds.inputProofIds) : null;
       const associations = await this.#inputAssociations(record, handle, bounds.signal,
         { dependencies: receiptDependencies, inputIds: selectedInputIds, provisional: pageScoped, physical: selectedInputIds !== null });
-      if (bounds.familyMessageId) for (const [id, node] of record.entries) {
-        if (node[RENDER]?.[3]?.familyMessageId === bounds.familyMessageId) await this.#readCanonicalEntry(record, id, { handle, signal: bounds.signal });
-      }
-      const visible = this.#visibleBranch(record, bounds, associations);
       // Full canonical payloads are leased to this operation only, never to #records.
       const hydrated = new Map();
+      if (bounds.familyMessageId) for (const [id, node] of record.entries) {
+        if (node[RENDER]?.[3]?.familyMessageId === bounds.familyMessageId) {
+          hydrated.set(id, await this.#readCanonicalEntry(record, id, { handle, signal: bounds.signal }));
+        }
+      }
+      const visible = this.#visibleBranch(record, bounds, associations);
       const title = bounds.includeTitleTurn ? await this.#title(record, visible, bounds, associations, handle, hydrated) : {};
       let end = visible.length;
       if (bounds.cursor) {
@@ -594,8 +610,13 @@ export class VisibleTranscriptReader {
       const familyMessages = {};
       for (const row of visible) {
         const item = row.render[3];
-        if (item?.kind === "agent_message" && item.direction === "from" && item.familyMessageId) {
-          familyMessages[item.familyMessageId] = await this.#hydrateRow(record, row, bounds, associations, handle, hydrated);
+        if (item?.kind === "agent_message" && item.direction === "from" && item.familyMessageId
+          && (!bounds.familyMessageId || item.familyMessageId === bounds.familyMessageId)) {
+          // Rendering reconciles pending/live routes using delivery state only.
+          // Full internal reads still return complete canonical family rows.
+          familyMessages[item.familyMessageId] = bounds.familyDeliveryOnly
+            ? { delivery: renderDelivery(row.render) }
+            : await this.#hydrateRow(record, row, bounds, associations, handle, hydrated);
         }
       }
       const projection = { ...page, historyPage, ...title, leafId: record.leafId,

@@ -707,7 +707,7 @@ export class HarnessSupervisor {
   async #recordInputDelivery(state, params, input) {
     const session = this.store.getSession(state.sessionId);
     const transcript = await this.transcriptReader.read({ sessionFile: session.sessionFile, sessionId: state.sessionId,
-      inputProofIds: [params.inputId] });
+      inputProofIds: [params.inputId], familyDeliveryOnly: true });
     const proof = transcript.inputDeliveries?.[params.inputId];
     if (!proof || proof.entryId !== params.entryId || Date.parse(proof.deliveredAt) !== Date.parse(params.deliveredAt)) {
       throw new Error("input delivery is not present in the canonical transcript");
@@ -958,7 +958,7 @@ export class HarnessSupervisor {
       if (!session || session.lifecycle === "deleted" || !session.sessionFile) throw new Error("session does not have a canonical Pi transcript");
       const { inputIds: _inputIds, inputEntries: _inputEntries, inputDeliveries: _inputDeliveries, inputAssociationStates: _inputAssociationStates, familyMessages = {}, ...visible } = await this.transcriptReader.read({ sessionFile: session.sessionFile,
         sessionId: session.sessionId, sanitizePresentation: session.kind === "root" && session.depth === 0,
-        maxMessages: params.limit ?? 100, before: params.before ?? null, publicView: true, inputProofIds: "page",
+        maxMessages: params.limit ?? 100, before: params.before ?? null, publicView: true, inputProofIds: "page", familyDeliveryOnly: true,
         allowToolImages: session.kind === "root" && session.depth === 0 });
       if (params.before) return visible;
       const actor = this.#actors.get(session.sessionId);
@@ -1619,7 +1619,7 @@ export class HarnessSupervisor {
       if (!session || session.kind !== "root" || !session.sessionFile) return;
       if (session.name !== defaultRootName(session.cwd, session.sessionId)) return;
       const transcript = await this.transcriptReader.read({
-        sessionFile: session.sessionFile, sessionId, maxMessages: 32, maxBytes: 24 * 1024, sanitizePresentation: true, includeTitleTurn: true,
+        sessionFile: session.sessionFile, sessionId, maxMessages: 32, maxBytes: 24 * 1024, sanitizePresentation: true, includeTitleTurn: true, familyDeliveryOnly: true,
       });
       const firstReply = this.#actors.get(sessionId)?.liveConversation.snapshot().find((message) => message.status === "complete" && message.text.trim());
       const turn = transcript.titleTurn ?? (transcript.titleUser && firstReply ? firstCompletedTitleTurn([
@@ -1652,7 +1652,7 @@ export class HarnessSupervisor {
       const session = this.store.getSession(sessionId);
       if (!session?.sessionFile) return;
       const transcript = await this.transcriptReader.read({ sessionFile: session.sessionFile,
-        sessionId, maxMessages: 512, maxBytes: 64 * 1024, inputProofIds: runs.map(run => run.inputId),
+        sessionId, maxMessages: 512, maxBytes: 64 * 1024, inputProofIds: runs.map(run => run.inputId), familyDeliveryOnly: true,
         sanitizePresentation: session.kind === "root" && session.depth === 0 });
       if (!settled()) return;
       for (const run of runs) {
@@ -2227,7 +2227,7 @@ export class HarnessSupervisor {
       let transcript, recordedInputIds, associations, reconciledIds;
       const reconcile = async ids => {
         const scope = new Set(ids);
-        const snapshot = await this.transcriptReader.read({ sessionFile: session.sessionFile, sessionId, inputProofIds: [...scope] });
+        const snapshot = await this.transcriptReader.read({ sessionFile: session.sessionFile, sessionId, inputProofIds: [...scope], familyDeliveryOnly: true });
         transcript = snapshot; reconciledIds = scope;
         recordedInputIds = new Set(snapshot.inputIds ?? []);
         associations = snapshot.inputAssociationStates ?? {};

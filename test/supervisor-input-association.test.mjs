@@ -79,6 +79,7 @@ test("unresolved input remains pending without stopping startup or unrelated adm
     "pending reconciliation selects exact pending IDs, never provisional page associations");
   const publicView = await client.request("get_visible_messages", { sessionId });
   assert.equal(proofReads.at(-1).inputProofIds, "page");
+  assert.equal(proofReads.at(-1).familyDeliveryOnly, true, "UI reconciliation requests delivery metadata, never all historical bodies");
   assert.equal(Object.hasOwn(publicView, "inputAssociationStates"), false, "Private association status must not enter the public DTO");
   assert.equal(Object.hasOwn(publicView, "inputDeliveries"), false);
   assert.equal(publicView.messages.find((message) => message.id === pending.inputId).delivery.deliveredAt, null);
