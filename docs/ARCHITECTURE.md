@@ -306,7 +306,7 @@ required, including after coalesced appends. Ordinary shared-reader observations
 cannot certify prefixes. Metadata traversal and selected legacy receipt reads
 remain; this optimization removes eligible old-prefix byte I/O, not all
 historical work. The shared `VisibleTranscriptReader` automatically retains at
-most 64 sessions and 64 MiB of accounted cache ownership, evicting least-recently
+most 64 sessions and 256 MiB of accounted cache ownership, evicting least-recently
 used records. Compact branch/source/render facts and short text (at most 256
 UTF-16 units per field) stay in that one cache; longer text stays in canonical
 JSONL. Normal pages hydrate only selected spans after ID/digest checks. Full

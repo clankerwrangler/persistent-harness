@@ -18,7 +18,8 @@ const MAX_JSONL_LINE_BYTES = 256 * 1024 * 1024;
 const utf8 = new TextDecoder("utf-8", { fatal: true });
 const HISTORY_CURSOR_MAX = 2048;
 
-const DEFAULT_CACHE_BYTES = 64 * 1024 * 1024;
+// One large session's metadata can need 30-50 MiB; room for several avoids cold rescans when switching.
+const DEFAULT_CACHE_BYTES = 256 * 1024 * 1024;
 const HASH_BLOCK_ENTRIES = 1024;
 const INLINE_TEXT_UNITS = 256;
 // One cache owner: Map<id, [parent, offset, length, digest ordinal, render, extras]>.
