@@ -118,7 +118,7 @@ print("EXACT_OPERATIONS_PASSED")`], configure(pi) {
   assert.equal(f.coor.failure, null, "admitted tool execution must not require a completed provider transcript");
   const results = f.manager.getBranch().filter(entry => entry.message?.role === "toolResult").map(entry => entry.message);
   assert.equal(results.length, 1, "only outer native result is canonical");
-  assert.match(results[0].details.stdout, /EXACT_OPERATIONS_PASSED/);
+  assert.match(JSON.stringify(results[0].content), /EXACT_OPERATIONS_PASSED/);
   assert.equal(results[0].details.ok, true);
   assert.equal(results[0].isError, false); assert.equal(results[0].usage.input, 5);
   assert.deepEqual(results[0].nestedCalls.calls.map(call => call.status), ["ok", "ok", "error", "error"]);
@@ -205,7 +205,7 @@ test("nested cancellation follows the originating cell and a later cell runs onc
   assert.equal(attempts, 2);
   const results = f.manager.getBranch().filter(entry => entry.message?.role === "toolResult").map(entry => entry.message);
   assert.equal(results.length, 2); assert.equal(results[0].nestedCalls.calls[0].status, "error");
-  assert.equal(results[1].nestedCalls.calls[0].id, "cell-2/1"); assert.match(results[1].details.stdout, /NEXT_CELL/);
+  assert.equal(results[1].nestedCalls.calls[0].id, "cell-2/1"); assert.match(JSON.stringify(results[1].content), /NEXT_CELL/);
 });
 
 test("late host completion cannot borrow a new cell's context or deliver its response there", { timeout: 30000 }, async t => {

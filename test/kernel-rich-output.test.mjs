@@ -413,7 +413,7 @@ test("a final result retains the exact legacy control-frame allowance", { timeou
 });
 
 
-test("serialized rich details keep canonical MIME once within the existing frame limit", { timeout: 30_000 }, async (t) => {
+test("serialized tool results store rich output once, in content", { timeout: 30_000 }, async (t) => {
   const kernel = await fixture(t);
   const result = await kernel.execute(`from _persistent_harness import SkillResult
 import sys
@@ -427,21 +427,20 @@ SkillResult({}, {"application/json": [1e20] * 170000, "image/png": "${PNG_A}", "
     assert.equal(renderedText(result).split(marker).length - 1, 1);
   const frame = encodeFrame(tool);
   const decoded = JSON.parse(frame.toString("utf8"));
-  assert.equal(Object.hasOwn(decoded.details, "mime"), false,
-    "The derived MIME alias must not duplicate canonical output in serialized details");
-  const retained = decoded.details.outputs.find(record => record.mime).mime;
-  assert.equal(retained["application/json"].length, 170000);
-  assert(retained["application/json"].every(value => value === 1e20));
-  assert.equal(retained["image/png"], PNG_A); assert.equal(retained["text/x-diff"], "SERIAL-DIFF");
+  for (const key of ["code", "stdout", "stderr", "outputs", "mime"])
+    assert.equal(Object.hasOwn(decoded.details, key), false,
+      `details.${key} must not duplicate output already stored in content or call arguments`);
+  assert.equal(frame.toString("utf8").split(PNG_A).length - 1, 1, "the image is serialized exactly once");
+  assert.deepEqual(decoded.content.filter(part => part.type === "image").map(part => part.data), [PNG_A]);
+  for (const marker of ["SERIAL-OUT", "SERIAL-ERR", "SERIAL-DIFF"])
+    assert.equal(JSON.stringify(decoded.content).split(marker).length - 1, 1);
   assert.equal(result.mime["application/json"].length, 170000,
     "Formatting must not remove the kernel's in-memory summary API");
-  for (const key of ["ok", "code", "durationMs", "stdout", "stderr", "truncated", "totalBytes", "richOutputBytes", "richOutputLimit"])
+  for (const key of ["ok", "durationMs", "truncated", "totalBytes", "richOutputBytes", "richOutputLimit", "executionId"])
     assert.equal(tool.details[key], result[key]);
-  assert.equal(extensionInternals.pythonResultText(tool.details), extensionInternals.pythonResultText(result),
-    "The existing renderResult reader must consume the same canonical sequence");
   const legacy = { ...result }; delete legacy.outputs;
   const legacyTool = extensionInternals.pythonToolResult(legacy);
-  assert.equal(legacyTool.details.mime["application/json"].length, 170000);
+  assert.equal(Object.hasOwn(legacyTool.details, "mime"), false);
   assert.equal(encodeFrame(legacyTool).length > 0, true);
   assert.deepEqual(legacyTool.content.filter(part => part.type === "image").map(part => part.data), [PNG_A]);
 });
