@@ -154,6 +154,14 @@ export class PythonKernel {
   #tail = Promise.resolve();
   #active;
   #snapshotTimer;
+  #coldTimer;
+  #coldSupported = false;
+  #coldEpoch = 0;
+  #coldPass;
+  #coldDueAt = 0;
+  #coldPauseUntil = 0;
+  #coldStats = { state: "none" };
+
   #interruptTimer;
   #generation = 0;
   #failureEpoch = 0;
@@ -223,6 +231,7 @@ export class PythonKernel {
     if (this.#readyPromise) return this.#readyPromise;
     if (this.#closed) return Promise.reject(new Error("kernel is closed"));
     const starting = this.#startOnce(onRuntimeValidated);
+    starting.then(() => this.#armColdMemory(), () => {});
     this.#readyPromise = starting;
     starting.catch(() => {
       if (this.#readyPromise === starting && !this.#process) this.#readyPromise = undefined;
@@ -231,6 +240,8 @@ export class PythonKernel {
   }
 
   async #startOnce(onRuntimeValidated) {
+    this.#coldSupported = false;
+    this.#coldStats = { state: "none" };
     this.#runtimeValidated = false;
     this.#runtimeValidationPromise = undefined;
     this.#runtimeVersions = undefined;
@@ -350,6 +361,9 @@ export class PythonKernel {
           this.#terminateOnControlError(new Error("Python ready before runtime validation"));
           return;
         }
+        this.#coldSupported = frame.coldResidencyVersion === 1;
+        this.#coldStats = this.#coldSupported ? { version: 1, state: "none" } : { state: "unsupported" };
+        this.#coldDueAt = Date.now() + 30_000;
         this.#ready = true;
         this.#resolveReady?.({ ...frame, versions: this.#runtimeVersions });
         continue;
@@ -368,7 +382,7 @@ export class PythonKernel {
           frame.outputType === undefined);
         continue;
       }
-      if (["done", "snapshot_done", "shutdown_done", "memory_diagnostics_done", "protocol_error"].includes(frame.type)) {
+      if (["done", "snapshot_done", "shutdown_done", "memory_diagnostics_done", "cold_memory_done", "protocol_error"].includes(frame.type)) {
         this.#pending.delete(frame.id);
         if ((frame.type === "snapshot_done" && frame.ok === false) || frame.type === "protocol_error") {
           pending.reject(new Error(frame.error ?? "kernel command failed"));
@@ -443,6 +457,7 @@ export class PythonKernel {
   }
 
   execute(code, { signal, onUpdate, toolContext, namespaceCheckpoint, checkpointInBackground = false, onCheckpoint } = {}) {
+    this.#cancelColdMemory();
     const deferred = checkpointInBackground && namespaceCheckpoint ? Promise.withResolvers() : null;
     const failureEpoch = this.#failureEpoch;
     const notAdmitted = () => {
@@ -572,7 +587,7 @@ export class PythonKernel {
         this.#active = undefined;
       }
     });
-    const settled = operation.finally(() => { this.#queuedOperations -= 1; });
+    const settled = operation.finally(() => { this.#queuedOperations -= 1; this.#armColdMemory(); });
     this.#tail = settled.then(() => undefined, () => undefined);
     if (!deferred) return operation;
     operation.then(deferred.resolve, deferred.reject);
@@ -598,6 +613,70 @@ export class PythonKernel {
     return this.#process.kill("SIGKILL");
   }
 
+  get coldMemoryStats() { return { ...this.#coldStats }; }
+
+  #coldEligible() {
+    return this.#coldSupported && !this.#closed && this.#ready && this.isRunning && !this.#queuedOperations
+      && !this.#snapshotTimer
+      && !this.#pending.size && !this.#active;
+  }
+
+  #cancelColdMemory(discard = false) {
+    if (this.#coldTimer) clearTimeout(this.#coldTimer);
+    this.#coldTimer = undefined;
+    this.#coldEpoch++;
+    this.#coldPauseUntil = Date.now() + 100;
+    if (this.#coldPass) this.#coldStats = { ...this.#coldStats, state: discard ? "cancelled" : "deferred" };
+    // Only bounded mapping metadata survives ordinary cells, never namespace data.
+    if (discard) this.#coldPass = undefined;
+  }
+
+  #armColdMemory() {
+    if (!this.#coldEligible() || this.#coldTimer) return;
+    const epoch = this.#coldEpoch;
+    const due = this.#coldPass?.resumeAt ?? this.#coldDueAt;
+    this.#coldTimer = setTimeout(() => {
+      this.#coldTimer = undefined;
+      if (epoch !== this.#coldEpoch || !this.#coldEligible()) return;
+      const pass = this.#coldPass ?? { token: randomUUID(), phase: "mark", calls: 0, resumeAt: 0 };
+      this.#coldPass = pass;
+      void this.#coldStep(pass, epoch);
+    }, Math.max(0, due - Date.now(), this.#coldPauseUntil - Date.now()));
+    this.#coldTimer.unref();
+  }
+
+  async #coldStep(pass, epoch) {
+    if (this.#coldPass !== pass || epoch !== this.#coldEpoch || !this.#coldEligible()) return;
+    // Reserve the same control/FIFO owner synchronously before later cells queue.
+    this.#queuedOperations++;
+    pass.calls++;
+    const operation = this.#command("cold_memory", { token: pass.token, phase: pass.phase });
+    const settled = operation.finally(() => {
+      this.#queuedOperations--;
+      if (epoch !== this.#coldEpoch) this.#armColdMemory();
+    });
+    this.#tail = settled.then(() => undefined, () => undefined);
+    let result;
+    try { result = (await settled).result; }
+    catch { result = { state: "unavailable" }; }
+    if (this.#coldPass !== pass || epoch !== this.#coldEpoch) return;
+    const states = ["mark", "waiting", "pageout", "complete", "small", "hot", "no-swap", "no-pressure", "unsupported", "unreclaimable", "unavailable", "cancelled"];
+    const stats = { state: states.includes(result?.state) ? result.state : "unavailable" };
+    for (const key of ["markedBytes", "pageoutBytes", "durationNs", "rssBefore", "rssAfter", "swapBefore", "swapAfter", "adviceDurationNs", "maxAdviceDurationNs", "totalDurationNs", "maxStepDurationNs"])
+      if (Number.isSafeInteger(result?.[key]) && result[key] >= 0) stats[key] = result[key];
+    if (stats.state === "unsupported") this.#coldSupported = false;
+    this.#coldStats = { version: 1, ...stats, calls: pass.calls };
+    // A fixed maintenance cadence is not restarted by small ordinary cells.
+    if (!["mark", "waiting", "pageout"].includes(stats.state) || pass.calls >= 4096) {
+      this.#coldPass = undefined;
+      this.#coldDueAt = Date.now() + 30_000;
+    } else {
+      pass.resumeAt = Date.now() + (stats.state === "waiting" ? 1000 : 0);
+      if (stats.state === "waiting") pass.phase = "pageout";
+    }
+    this.#armColdMemory();
+  }
+
   #scheduleSnapshot() {
     if (this.#snapshotTimer) clearTimeout(this.#snapshotTimer);
     this.#snapshotTimer = setTimeout(() => {
@@ -616,13 +695,14 @@ export class PythonKernel {
   }
 
   #enqueueSnapshot({ onlyIfDirty = false } = {}) {
+    this.#cancelColdMemory();
     this.#queuedOperations += 1;
     const operation = this.#tail.then(async () => {
       if (!this.isRunning) return { found: false, saved: [], skipped: [] };
       if (onlyIfDirty && this.#generation <= this.#snapshotGeneration) return this.#lastSnapshot;
       return this.#takeSnapshot();
     });
-    this.#tail = operation.finally(() => { this.#queuedOperations -= 1; }).then(() => undefined, () => undefined);
+    this.#tail = operation.finally(() => { this.#queuedOperations -= 1; this.#armColdMemory(); }).then(() => undefined, () => undefined);
     return operation;
   }
 
@@ -635,7 +715,7 @@ export class PythonKernel {
     this.#queuedOperations += 1;
     const operation = this.#command("memory_diagnostics")
       .then(frame => historyMemoryDiagnostics(frame.diagnostics), () => ({ state: "unavailable-error" }))
-      .finally(() => { this.#queuedOperations -= 1; });
+      .finally(() => { this.#queuedOperations -= 1; this.#armColdMemory(); });
     this.#tail = operation.then(() => undefined, () => undefined);
     return operation;
   }
@@ -647,6 +727,7 @@ export class PythonKernel {
   }
 
   async close({ snapshot = true } = {}) {
+    this.#cancelColdMemory(true);
     if (this.#closed) return;
     this.#closed = true;
     if (this.#snapshotTimer) clearTimeout(this.#snapshotTimer);
@@ -682,6 +763,7 @@ export class PythonKernel {
   }
 
   #terminateOnControlError(error) {
+    this.#cancelColdMemory(true);
     // A broken control channel is not execution completion. Keep promises pending
     // until exit confirms that the controlled Python process can no longer write.
     this.#controlError ??= error;
@@ -690,6 +772,8 @@ export class PythonKernel {
   }
 
   #failAll(error) {
+    this.#coldSupported = false;
+    this.#cancelColdMemory(true);
     // Queued cells may depend on mutations lost with this process. Require a
     // new explicit execution instead of silently running them on a restore.
     this.#failureEpoch += 1;

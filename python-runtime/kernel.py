@@ -1060,6 +1060,7 @@ namespace_checkpoint = restore_report.get("namespaceCheckpoint")
 emit({
     "type": "ready",
     "version": PROTOCOL_VERSION,
+    "coldResidencyVersion": 1,
     "python": runtime_versions["python"],
     "versions": runtime_versions,
     "skills": sorted(proxies),
@@ -1067,6 +1068,8 @@ emit({
     "snapshotCleanup": snapshot_cleanup_report,
     "snapshotRecovery": snapshot_recovery_report,
 })
+
+cold_residency = None
 
 while True:
     try:
@@ -1099,6 +1102,12 @@ while True:
                 "errorType": type(error).__name__ if error is not None else None,
                 "error": str(error) if error is not None else None,
             })
+        elif command_type == "cold_memory":
+            if cold_residency is None:
+                from _cold_residency import ColdResidency
+                cold_residency = ColdResidency()
+            outcome = cold_residency.step(command.get("token"), command.get("phase"))
+            emit({"type": "cold_memory_done", "id": command_id, "result": outcome})
         elif command_type == "memory_diagnostics":
             emit({"type": "memory_diagnostics_done", "id": command_id,
                   "diagnostics": collect_history_memory(shell.history_manager)})
@@ -1112,12 +1121,12 @@ while True:
         else:
             emit({"type": "protocol_error", "id": command_id, "error": f"unsupported command: {command_type}"})
     except KeyboardInterrupt:
-        terminal_type = "snapshot_done" if command_type == "snapshot" else "done"
+        terminal_type = "snapshot_done" if command_type == "snapshot" else "cold_memory_done" if command_type == "cold_memory" else "done"
         emit({"type": terminal_type, "id": command_id, "ok": False,
               "errorType": "KeyboardInterrupt", "error": "interrupted"})
     except BaseException as error:
         traceback.print_exc()
-        terminal_type = "snapshot_done" if command_type == "snapshot" else "done"
+        terminal_type = "snapshot_done" if command_type == "snapshot" else "cold_memory_done" if command_type == "cold_memory" else "done"
         emit({
             "type": terminal_type,
             "id": command_id,

@@ -617,3 +617,32 @@ committed snapshots, pending sole copies, source reload and ordered range extent
 (including duplicate-ID tails); its alias and range-extent controls must fail. These finite models abstract JSONL byte decoding, JavaScript aliases
 and actual allocations. SDK UTF-8/value tests, differential projections and
 synthetic retained-memory measurements cover those boundaries.
+
+
+## Automatic kernel cold residency
+
+`kernel-cold-memory.test.mjs` exercises the real ordinary `PythonKernel` path with
+a private opaque SQLite transaction, aliases and a touched 32 MiB native mapping.
+A fake Node clock and private pressure stub control eligibility; Linux advice,
+RSS/swap observations and next-cell state/use are real. The mixed-work regression
+keeps issuing small ordinary cells every one virtual second, exercising real
+checkpoint drain without a 30-second quiet interval. Guard fixtures cover queued
+and native execution, scheduled/held checkpoints, host replies, snapshot-demand and
+diagnostic rearm, close, legacy capability and advertised-unsupported outcomes.
+Pure helper fixtures cover hot/replaced/locked mappings between batches, UTF-8
+paths, missing PSI, unknown/no-swap policy and bounded reads/chunks.
+
+`KernelColdResidency` checks these bounded ownership/state/admission/cadence
+invariants. TLC checks 2,095,266 generated states, 257,296 distinct states and depth
+31. Its 17 matching fault configurations must fail their intended invariants.
+The abstraction does not prove OS timing, physical memory release, Linux advice
+semantics, arbitrary thread behavior or durable restart recovery. Exact commands,
+model outcomes, swap-cache evidence and latency limitations are in
+[the verification record](validation/kernel-cold-residency.md).
+
+`KernelColdStatus` separately checks the existing actor-status observation's fixed
+projection, legacy omission, bounded values and lack of namespace mutation. Its
+positive configuration checks 12 states at depth 2; `legacy`, `payload`, `bounds`
+and `mutation` controls fail. The actual ordinary-kernel fixture calls the existing
+Python `kernel.status()` through its real host bridge after automatic advice;
+projection fixtures reject invalid numbers, accessors and foreign payload fields.

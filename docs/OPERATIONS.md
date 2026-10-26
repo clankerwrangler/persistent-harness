@@ -27,6 +27,35 @@ Before restarting, identify what owns the supervisor lifetime. `harness-restart`
 
 Bind recovery to the service/container generation as well as PID and process start time; replacement containers can reuse the same numeric PID. Record the target session and idempotent continuation receipt before interruption, then verify both service readiness and actual session return. A healthy replacement alone does not prove continuation. Preserve interrupted restart-job evidence rather than replaying shutdown or fabricating a completed receipt.
 
+## Automatic kernel cold residency
+
+Ordinary Python execution automatically schedules bounded pressure maintenance
+through its existing kernel owner. No caller setting or alternate execution tool
+is required. A maintenance deadline is not reset by every small cell, so untouched
+bulk state can become cold while ordinary work continues. Active/queued Python,
+checkpoint, host-call and shutdown ownership take priority. Main/opaque namespace
+state, identities and aliases remain intact; needed pages fault back naturally.
+
+The helper advises only currently private anonymous mappings, checks cold/hot
+and locked/changed ranges between bounded batches, and skips unknown capacity,
+no-swap, unsupported and unreclaimable cases. It does not start another kernel,
+serialize user state, clear history, collect garbage, change OS limits or replay
+cells. Existing Node reclamation and checkpoint/restart recovery remain separate.
+The optional wire capability is private and additive; older custom kernels keep
+ordinary execution without receiving unrecognized cold commands.
+
+The existing actor-scoped `kernel.status()` response adds optional `coldMemory`
+metadata for an advertised version-1 kernel. It contains only `version`, a fixed
+state token, and bounded numeric advice/residency/timing counters from the last
+pass. It performs no new collection or execution and accepts no other-session
+selector. Legacy or unknown-capability kernels omit the field; a new kernel with
+unsupported advice reports that fixed state. This is the canary observation path.
+
+An advice pass can reduce a process's resident set while leaving pages in
+reclaimable swap cache. Do not report RSS differences as equal physical cgroup
+savings. Paging can add next-use latency, and one kernel syscall cannot be
+preempted by a new cell. See [measurement and qualification limits](validation/kernel-cold-residency.md).
+
 ## Explicit numeric memory observation
 
 ```sh
