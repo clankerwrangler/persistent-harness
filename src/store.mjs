@@ -351,9 +351,18 @@ export class HarnessStore {
   }
 
   #terminalizeDeletedSessionWork(now = Date.now()) {
-    for (const row of this.#db.prepare("SELECT id FROM sessions WHERE lifecycle = 'deleted'").all()) {
-      this.#terminalizeSessionWork(row.id, now);
-    }
+    // One set-based pass per table. Looping over every deleted session rescanned
+    // messages per session (34 s with 1,503 deleted sessions) on each daemon start.
+    const deleted = "SELECT id FROM sessions WHERE lifecycle = 'deleted'";
+    this.#db.prepare(`UPDATE messages SET state = 'rejected', last_error = ?, delivered_at = coalesce(delivered_at, ?)
+      WHERE state IN ('accepted', 'queued', 'delivered') AND target_id IN (${deleted})`)
+      .run("target session was deleted", now);
+    this.#db.prepare(`UPDATE messages SET state = 'rejected', last_error = ?, delivered_at = coalesce(delivered_at, ?)
+      WHERE state = 'accepted' AND sender_id IN (${deleted})`)
+      .run("sender session was deleted before its transcript entry was recorded", now);
+    this.#db.prepare(`UPDATE child_tasks SET state = 'failed', completed_at = coalesce(completed_at, ?), error = ?
+      WHERE state IN ('queued', 'submitted') AND child_id IN (${deleted})`)
+      .run(now, "child session was deleted before its task completed");
   }
 
   #migrate() {
