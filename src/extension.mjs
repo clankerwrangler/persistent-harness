@@ -1117,6 +1117,9 @@ ${catalog.diagnostics.map((item) => item.error).join("\n")}`);
       socketPath,
       reconnectBaseMs: 100,
       reconnectMaxMs: 2000,
+      // Turn preparation and heartbeats must ride out multi-second pauses
+      // (supervisor startup, large-heap GC, disk contention) instead of failing the turn.
+      requestTimeoutMs: 30_000,
     });
 
     client.on("status", ({ state }) => {

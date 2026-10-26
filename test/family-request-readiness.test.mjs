@@ -24,7 +24,7 @@ async function waitFor(predicate, label) {
   assert(predicate(), label);
 }
 
-async function fixture(t, { holdReconnect = false, dropAck = false, rejectFlush = false, dropFlush = false, timeoutMs = 600, historyGate } = {}) {
+async function fixture(t, { holdReconnect = false, dropAck = false, rejectFlush = false, dropFlush = false, delayFlushMs = 0, keepClientTimeout = false, timeoutMs = 600, historyGate } = {}) {
   const dir = await mkdtemp("/tmp/ph-fr-");
   process.env.PI_CODING_AGENT_DIR = dir;
   const sessionFile = path.join(dir, "canonical.jsonl"), socketPath = path.join(dir, "actor.sock");
@@ -69,13 +69,16 @@ async function fixture(t, { holdReconnect = false, dropAck = false, rejectFlush 
           socket.write(encodeFrame(errorResponse(request.id, request.type, "verified flush rejection"))); continue;
         }
         if (request.type === "flush_actor_inputs" && dropFlush) { socket.destroy(); continue; }
+        if (request.type === "flush_actor_inputs" && delayFlushMs) {
+          setTimeout(() => socket.write(encodeFrame(response(request.id, request.type, { flushed: true, fastMode: false }))), delayFlushMs); continue;
+        }
         socket.write(encodeFrame(response(request.id, request.type, request.type === "flush_actor_inputs" ? { flushed: true, fastMode: false } : {})));
       }
     });
   });
   const start = HarnessClient.prototype.start;
   t.mock.method(HarnessClient.prototype, "start", function (registration) {
-    client = this; this.heartbeatMs = 0; this.requestTimeoutMs = timeoutMs;
+    client = this; this.heartbeatMs = 0; if (!keepClientTimeout) this.requestTimeoutMs = timeoutMs;
     this.reconnectBaseMs = 25; this.reconnectMaxMs = 25;
     return start.call(this, registration);
   });
@@ -207,3 +210,12 @@ for (const terminal of ["rejected", "stopped", "aborted", "timed out"]) {
     assert.equal(f.client.listenerCount("registered"), before.registered);
   });
 }
+
+test("a supervisor that answers flush after several seconds does not fail request preparation", { timeout: 15000 }, async t => {
+  const f = await fixture(t, { delayFlushMs: 4000, keepClientTimeout: true });
+  const preparation = f.prepare();
+  const prepared = await preparation.result;
+  assert.equal(preparation.outcome, "resolved", `preparation failed: ${preparation.error?.message}`);
+  assert.match(prepared.systemPrompt, /base prompt/);
+  assert.equal(f.requests.filter(request => request.type === "flush_actor_inputs").length, 1);
+});
