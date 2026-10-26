@@ -221,13 +221,13 @@ function pythonResultText(result) {
   return pythonOutputContent(result).filter((item) => item.type === "text").map((item) => item.text).join("\n");
 }
 
+// Payload fields already persisted once: output in `content`, code in the call's
+// arguments. Keeping them in details stored every cell two or three times.
+const PYTHON_DETAIL_PAYLOAD_KEYS = ["code", "stdout", "stderr", "outputs", "mime"];
+
 function pythonToolResult(result) {
-  let details = result;
-  if (Array.isArray(result.outputs)) {
-    // Canonical outputs already contain this derived MIME summary.
-    details = { ...result };
-    delete details.mime;
-  }
+  const details = { ...result };
+  for (const key of PYTHON_DETAIL_PAYLOAD_KEYS) delete details[key];
   const content = pythonOutputContent(result);
   if (result.namespaceCheckpointState === "pending") {
     content.push({ type: "text", text: "Python execution has ended; its namespace save is pending." });
@@ -1016,7 +1016,11 @@ ${catalog.diagnostics.map((item) => item.error).join("\n")}`);
     },
     renderResult(result, { expanded }, theme) {
       const details = result.details ?? {};
-      const lines = [pythonResultText(details)];
+      // Legacy entries still carry payload details; current ones render from content.
+      const text = Array.isArray(result.content) && result.content.length
+        ? result.content.filter((item) => item.type === "text").map((item) => item.text).join("\n")
+        : pythonResultText(details);
+      const lines = [text];
       if (expanded) lines.push(`${details.durationMs ?? 0}ms${details.truncated ? " · truncated" : ""}`);
       return linesComponent(lines, (text) => theme.fg(details.ok === false ? "error" : "toolOutput", text));
     },
