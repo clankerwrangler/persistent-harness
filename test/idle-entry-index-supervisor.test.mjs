@@ -333,6 +333,7 @@ async function idleMemoryClock(t, f) {
 test("one own-idle timer gives the reducer 30s, attempts once, and does not await GC at passivation", async t => {
   const f = await fixture(t, { actorInactivityMs: 90_000 }); await idleMemoryClock(t, f);
   assert.equal(f.actor.args[0], "--expose-gc", "only managed actor launch opts in");
+  assert.ok(f.actor.args.includes("--max-semi-space-size=4"), "managed actors cap their young generation");
   const quiet = f.supervisor.store.getSession(f.id).quietSince;
   t.mock.timers.tick(29_999); await flushIdle(); assert.equal(f.actor.reductions.length, 0);
   t.mock.timers.tick(1); await flushIdle(); assert.equal(f.actor.reductions.length, 1);
