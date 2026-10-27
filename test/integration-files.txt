@@ -62,3 +62,4 @@ supervisor-settled-stop.test.mjs
 supervisor-single-instance.test.mjs
 supervisor-transport.test.mjs
 wait-continuation.test.mjs
+files-show-kernel.test.mjs

@@ -4,7 +4,7 @@ import { createHash } from "node:crypto";
 import path from "node:path";
 import { isDeepStrictEqual } from "node:util";
 import { MAX_INPUT_REQUEST_BYTES, normalizeInputImages } from "./input-images.mjs";
-import { inputIdForEntry, canonicalUserInputId, cleanHarnessInput, createActorInputAssociation, actorInputRenderEvidence, associateVisibleInput, projectVisibleMessage, assistantMessageParts } from "./conversation-projection.mjs";
+import { inputIdForEntry, canonicalUserInputId, cleanHarnessInput, createActorInputAssociation, actorInputRenderEvidence, associateVisibleInput, projectVisibleMessage, assistantMessageParts , toolResultImages } from "./conversation-projection.mjs";
 import { timelineSequence } from "./conversation-birth.mjs";
 import { sanitizePresentationText } from "./presentation-directive.mjs";
 import { selectIncomingFamilyMessages, projectAgentMessageEntry } from "./agent-message-projection.mjs";
@@ -460,7 +460,8 @@ export class VisibleTranscriptReader {
       throw new Error("visible image does not exist on the active transcript branch");
     }
     const entry = await this.#readCanonicalEntry(record, entryId);
-    const content = entry.type === "message" && (entry.message?.role === "user" || (toolImage && entry.message?.role === "toolResult")) ? entry.message.content
+    const content = entry.type === "message" && entry.message?.role === "user" ? entry.message.content
+      : toolImage && entry.type === "message" && entry.message?.role === "toolResult" ? toolResultImages(entry.message)
       : entry.type === "custom_message" && ["scheduled_job", "background_notification"].includes(selected.item?.message?.role) ? entry.content : null;
     if (!content) throw new Error("visible image source does not match its transcript entry");
     const candidates = Array.isArray(content) ? content.filter((part) => part?.type === "image")
@@ -728,8 +729,7 @@ export class VisibleTranscriptReader {
     }
     // Cache availability only, never tool text, arguments, details, or image bytes.
     // The image reader revalidates canonical bytes under the input-image bounds.
-    const toolImageCount = entry.type === "message" && entry.message?.role === "toolResult" && Array.isArray(entry.message.content)
-      ? entry.message.content.filter((part) => part?.type === "image").length : 0;
+    const toolImageCount = entry.type === "message" && entry.message?.role === "toolResult" ? toolResultImages(entry.message).length : 0;
     const row = compactRender(message ? { kind: "message", message } : progress ?? agentMessage ?? null, entry.id);
     const parts = assistantMessageParts(entry);
     let defaultParts = false;
