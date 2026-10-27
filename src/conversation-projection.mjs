@@ -46,6 +46,11 @@ export function toolResultImages(message) {
   return parts.filter((part) => part?.type === "image").map((part) => ({ type: "image", data: part.data, mimeType: part.mimeType }));
 }
 
+// Shown-only images and attachments are meant for the user; other tool images are working material.
+export function toolImagesForUser(message) {
+  return message?.details?.imagesForUser === true || (Array.isArray(message?.details?.shownImages) && message.details.shownImages.length > 0);
+}
+
 function iso(value) { if (value === undefined || value === null) return null; const date = new Date(value); return Number.isNaN(date.valueOf()) ? null : date.toISOString(); }
 
 export function canonicalUserInputId(entry) {
@@ -244,7 +249,7 @@ export function projectVisibleMessage(entry, { streaming = false, imageReference
     const images = visibleUserImages(toolResultImages(message), { references: imageReferences, entryId: entry.id })
       .map((image, index) => ({ ...image, name: `Output image ${index + 1}` }));
     if (!images.length) return undefined;
-    return { id: entry.id, role: "tool_output", text: "", images,
+    return { id: entry.id, role: "tool_output", text: "", images, ...(toolImagesForUser(message) ? { forUser: true } : {}),
       createdAt: iso(message.timestamp ?? entry.timestamp), status: "complete" };
   }
   if (!message || !["user", "assistant"].includes(message.role)) return undefined;

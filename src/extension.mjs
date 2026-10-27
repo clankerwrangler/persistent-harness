@@ -198,9 +198,12 @@ function linesComponent(lines, color = (text) => text) {
 // files.show(): an image for Commander only. It travels in the result's details, which the
 // conversation displays and the model never receives; the model gets a note in its place.
 export const SHOWN_IMAGE_MIME = "application/x-harness-shown-image";
+// files.attachment(): images the model sees that are also meant for Commander. Other
+// image outputs are working material the conversation keeps folded away.
+export const FOR_USER_MIME = "application/x-harness-for-user";
 const SHOWABLE_IMAGE_TYPES = ["image/png", "image/jpeg", "image/gif", "image/webp"];
 
-function pythonOutputContent(result, shown = null) {
+function pythonOutputContent(result, shown = null, marks = null) {
   const outputs = Array.isArray(result.outputs) ? result.outputs : [
     ...[result.stdout, result.stderr].filter(Boolean).map((text) => ({ text: text.trimEnd() })),
     ...(result.mime ? [{ mime: result.mime }] : []),
@@ -209,6 +212,7 @@ function pythonOutputContent(result, shown = null) {
   for (const output of outputs) {
     if (typeof output.text === "string" && output.text) content.push({ type: "text", text: output.text });
     const mime = output.mime ?? {};
+    if (marks && mime[FOR_USER_MIME] === true) marks.forUser = true;
     const text = [mime["text/plain"], mime["text/x-diff"]].filter(Boolean).map(String).join("\n");
     if (text) content.push({ type: "text", text });
     for (const [mimeType, data] of Object.entries(mime)) {
@@ -237,9 +241,10 @@ const PYTHON_DETAIL_PAYLOAD_KEYS = ["code", "stdout", "stderr", "outputs", "mime
 function pythonToolResult(result) {
   const details = { ...result };
   for (const key of PYTHON_DETAIL_PAYLOAD_KEYS) delete details[key];
-  const shown = [];
-  const content = pythonOutputContent(result, shown);
+  const shown = [], marks = {};
+  const content = pythonOutputContent(result, shown, marks);
   if (shown.length) details.shownImages = shown;
+  if (marks.forUser) details.imagesForUser = true;
   if (result.namespaceCheckpointState === "pending") {
     content.push({ type: "text", text: "Python execution has ended; its namespace save is pending." });
   }

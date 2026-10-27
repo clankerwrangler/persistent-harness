@@ -31,4 +31,10 @@ display(SkillResult({"fileName": "card.png", "shownTo": "user only"},
   assert.equal(content.some((part) => part.type === "image"), false);
   assert.match(content.map((part) => part.text ?? "").join("\n"), /Image shown to Commander: card\.png/);
   assert.equal(details.shownImages?.[0]?.data, PNG);
+  // The bundle files.attachment() returns: the image reaches the model and is marked for the user.
+  const attached = extensionInternals.pythonToolResult(await kernel.execute(`from _persistent_harness import SkillResult
+from IPython.display import display
+display(SkillResult({"fileName": "card.png"}, {"image/png": "${PNG}", "application/x-harness-for-user": True}))`));
+  assert.equal(attached.content.filter((part) => part.type === "image").length, 1);
+  assert.equal(attached.details.imagesForUser, true);
 });

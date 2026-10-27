@@ -37,7 +37,8 @@ def list(path: str = ".", limit: int = 500) -> SkillResult:
 def attachment(path: str) -> SkillResult:
     result = host_request("files.attachment", {"path": path})
     data = result.pop("data")
-    return SkillResult(result, {result["mimeType"]: data})
+    # Marks the output as meant for the user, so the conversation shows it up front.
+    return SkillResult(result, {result["mimeType"]: data, "application/x-harness-for-user": True})
 
 
 def show(path: str) -> SkillResult:
