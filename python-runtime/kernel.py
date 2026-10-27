@@ -1071,6 +1071,24 @@ emit({
 
 cold_residency = None
 
+try:
+    import ctypes
+    _malloc_trim = ctypes.CDLL(None).malloc_trim
+    _malloc_trim.argtypes = [ctypes.c_size_t]
+except (OSError, AttributeError):
+    # Without glibc there is no trim; freed memory then stays with the allocator.
+    _malloc_trim = None
+
+
+def release_free_heap():
+    """Hand glibc free pages back to the OS; live Python objects are untouched."""
+    if _malloc_trim is not None:
+        _malloc_trim(0)
+
+
+# Restore parses snapshot bytes that are garbage once the namespace is rebuilt.
+release_free_heap()
+
 while True:
     try:
         command = receive()
@@ -1137,3 +1155,6 @@ while True:
 
     finally:
         active_output_id = None
+        if command_type in ("execute", "snapshot"):
+            # Cell temporaries otherwise stay resident in glibc arenas for the kernel's life.
+            release_free_heap()
