@@ -29,7 +29,7 @@ function discoverPi() {
   for (const name of readdirSync(runtimes).filter((entry) => entry.startsWith("pi-0.99.1-")).sort().reverse()) {
     const dist = path.join(runtimes, name, "node_modules/pi-sdk-runtime/node_modules/@earendil-works/pi-coding-agent/dist");
     if (existsSync(path.join(dist, "cli.js")) && existsSync(path.join(dist, "index.js"))) {
-      return { command: path.join(dist, "cli.js"), module: path.join(dist, "index.js") };
+      return { command: path.join(dist, "cli.js"), module: path.join(dist, "index.js"), root: path.join(runtimes, name) };
     }
   }
   return null;
@@ -100,15 +100,22 @@ const env = {
   PI_CODING_AGENT_DIR: path.join(home, "agent"),
   // Tests must never download a runtime as a side effect.
   PI_HARNESS_AUTO_INSTALL: "0", UV_OFFLINE: "1",
+  // Tests wait on background completion scans; the production 5 s cadence only slows them.
+  PI_HARNESS_BACKGROUND_COMPLETION_TICK_MS: process.env.PI_HARNESS_BACKGROUND_COMPLETION_TICK_MS ?? "100",
   PI_HARNESS_SKILLS_PATH: process.env.PI_HARNESS_SKILLS_PATH ?? path.join(checkout, "skills"),
   PI_HARNESS_PRESENTATION_NAMESPACE: process.env.PI_HARNESS_PRESENTATION_NAMESPACE ?? "harness",
   ...(pi ? { PI_HARNESS_PI_COMMAND: pi.command, PI_HARNESS_PI_MODULE: pi.module } : {}),
   ...(python ? { PI_HARNESS_PYTHON: python } : {}),
   ...(officialPi ? { PI_HARNESS_TEST_OFFICIAL_PI_MODULE: officialPi } : {}),
+  // The native group checks that Pi's CLI and SDK come from this one install.
+  ...(pi?.root && !process.env.PI_HARNESS_NATIVE_ASYNC_BUILD_ROOT ? { PI_HARNESS_NATIVE_ASYNC_BUILD_ROOT: pi.root } : {}),
   ...(managedSeed ? { PI_HARNESS_TEST_MANAGED_SEED: managedSeed } : {}),
 };
 try {
-  const result = spawnSync(process.execPath, ["--test", "--test-concurrency=1", ...files.map((name) => path.join("test", name))],
+  // Files run in separate processes with private temporary state, so a few can run at once.
+  // Keep it modest: the suite shares the machine with live sessions.
+  const concurrency = process.env.PI_HARNESS_TEST_CONCURRENCY ?? "3";
+  const result = spawnSync(process.execPath, ["--test", `--test-concurrency=${concurrency}`, ...files.map((name) => path.join("test", name))],
     { cwd: checkout, env, stdio: "inherit" });
   process.exitCode = result.status ?? 1;
 } finally {

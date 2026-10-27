@@ -48,7 +48,7 @@ test("two supervisors started at the same moment leave exactly one running", asy
 
   const refused = await Promise.race([
     ...daemons.map((daemon, index) => daemon.exited.then((outcome) => ({ ...outcome, index }))),
-    new Promise((_, reject) => setTimeout(() => reject(new Error("neither supervisor refused to start")), 15_000)),
+    new Promise((_, reject) => setTimeout(() => reject(new Error("neither supervisor refused to start")), 15_000).unref()),
   ]);
   assert.notEqual(refused.code, 0);
   assert.match(refused.stderr, /already starting or running/);
