@@ -2337,3 +2337,47 @@ test("protocol rejection flushes during history maintenance and bounds half-open
   assert.ok(writeError || errors.length || peer.destroyed, "the forced-close deadline retires a non-cooperating peer");
   assert.equal((await actor.request("get_status")).running, true);
 });
+
+class EarlyRegisteringActor extends FakePiActor {
+  constructor(options) { super(options); this.env = options.env; this.deliveries = []; }
+  async start() {
+    // Pi registers from session_start, before the worker reports ready and the session becomes resident.
+    this.control = new HarnessClient({ socketPath: this.env.PI_HARNESS_SOCKET, heartbeatMs: 0 });
+    this.control.on("event", frame => { if (frame.event === "message_available") this.deliveries.push(frame.data.message); });
+    await this.control.start({ registrationType: "register_actor", sessionId: this.session.sessionId, sessionFile: this.session.sessionFile,
+      cwd: this.session.cwd, repositoryRoot: this.session.repositoryRoot, actorToken: this.session.actorToken, actorGeneration: this.session.actorGeneration });
+    return super.start();
+  }
+  async close() { await this.control?.stop(); return super.close(); }
+}
+
+test("a revived actor that registers during startup receives messages a previous generation never acknowledged", async (t) => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "harness-unacked-redelivery-"));
+  const skillsPath = path.join(root, "skills"); await mkdir(skillsPath);
+  const actors = new Map();
+  const supervisor = new HarnessSupervisor({ socketPath: path.join(root, "run/sock"), databasePath: path.join(root, "store.sqlite"),
+    pidPath: path.join(root, "run/pid"), skillsPath, actorInactivityMs: 0, runtimeProvisioner: async () => ({}),
+    actorFactory: options => { const actor = new EarlyRegisteringActor(options); actors.set(options.session.sessionId, actor); return actor; },
+    processIdentityFactory: async pid => ({ version: 1, pid, processGroup: pid, startTime: "fake", ownerToken: "fake" }),
+    processTerminator: async () => ({ terminated: true }) });
+  await supervisor.start(); t.after(async () => { await supervisor.stop(); await rm(root, { recursive: true, force: true }); });
+  for (const id of ["sender", "target"]) {
+    await writeFile(path.join(root, `${id}.jsonl`), JSON.stringify({ type: "session", version: 3, id, cwd: root, timestamp: new Date().toISOString() }) + "\n");
+    supervisor.store.createRoot({ sessionId: id, sessionFile: path.join(root, `${id}.jsonl`), cwd: root, name: id, actorToken: `${id}-token`, launch: {} });
+    supervisor.store.markActorLifecycle(id, 1, "passivated");
+  }
+  const message = supervisor.store.createMessage("sender", { target: "target", body: "child result", deliveryMode: "auto" });
+  // An earlier generation was handed the message but stopped before admitting and acknowledging it.
+  supervisor.store.recordMessageSenderEntry("sender", { messageId: message.messageId, entryId: "sender-entry", peerId: "target", relationship: "sibling", body: "child result" });
+  assert.equal(supervisor.store.markMessageDelivered(message.messageId, "target").state, "delivered");
+  const client = new HarnessClient({ socketPath: supervisor.socketPath, heartbeatMs: 0 });
+  await client.start({ registrationType: "register_client", clientInstanceId: "unacked-redelivery" }); t.after(() => client.stop());
+  await client.request("revive_session", { sessionId: "target" });
+  const actor = await eventually(() => actors.get("target"));
+  const delivery = await eventually(() => actor.deliveries.find(entry => entry.messageId === message.messageId));
+  assert.equal(delivery.body, "child result");
+  await actor.control.request("ack_message", { messageId: message.messageId });
+  assert.equal(supervisor.store.getMessage(message.messageId).state, "acknowledged");
+  await new Promise(resolve => setTimeout(resolve, 300));
+  assert.equal(actor.deliveries.length, 1, "the restart redelivers once");
+});

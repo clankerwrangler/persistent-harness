@@ -2800,6 +2800,11 @@ export class HarnessSupervisor {
     }
   }
   #retryQueuedMessages(sessionId) {
+    // Pi registers from session_start, before the session is resident, so registration skipped
+    // redelivery. Hand that connection what an earlier generation never acknowledged.
+    const record = this.#actors.get(sessionId);
+    const connection = record && this.#matchingActorConnection(sessionId, record.generation);
+    if (connection) void this.#withSessionMutation(sessionId, () => this.#deliverPending(connection));
     for (const message of this.store.listPendingMessages(sessionId)) {
       if (message.state !== "queued") continue;
       void this.#deliverMessageWhenReady(message)
