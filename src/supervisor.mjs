@@ -57,6 +57,8 @@ import { createRootTitleGenerator } from "./root-title-generator.mjs";
 const PACKAGE_ROOT = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 const DEFAULT_ACTOR_EXTENSION = path.join(PACKAGE_ROOT, "index.ts");
 const STOCK_ACTOR_WORKER = path.join(PACKAGE_ROOT, "bin", "harness-actor.mjs");
+// A busy actor otherwise grows its young generation to 64 MB, mostly empty; 4 MB semispaces measured smaller and no slower.
+const ACTOR_NODE_FLAGS = ["--expose-gc", "--max-semi-space-size=4"];
 const DEFAULT_SKILLS_PATH = path.resolve(path.join(PACKAGE_ROOT, "skills"));
 const DEFAULT_RUNTIME_DIR = path.join(process.env.PI_CODING_AGENT_DIR || path.join(os.homedir(), ".pi", "agent"), "harness", "kernel-runtime");
 const SOCKET_OUTPUT_HEADROOM_BYTES = 256 * 1024;
@@ -2109,7 +2111,7 @@ export class HarnessSupervisor {
     const generationSkillGrantPath = await publishActorGenerationSkillGrant(session, skillGrant);
     check();
     const scratch = ensureSessionScratch(this.store, sessionId, this.scratchDirectory);
-    const worker = this.actorFactory({ command: process.execPath, args: ["--expose-gc", STOCK_ACTOR_WORKER, ...this.#actorArgs(session)], cwd: session.cwd, env: { ...this.#actorEnv(session, compileCache, generationSkillGrantPath, scratch), PI_HARNESS_PI_COMMAND: this.piCommand }, startupTimeoutMs: this.actorStartupTimeoutMs, promptPreflightTimeoutMs: this.actorPromptPreflightTimeoutMs,
+    const worker = this.actorFactory({ command: process.execPath, args: [...ACTOR_NODE_FLAGS, STOCK_ACTOR_WORKER, ...this.#actorArgs(session)], cwd: session.cwd, env: { ...this.#actorEnv(session, compileCache, generationSkillGrantPath, scratch), PI_HARNESS_PI_COMMAND: this.piCommand }, startupTimeoutMs: this.actorStartupTimeoutMs, promptPreflightTimeoutMs: this.actorPromptPreflightTimeoutMs,
       shutdownTimeoutMs: this.actorShutdownTimeoutMs, session });
     const record = { worker, generation: session.actorGeneration, rootOutputSession: Object.freeze({ sessionId: session.sessionId, kind: session.kind, depth: session.depth }), expectedLifecycle: null, exitError: null, eventSeq: 0, eventRing: [], eventRingBytes: 0, progressSummary: undefined, progressTurnId: null,
       skillGrantFingerprint: skillGrant.fingerprint, skillGrantSkills: skillGrant.skills, skillRefreshPending: false,
