@@ -4,7 +4,7 @@ import { DEFAULT_SCRATCH_DIRECTORY, ensureSessionScratch, reclaimSessionScratch 
 import { nodeMemoryDiagnostics, workerMemoryDiagnostics } from "./memory-diagnostics.mjs";
 import { birthOrder } from "./conversation-birth.mjs";
 import { createHash, randomUUID } from "node:crypto";
-import { chmod, lstat, mkdir, readFile, readlink, rename, rm, symlink, unlink, writeFile } from "node:fs/promises";
+import { chmod, link, lstat, mkdir, readFile, readlink, rename, rm, symlink, unlink, writeFile } from "node:fs/promises";
 import net from "node:net";
 import os from "node:os";
 import path from "node:path";
@@ -333,7 +333,58 @@ async function writeOwnedPidFile(pidPath, record) {
   return fileIdentity(await lstat(pidPath), content);
 }
 
+// One supervisor per PID path, claimed before the database is opened. The PID
+// file is published only once the socket listens, so on its own it leaves a
+// startup window in which a second `start` would open the same database.
+const heldInstanceLocks = new Map();
+
+async function instanceLockOwnerIsLive(lockPath, record) {
+  if (record?.pid === process.pid) return heldInstanceLocks.has(lockPath);
+  return processIsAlive(record?.pid) && await processMatchesSupervisorPidRecord(record);
+}
+
+async function acquireInstanceLock(lockPath, ownerToken) {
+  const content = `${JSON.stringify({ pid: process.pid, ownerToken, startedAt: Date.now() })}\n`;
+  const temporaryPath = `${lockPath}.${ownerToken}.tmp`;
+  await writeFile(temporaryPath, content, { mode: 0o600, flag: "wx" });
+  try {
+    for (let attempt = 0; attempt < 5; attempt += 1) {
+      try {
+        // link() publishes the complete record atomically and fails if any owner exists.
+        await link(temporaryPath, lockPath);
+        heldInstanceLocks.set(lockPath, ownerToken);
+        return fileIdentity(await lstat(lockPath), content);
+      } catch (error) {
+        if (error?.code !== "EEXIST") throw error;
+      }
+      let stat;
+      let existing;
+      let record;
+      try {
+        stat = await lstat(lockPath);
+        existing = await readFile(lockPath, "utf8");
+        record = JSON.parse(existing);
+      } catch (error) {
+        if (error?.code === "ENOENT") continue;
+      }
+      if (await instanceLockOwnerIsLive(lockPath, record)) {
+        throw new Error(`another harness supervisor (pid ${record.pid}) is already starting or running for ${lockPath}`);
+      }
+      await unlinkIfOwned(lockPath, fileIdentity(stat, existing));
+    }
+    throw new Error(`could not claim supervisor instance lock ${lockPath}`);
+  } finally {
+    await unlink(temporaryPath).catch(() => {});
+  }
+}
+
+async function releaseInstanceLock(lockPath, ownerToken, identity) {
+  if (heldInstanceLocks.get(lockPath) === ownerToken) heldInstanceLocks.delete(lockPath);
+  await unlinkIfOwned(lockPath, identity);
+}
+
 export const supervisorInternals = {
+  acquireInstanceLock,
   processIsAlive,
   pidRecordIsLiveSupervisor,
   processMatchesSupervisorPidRecord,
@@ -361,6 +412,7 @@ export class HarnessSupervisor {
   #ownedSocketPath;
   #socketLinkTarget;
   #pidIdentity;
+  #instanceLockIdentity;
   #ownerToken = randomUUID();
   #startedAt;
   #stoppingPromise;
@@ -484,7 +536,10 @@ export class HarnessSupervisor {
   async start() {
     if (this.#server) throw new Error("supervisor is already started");
     for (const directory of new Set([path.dirname(this.socketPath), path.dirname(this.databasePath), path.dirname(this.pidPath), path.dirname(this.logPath)])) await mkdir(directory, { recursive: true, mode: 0o700 });
-    await chmod(path.dirname(this.socketPath), 0o700); await preparePidPath(this.pidPath); await prepareSocketPath(this.socketPath);
+    await chmod(path.dirname(this.socketPath), 0o700);
+    this.#instanceLockIdentity = await acquireInstanceLock(this.#instanceLockPath, this.#ownerToken);
+    try { await preparePidPath(this.pidPath); await prepareSocketPath(this.socketPath); }
+    catch (error) { await this.#releaseInstanceLock(); throw error; }
     this.#ownedSocketPath = ownedSocketPath(this.socketPath, this.#ownerToken); this.#store = new HarnessStore(this.databasePath);
     try {
       this.#cronStore = this.cronStoreFactory(this.databasePath);
@@ -550,10 +605,19 @@ export class HarnessSupervisor {
       await this.#cronScheduler?.stop().catch(() => {}); this.#cronScheduler = undefined;
       clearInterval(this.#notificationTimer); this.#notifications?.close(); this.#notifications = undefined;
       this.#cronStore?.close(); this.#cronStore = undefined;
-      this.#store?.close(); this.#store = undefined; throw error;
+      this.#store?.close(); this.#store = undefined;
+      await this.#releaseInstanceLock(); throw error;
     }
     await this.#log("daemon_started", { pid: process.pid, protocolVersion: PROTOCOL_VERSION, schemaVersion: this.store.schemaVersion });
     return this.status();
+  }
+
+  get #instanceLockPath() { return `${this.pidPath}.lock`; }
+
+  async #releaseInstanceLock() {
+    const identity = this.#instanceLockIdentity;
+    this.#instanceLockIdentity = undefined;
+    if (identity) await releaseInstanceLock(this.#instanceLockPath, this.#ownerToken, identity);
   }
 
   #log(eventName, fields = {}) {
@@ -3040,6 +3104,7 @@ export class HarnessSupervisor {
       for (const waiters of this.#actorConnectionWaiters.values()) for (const finish of waiters) finish(undefined);
       this.#actorConnectionWaiters.clear();
       this.#store?.close(); this.#store = undefined; this.#actorConnections.clear(); this.#clientConnections.clear(); this.#actors.clear(); this.#messageBuckets.clear(); this.#actorReadyPromises.clear(); this.#actorActivationOwners.clear(); this.#actorRetirements.clear(); this.#actorInputWakes.clear(); this.#skillGrantPromises.clear(); this.#runtimeReadinessPromises.clear(); this.#sessionMutationTails.clear(); this.#cronCompletionTails.clear(); this.#resolveStopped();
+      await this.#releaseInstanceLock();
     })();
     return this.#stoppingPromise;
   }

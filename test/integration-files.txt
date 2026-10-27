@@ -58,5 +58,6 @@ supervisor-actor.test.mjs
 supervisor-cli-loading.test.mjs
 supervisor-input-association.test.mjs
 supervisor-settled-stop.test.mjs
+supervisor-single-instance.test.mjs
 supervisor-transport.test.mjs
 wait-continuation.test.mjs
