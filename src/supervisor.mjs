@@ -5,6 +5,7 @@ import { nodeMemoryDiagnostics, workerMemoryDiagnostics } from "./memory-diagnos
 import { birthOrder } from "./conversation-birth.mjs";
 import { createHash, randomUUID } from "node:crypto";
 import { chmod, link, lstat, mkdir, readFile, readlink, rename, rm, symlink, unlink, writeFile } from "node:fs/promises";
+import { readFileSync } from "node:fs";
 import net from "node:net";
 import os from "node:os";
 import path from "node:path";
@@ -488,6 +489,7 @@ export class HarnessSupervisor {
     cronStoreFactory = (value) => new CronStore(value),
     cronSchedulerFactory = (options) => new CronScheduler(options),
     inboxPort = process.env.PI_HARNESS_INBOX_PORT ? Number(process.env.PI_HARNESS_INBOX_PORT) : null,
+    homeSessionPath = null,
     inboxHost = process.env.PI_HARNESS_INBOX_HOST || "0.0.0.0",
     backgroundJobsDirectory = defaultBackgroundJobsDirectory(),
     scratchDirectory = process.env.PI_HARNESS_SCRATCH_ROOT || DEFAULT_SCRATCH_DIRECTORY,
@@ -500,7 +502,7 @@ export class HarnessSupervisor {
       pendingMessageLimit, maxMessageDeliveryAttempts, maxDepth, maxResidentActors, maxConcurrentStarts, actorInactivityMs,
       configuredChildModel, configuredChildThinkingLevel, piCommand, actorFactory, transcriptReader, processIdentityFactory, processTerminator,
       actorStartupTimeoutMs, actorPromptPreflightTimeoutMs, actorShutdownTimeoutMs, logger, maxLogBytes,
-      cronTickIntervalMs, cronMaxParallel, cronDefaultTimezone, cronStoreFactory, cronSchedulerFactory, inboxPort, inboxHost,
+      cronTickIntervalMs, cronMaxParallel, cronDefaultTimezone, cronStoreFactory, cronSchedulerFactory, inboxPort, inboxHost, homeSessionPath,
       backgroundJobsDirectory, scratchDirectory,
       backgroundCompletionIntervalMs, titleGenerator, notificationIdleMs, notificationTickMs });
     this.actorExtensionPath = path.resolve(actorExtensionPath);
@@ -550,6 +552,11 @@ export class HarnessSupervisor {
     try { await preparePidPath(this.pidPath); await prepareSocketPath(this.socketPath); }
     catch (error) { await this.#releaseInstanceLock(); throw error; }
     this.#ownedSocketPath = ownedSocketPath(this.socketPath, this.#ownerToken); this.#store = new HarnessStore(this.databasePath);
+    // Home (named in home.json beside the database) hears when another root exits or a turn fails.
+    const homeSessionPath = this.homeSessionPath ?? path.join(path.dirname(this.databasePath), "home.json");
+    this.#store.rootFailureObserver = () => {
+      try { return JSON.parse(readFileSync(homeSessionPath, "utf8")).sessionId ?? null; } catch { return null; }
+    };
     try {
       this.#cronStore = this.cronStoreFactory(this.databasePath);
       this.#notifications = new NotificationStore(this.databasePath, { idleMs: this.notificationIdleMs });

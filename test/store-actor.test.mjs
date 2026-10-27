@@ -805,8 +805,22 @@ test("resident abnormal turns share durable lifecycle receipts without replaying
   assert(pending.some(item => /Provider dispatch was attempted.*unknown/.test(item.body)));
   assert(pending.some(item => /Tool execution was admitted or started.*external effects/.test(item.body)));
   assert.throws(() => store.recordActorTurnFailure("child", 1, report), /stale/);
-  store.recordActorTurnFailure("parent", 1, report); assert.equal(store.listMessages().length, 3);
-  store.deleteSession("parent"); assert.equal(store.listPendingChildExitMessages().length, 0);
+  store.recordActorTurnFailure("parent", 1, report); assert.equal(store.listMessages().length, 3, "a root has no observer by default");
+  store.createRoot({ sessionId: "home", sessionFile: "/home.jsonl", cwd: dir, name: "Home", actorToken: "h", launch: {} });
+  store.rootFailureObserver = () => "home";
+  store.recordActorTurnFailure("parent", 1, { ...report, turnId: "root-turn" });
+  const rootReport = store.listMessages().find(item => item.targetId === "home");
+  assert.equal(rootReport.senderId, "parent"); assert.equal(rootReport.relationship, "sibling");
+  assert.match(rootReport.body, /not session-authored\): root session parent, turn root-turn.*Inspect retained session state/);
+  assert.doesNotMatch(rootReport.body, /PRIVATE|child/);
+  assert.equal(store.listPendingChildExitMessages().filter(item => item.targetId === "home").length, 1);
+  store.markActorStarted("home", 1);
+  store.recordActorTurnFailure("home", 1, { ...report, turnId: "home-turn" });
+  assert.equal(store.listMessages().filter(item => item.targetId === "home").length, 1, "Home is not told about itself");
+  store.markActorStarted("parent", 1);
+  assert.equal(store.markActorLifecycle("parent", 1, "error", "crash", Date.now(), { reportChildExit: true }), true);
+  assert.match(store.listMessages().find(item => item.targetId === "home" && /exited unexpectedly/.test(item.body)).body, /root session parent, generation 1, exited unexpectedly/);
+  store.deleteSession("parent"); store.deleteSession("home"); assert.equal(store.listPendingChildExitMessages().length, 0);
 });
 
 test("lifetime usage summary stays current after it is first read", async (t) => {

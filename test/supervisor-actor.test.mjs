@@ -2381,3 +2381,32 @@ test("a revived actor that registers during startup receives messages a previous
   await new Promise(resolve => setTimeout(resolve, 300));
   assert.equal(actor.deliveries.length, 1, "the restart redelivers once");
 });
+
+test("a root's failed turn reaches Home, named in home.json, as a lifecycle report", async (t) => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "harness-root-failure-home-"));
+  const skillsPath = path.join(root, "skills"); await mkdir(skillsPath);
+  const actors = new Map();
+  await writeFile(path.join(root, "home.json"), JSON.stringify({ sessionId: "home" }));
+  const supervisor = new HarnessSupervisor({ socketPath: path.join(root, "run/sock"), databasePath: path.join(root, "store.sqlite"),
+    pidPath: path.join(root, "run/pid"), skillsPath, actorInactivityMs: 0, notificationTickMs: 20, runtimeProvisioner: async () => ({}),
+    homeSessionPath: path.join(root, "home.json"),
+    actorFactory: options => { const actor = new EarlyRegisteringActor(options); actors.set(options.session.sessionId, actor); return actor; },
+    processIdentityFactory: async pid => ({ version: 1, pid, processGroup: pid, startTime: "fake", ownerToken: "fake" }),
+    processTerminator: async () => ({ terminated: true }) });
+  await supervisor.start(); t.after(async () => { await supervisor.stop(); await rm(root, { recursive: true, force: true }); });
+  for (const id of ["home", "room"]) {
+    await writeFile(path.join(root, `${id}.jsonl`), JSON.stringify({ type: "session", version: 3, id, cwd: root, timestamp: new Date().toISOString() }) + "\n");
+    supervisor.store.createRoot({ sessionId: id, sessionFile: path.join(root, `${id}.jsonl`), cwd: root, name: id, actorToken: `${id}-token`, launch: {} });
+    supervisor.store.markActorLifecycle(id, 1, "passivated");
+  }
+  const client = new HarnessClient({ socketPath: supervisor.socketPath, heartbeatMs: 0 });
+  await client.start({ registrationType: "register_client", clientInstanceId: "root-failure-home" }); t.after(() => client.stop());
+  await client.request("revive_session", { sessionId: "room" });
+  const room = await eventually(() => actors.get("room")); await eventually(() => room.isRunning);
+  await room.control.request("record_actor_turn_failure", { version: 1, turnId: "room-turn", failureClass: "request_preparation", dispatchBoundary: "provider_dispatch_unknown" });
+  const home = await eventually(() => actors.get("home"), 6000);
+  const report = await eventually(() => home.deliveries[0], 6000);
+  assert.equal(report.senderId, "room"); assert.equal(report.senderName, "Harness lifecycle"); assert.equal(report.relationship, "sibling");
+  assert.match(report.body, /root session room, turn room-turn, stopped abnormally/);
+  assert.equal(room.deliveries.length, 0, "the failed root is not told about itself");
+});

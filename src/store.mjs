@@ -327,6 +327,8 @@ const CURRENT_SCHEMA = `
 
 export class HarnessStore {
   #db;
+  // The root that hears about other roots' abnormal exits and turns (Home), or null.
+  rootFailureObserver = () => null;
   #deletingSessions = new Set();
   #usageSummary = null;
 
@@ -866,10 +868,17 @@ export class HarnessStore {
   }
 
   #queueChildFailure(sessionId, generation, error, now, turnFailure = null) {
-    const child = this.#sessionRow(sessionId);
-    const parent = child?.kind === "child" && this.#sessionRow(child.parent_session_id);
-    if (!parent || parent.lifecycle === "deleted" || this.isSessionDeleting(parent.id)
+    const session = this.#sessionRow(sessionId);
+    let target = null;
+    if (session?.kind === "child") target = this.#sessionRow(session.parent_session_id);
+    else if (session?.kind === "root") {
+      const observerId = this.rootFailureObserver();
+      const observer = typeof observerId === "string" && observerId !== sessionId ? this.#sessionRow(observerId) : null;
+      if (observer?.kind === "root") target = observer;
+    }
+    if (!target || target.lifecycle === "deleted" || this.isSessionDeleting(target.id)
       || this.isSessionDeleting(sessionId)) return;
+    const [subject, noun, relationship] = session.kind === "child" ? ["direct child", "child", "parent"] : ["root session", "session", "sibling"];
     // This receipt is supervisor-authored, not a fabricated child transcript entry.
     // Exit keys are generation-bound; turn keys survive lost ACKs and revival.
     // The legacy child_exit_generation column marks both lifecycle receipt kinds.
@@ -880,19 +889,19 @@ export class HarnessStore {
     const identity = /^[a-zA-Z0-9-]{1,128}$/.test(sessionId) ? sessionId : "[invalid child ID]";
     const failureClass = typeof error === "string" && error.includes("JavaScript heap out of memory")
       ? "heap_exhausted" : "actor_exit";
-    let body = `Harness lifecycle report (supervisor-generated, not child-authored): direct child ${identity}, generation ${generation}, exited unexpectedly. Failure class: ${failureClass}. Completion is unknown. Inspect retained child state and saved artifacts before deciding recovery. No child restart or work replay was requested.`;
+    let body = `Harness lifecycle report (supervisor-generated, not ${noun}-authored): ${subject} ${identity}, generation ${generation}, exited unexpectedly. Failure class: ${failureClass}. Completion is unknown. Inspect retained ${noun} state and saved artifacts before deciding recovery. No ${noun} restart or work replay was requested.`;
     if (turnFailure) {
       const boundary = turnFailure.dispatchBoundary === "before_provider_dispatch"
         ? "This turn stopped before provider dispatch. Local input or extension effects may already be committed."
         : turnFailure.dispatchBoundary === "tool_effects_possible"
           ? "Tool execution was admitted or started in this turn; external effects may already have occurred. Completion is unknown."
           : "Provider dispatch was attempted in this turn; completion and external effects are unknown.";
-      body = `Harness lifecycle report (supervisor-generated, not child-authored): direct child ${identity}, turn ${turnFailure.turnId}, stopped abnormally. Failure class: ${turnFailure.failureClass}. ${boundary} Inspect retained child state and saved artifacts before deciding recovery. No child restart or work replay was requested.`;
+      body = `Harness lifecycle report (supervisor-generated, not ${noun}-authored): ${subject} ${identity}, turn ${turnFailure.turnId}, stopped abnormally. Failure class: ${turnFailure.failureClass}. ${boundary} Inspect retained ${noun} state and saved artifacts before deciding recovery. No ${noun} restart or work replay was requested.`;
     }
     this.#db.prepare(`INSERT OR IGNORE INTO messages
       (id, sender_id, target_id, relationship, delivery_mode, body, state, attempt_count, accepted_at, queued_at, child_exit_generation)
-      VALUES (?, ?, ?, 'parent', 'auto', ?, 'queued', 0, ?, ?, ?)`)
-      .run(id, sessionId, parent.id, body, now, now, generation);
+      VALUES (?, ?, ?, ?, 'auto', ?, 'queued', 0, ?, ?, ?)`)
+      .run(id, sessionId, target.id, relationship, body, now, now, generation);
   }
 
   listPendingChildExitMessages(after = "") {
