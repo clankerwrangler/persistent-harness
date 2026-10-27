@@ -23,6 +23,8 @@ import { normalizeCronLaunch } from "./cron-launch.mjs";
 import { DEFAULT_CRON_TIMEZONE } from "./cron-schedule.mjs";
 import { CronScheduler, cronOriginPrompt } from "./cron-scheduler.mjs";
 import { CronStore } from "./cron-store.mjs";
+import { InboxStore, createInboxServer } from "./inbox.mjs";
+import { inboxOriginJobId } from "./protocol.mjs";
 import { NotificationStore, NOTIFICATION_IDLE_MS } from "./notification-store.mjs";
 import { JsonLineDecoder, encodeFrame } from "./framing.mjs";
 import { supportsFastMode } from "./fast-mode.mjs";
@@ -440,6 +442,8 @@ export class HarnessSupervisor {
   #cronStore;
   #cronScheduler;
   #cronCompletionTails = new Map();
+  #inboxStore;
+  #inboxServer;
   #backgroundCompletionMonitor;
   #autoTitleInflight = new Map();
   #notifications;
@@ -483,6 +487,8 @@ export class HarnessSupervisor {
     cronDefaultTimezone = process.env.PI_HARNESS_CRON_TIMEZONE || DEFAULT_CRON_TIMEZONE,
     cronStoreFactory = (value) => new CronStore(value),
     cronSchedulerFactory = (options) => new CronScheduler(options),
+    inboxPort = process.env.PI_HARNESS_INBOX_PORT ? Number(process.env.PI_HARNESS_INBOX_PORT) : null,
+    inboxHost = process.env.PI_HARNESS_INBOX_HOST || "0.0.0.0",
     backgroundJobsDirectory = defaultBackgroundJobsDirectory(),
     scratchDirectory = process.env.PI_HARNESS_SCRATCH_ROOT || DEFAULT_SCRATCH_DIRECTORY,
     backgroundCompletionIntervalMs = Number(process.env.PI_HARNESS_BACKGROUND_COMPLETION_TICK_MS ?? 5_000),
@@ -494,7 +500,7 @@ export class HarnessSupervisor {
       pendingMessageLimit, maxMessageDeliveryAttempts, maxDepth, maxResidentActors, maxConcurrentStarts, actorInactivityMs,
       configuredChildModel, configuredChildThinkingLevel, piCommand, actorFactory, transcriptReader, processIdentityFactory, processTerminator,
       actorStartupTimeoutMs, actorPromptPreflightTimeoutMs, actorShutdownTimeoutMs, logger, maxLogBytes,
-      cronTickIntervalMs, cronMaxParallel, cronDefaultTimezone, cronStoreFactory, cronSchedulerFactory,
+      cronTickIntervalMs, cronMaxParallel, cronDefaultTimezone, cronStoreFactory, cronSchedulerFactory, inboxPort, inboxHost,
       backgroundJobsDirectory, scratchDirectory,
       backgroundCompletionIntervalMs, titleGenerator, notificationIdleMs, notificationTickMs });
     this.actorExtensionPath = path.resolve(actorExtensionPath);
@@ -533,6 +539,7 @@ export class HarnessSupervisor {
   }
   get whenStopped() { return this.#stoppedPromise; }
   get store() { if (!this.#store) throw new Error("supervisor is not started"); return this.#store; }
+  get inboxAddress() { return this.#inboxServer?.address() ?? null; }
   get cronStore() { if (!this.#cronStore) throw new Error("cron scheduler is not started"); return this.#cronStore; }
 
   async start() {
@@ -573,6 +580,13 @@ export class HarnessSupervisor {
         dispatchRun: (value) => this.#dispatchCronRun(value), tickIntervalMs: this.cronTickIntervalMs,
         maxParallel: this.cronMaxParallel, defaultTimezone: this.cronDefaultTimezone, logger: this.logger });
       this.#cronScheduler.start();
+      if (this.inboxPort != null) {
+        if (!Number.isInteger(this.inboxPort) || this.inboxPort < 0 || this.inboxPort > 65535) throw new Error("PI_HARNESS_INBOX_PORT must be a TCP port");
+        this.#inboxStore = new InboxStore(this.databasePath);
+        this.#inboxServer = createInboxServer({ store: this.#inboxStore, deliver: (message) => this.#deliverInboxMessage(message), logger: this.logger });
+        await new Promise((resolve, reject) => { this.#inboxServer.once("error", reject);
+          this.#inboxServer.listen(this.inboxPort, this.inboxHost, () => { this.#inboxServer.off("error", reject); resolve(); }); });
+      }
       this.#backgroundCompletionMonitor = new BackgroundCompletionMonitor({
         directory: this.backgroundJobsDirectory,
         onScanComplete: () => this.#retryPendingScratchCleanup(),
@@ -605,6 +619,7 @@ export class HarnessSupervisor {
       this.#closeSessionHistoryIndex();
       await this.#backgroundCompletionMonitor?.stop().catch(() => {}); this.#backgroundCompletionMonitor = undefined;
       await this.#cronScheduler?.stop().catch(() => {}); this.#cronScheduler = undefined;
+      this.#inboxServer?.close(); this.#inboxServer = undefined; this.#inboxStore?.close(); this.#inboxStore = undefined;
       clearInterval(this.#notificationTimer); this.#notifications?.close(); this.#notifications = undefined;
       this.#cronStore?.close(); this.#cronStore = undefined;
       this.#store?.close(); this.#store = undefined;
@@ -1667,6 +1682,31 @@ export class HarnessSupervisor {
     }
     await this.#log("background_completion_queued", { jobId: job.id, sessionId: job.sessionId });
     return "sent";
+  }
+
+  // Inbox messages use the background-input path; the origin job ID records who sent them.
+  async #deliverInboxMessage({ sender, kind, target, messageId, text }) {
+    const live = (session) => session && session.lifecycle !== "deleted";
+    const sessions = target.workingRoots
+      ? this.store.listSessions().filter((s) => live(s) && s.kind === "root" && s.depth === 0 && ["working", "delegating"].includes(s.activity))
+      : [this.store.getSession(target.sessionId)].filter(live);
+    if (!target.workingRoots && !sessions.length) throw Object.assign(new Error("the route's session no longer exists"), { status: 409 });
+    const jobId = inboxOriginJobId(kind, sender, messageId);
+    const delivered = [];
+    for (const { sessionId } of sessions) {
+      const inputId = `inbox-${createHash("sha256").update(jobId).update("\0").update(sessionId).digest("hex").slice(0, 32)}`;
+      const input = await this.#withSessionMutation(sessionId, async () => {
+        this.#cancelIdlePreparation(sessionId);
+        const created = this.store.createActorInput(sessionId, { inputId, message: text, source: "background", origin: { jobId },
+          behavior: "auto", pendingLimit: this.pendingMessageLimit });
+        if (created.state !== "completed") this.#publishInputState(sessionId, pendingInputMessage(created));
+        return created;
+      });
+      if (input.state !== "completed") this.#kickActorInputDelivery(sessionId, await this.#ensureActorReady(sessionId));
+      delivered.push(sessionId);
+    }
+    await this.#log("inbox_message_delivered", { sender, kind, messageId, sessions: delivered });
+    return delivered;
   }
 
   async #maybeAutoTitleRoot(sessionId) {
@@ -3086,6 +3126,7 @@ export class HarnessSupervisor {
       for (const timer of this.#passivationTimers.values()) clearTimeout(timer); this.#passivationTimers.clear(); this.#startQueue = [];
       await this.#backgroundCompletionMonitor?.stop(); this.#backgroundCompletionMonitor = undefined;
       await this.#cronScheduler?.stop(); this.#cronScheduler = undefined;
+      if (this.#inboxServer) { this.#inboxServer.closeAllConnections?.(); await new Promise((resolve) => this.#inboxServer.close(resolve)); } this.#inboxServer = undefined;
       await Promise.all([...this.#actors.keys()].map((id) => this.#stopActor(id, "passivated"))); await Promise.all([...this.#launchPromises.values()]);
       await Promise.allSettled([...this.#actorInputWakes.values()].map((wake) => wake.done));
       await Promise.allSettled([...this.#actorActivationOwners.values()].flatMap(owners => [...owners].map(owner => owner.done)));
@@ -3103,6 +3144,7 @@ export class HarnessSupervisor {
       this.#closeSessionHistoryIndex();
       clearInterval(this.#notificationTimer); this.#notifications?.close(); this.#notifications = undefined;
       this.#cronStore?.close(); this.#cronStore = undefined;
+      this.#inboxStore?.close(); this.#inboxStore = undefined;
       for (const waiters of this.#actorConnectionWaiters.values()) for (const finish of waiters) finish(undefined);
       this.#actorConnectionWaiters.clear();
       this.#store?.close(); this.#store = undefined; this.#actorConnections.clear(); this.#clientConnections.clear(); this.#actors.clear(); this.#messageBuckets.clear(); this.#actorReadyPromises.clear(); this.#actorActivationOwners.clear(); this.#actorRetirements.clear(); this.#actorInputWakes.clear(); this.#skillGrantPromises.clear(); this.#runtimeReadinessPromises.clear(); this.#sessionMutationTails.clear(); this.#cronCompletionTails.clear(); this.#resolveStopped();

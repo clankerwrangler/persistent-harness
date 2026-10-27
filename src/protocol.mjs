@@ -30,6 +30,14 @@ export function actorInputDigest(message, imagesJson, behavior, location) {
   return digest.digest("hex");
 }
 
+export const INBOX_KINDS = ["news", "maintenance"];
+// An inbox message travels as a background input whose origin job ID names its kind, sender, and ID.
+export function inboxOriginJobId(kind, sender, messageId) { return `inbox:${kind}:${sender}:${messageId}`; }
+export function parseInboxOriginJobId(jobId) {
+  const match = /^inbox:(news|maintenance):([a-z][a-z0-9-]{0,31}):([A-Za-z0-9._:-]{1,64})$/.exec(String(jobId ?? ""));
+  return match ? { kind: match[1], sender: match[2], messageId: match[3] } : null;
+}
+
 // The optional label is used only to verify historical notification headers.
 export function actorInputCustomPayload(input, userLabel = "user") {
   if (!/^[A-Za-z]{1,32}$/.test(userLabel)) throw new Error("invalid notification user label");
@@ -42,7 +50,9 @@ export function actorInputCustomPayload(input, userLabel = "user") {
   if (typeof input.message !== "string" || typeof input.inputId !== "string"
     || !Number.isSafeInteger(input.acceptedAt)) throw new Error("invalid durable input");
   const acceptedAt = new Date(input.acceptedAt).toISOString();
+  const inbox = input.source === "background" ? parseInboxOriginJobId(origin.jobId) : null;
   const heading = input.source === "cron" ? `Harness cron input (job ${origin.jobId}, run ${origin.runId})`
+    : inbox ? `Message from ${inbox.sender} through the harness inbox (${inbox.kind}, id ${inbox.messageId})`
     : `Harness background completion (job ${origin.jobId})`;
   const text = `${heading}. This is an internal harness event, not a new ${userLabel} submission.\n\n${input.message}`;
   const images = normalizeInputImages(input.images);
