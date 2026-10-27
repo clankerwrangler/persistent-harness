@@ -198,7 +198,8 @@ export default function customCompactionFixture(pi) {
       requests.push(body);
       assert.equal(body.model, modelId);
       if (body.tools?.length) {
-        const native = process.env.PI_HARNESS_NATIVE_ASYNC === "1" && modelId === "gpt-6-astra";
+        // Both fixture models are Codex Responses models that the catalog marks supportsAsyncTools.
+        const native = process.env.PI_HARNESS_NATIVE_ASYNC === "1";
         assert.deepEqual(body.tools.map((tool) => tool.name), native ? ["ipython", "wait_for_ipython"] : ["ipython"]);
         assert.equal(body.tools[0].async, native ? true : undefined);
         assert.deepEqual(Object.keys(body.tools[0].parameters.properties), ["code"]);
