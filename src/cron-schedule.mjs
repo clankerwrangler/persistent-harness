@@ -39,7 +39,8 @@ function isoAt(value, timezone, now, allowPastAt) {
   return timestamp;
 }
 
-export function normalizeCronSchedule(input, { now = Date.now(), defaultTimezone = DEFAULT_CRON_TIMEZONE, allowPastAt = false } = {}) {
+export function normalizeCronSchedule(input, { now = Date.now(), defaultTimezone = DEFAULT_CRON_TIMEZONE, allowPastAt = false,
+  minIntervalSeconds = MIN_CRON_INTERVAL_SECONDS } = {}) {
   if (typeof allowPastAt !== "boolean") throw new TypeError("allowPastAt must be a boolean");
   const value = object(input, "schedule");
   const kind = value.kind;
@@ -50,8 +51,8 @@ export function normalizeCronSchedule(input, { now = Date.now(), defaultTimezone
   }
   if (kind === "every") {
     const intervalSeconds = value.intervalSeconds;
-    if (!Number.isInteger(intervalSeconds) || intervalSeconds < MIN_CRON_INTERVAL_SECONDS || intervalSeconds > MAX_CRON_INTERVAL_SECONDS) {
-      throw new TypeError(`intervalSeconds must be an integer from ${MIN_CRON_INTERVAL_SECONDS} through ${MAX_CRON_INTERVAL_SECONDS}`);
+    if (!Number.isInteger(intervalSeconds) || intervalSeconds < minIntervalSeconds || intervalSeconds > MAX_CRON_INTERVAL_SECONDS) {
+      throw new TypeError(`intervalSeconds must be an integer from ${minIntervalSeconds} through ${MAX_CRON_INTERVAL_SECONDS}`);
     }
     return { schedule: { kind, intervalSeconds, timezone }, display: `every ${intervalSeconds} seconds`,
       nextRunAt: now + intervalSeconds * 1000, recurring: true };

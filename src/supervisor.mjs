@@ -21,7 +21,7 @@ import { assistantTextPart, sortVisibleHistory, pendingInputMessage } from "./co
 import { BackgroundCompletionMonitor, defaultBackgroundJobsDirectory } from "./background-notifier.mjs";
 import { normalizeCronLaunch } from "./cron-launch.mjs";
 import { DEFAULT_CRON_TIMEZONE } from "./cron-schedule.mjs";
-import { CronScheduler } from "./cron-scheduler.mjs";
+import { CronScheduler, cronOriginPrompt } from "./cron-scheduler.mjs";
 import { CronStore } from "./cron-store.mjs";
 import { NotificationStore, NOTIFICATION_IDLE_MS } from "./notification-store.mjs";
 import { JsonLineDecoder, encodeFrame } from "./framing.mjs";
@@ -1611,7 +1611,7 @@ export class HarnessSupervisor {
     const dispatch = async (target, executionModeUsed, fallbackReason = null) => {
       const isolated = executionModeUsed === "fresh";
       const inputId = isolated ? `cron-input-${run.runId}` : `cron-origin-${run.runId}`;
-      const original = isolated ? prompt : job.prompt;
+      const original = isolated ? prompt : cronOriginPrompt(job, run);
       const intent = run.notificationIntent;
       const deliveryContext = intent === "conditional"
         ? `Evaluate this run's notification condition explicitly. Before settling, use cron(action="report", run_id="${run.runId}", disposition="deliver", body="the meaningful finding") when it holds, or disposition="no_finding" with no body when it does not. An absent disposition is an evaluation failure, not a negative finding.`

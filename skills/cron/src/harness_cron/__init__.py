@@ -25,6 +25,7 @@ async def run(
     model: str | None | object = _UNSET,
     thinking_level: str | None | object = _UNSET,
     repeat: int | None | object = _UNSET,
+    check: dict[str, Any] | None | object = _UNSET,
     include_removed: bool = False,
     limit: int = 20,
 ) -> SkillResult:
@@ -44,6 +45,8 @@ async def run(
             "executionMode": execution_mode or "fresh",
         })
         payload["repeat"] = None if repeat is _UNSET else repeat
+        if check is not _UNSET:
+            payload["check"] = check
         if provider is not _UNSET:
             payload["provider"] = provider
         if model is not _UNSET:
@@ -62,6 +65,8 @@ async def run(
             payload["executionMode"] = execution_mode
         if repeat is not _UNSET:
             payload["repeat"] = repeat
+        if check is not _UNSET:
+            payload["check"] = check
         if provider is not _UNSET:
             payload["provider"] = provider
         if model is not _UNSET:

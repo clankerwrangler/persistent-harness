@@ -22,6 +22,8 @@ function mapJob(row) {
     nextRunAt: row.next_run_at == null ? null : Number(row.next_run_at),
     lastRunAt: row.last_run_at == null ? null : Number(row.last_run_at), lastStatus: row.last_status,
     lastError: row.last_error, createdAt: Number(row.created_at), updatedAt: Number(row.updated_at),
+    check: parseJson(row.check_json, null), checkFailures: Number(row.check_failures ?? 0),
+    pendingCheck: parseJson(row.pending_check, null),
   };
 }
 
@@ -33,6 +35,7 @@ function mapRun(row) {
     sessionId: row.session_id, fallbackReason: row.fallback_reason, inputId: row.input_id,
     notificationIntent: row.notification_intent ?? null, notificationDisposition: row.notification_disposition ?? null,
     notificationBody: row.notification_body ?? null, notificationEvaluatedAt: row.notification_evaluated_at ?? null,
+    check: parseJson(row.check_result, null),
     output: row.output, error: row.error, claimedAt: Number(row.claimed_at),
     startedAt: row.started_at == null ? null : Number(row.started_at),
     completedAt: row.completed_at == null ? null : Number(row.completed_at),
@@ -118,6 +121,19 @@ export class CronStore {
       }
       this.#db.exec("INSERT OR IGNORE INTO cron_meta VALUES ('notification_schema_version','1'); COMMIT;");
     } catch (error) { this.#db.exec("ROLLBACK"); throw error; }
+    const checkVersion = this.#db.prepare("SELECT value FROM cron_meta WHERE key='check_schema_version'").get()?.value;
+    if (checkVersion !== undefined && checkVersion !== "1") throw new Error("unsupported cron check schema version");
+    // Check commands are additive in the same way. A produced check result waits in
+    // pending_check until a run takes it, so output is never lost to a full run queue.
+    this.#db.exec("BEGIN IMMEDIATE");
+    try {
+      for (const [table, columns] of Object.entries({ cron_jobs: { check_json: "TEXT", check_failures: "INTEGER NOT NULL DEFAULT 0",
+        check_alerted: "INTEGER NOT NULL DEFAULT 0", pending_check: "TEXT" }, cron_runs: { check_result: "TEXT" } })) {
+        const present = new Set(this.#db.prepare(`PRAGMA table_info(${table})`).all().map(r => r.name));
+        for (const [name, type] of Object.entries(columns)) if (!present.has(name)) this.#db.exec(`ALTER TABLE ${table} ADD COLUMN ${name} ${type}`);
+      }
+      this.#db.exec("INSERT OR IGNORE INTO cron_meta VALUES ('check_schema_version','1'); COMMIT;");
+    } catch (error) { this.#db.exec("ROLLBACK"); throw error; }
   }
 
   createJob(params, now = Date.now()) {
@@ -125,12 +141,13 @@ export class CronStore {
     if (typeof initiallyPaused !== "boolean") throw new TypeError("initiallyPaused must be a boolean");
     this.#db.prepare(`INSERT INTO cron_jobs(id, name, prompt, schedule_json, schedule_display, timezone,
       execution_mode, origin_session_id, cwd, repository_root, launch_json, repeat_times, fire_count,
-      enabled, state, next_run_at, created_at, updated_at, notification_intent)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?)`)
+      enabled, state, next_run_at, created_at, updated_at, notification_intent, check_json)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?)`)
       .run(params.jobId, params.name, params.prompt, JSON.stringify(params.schedule), params.scheduleDisplay,
         params.timezone, params.executionMode, params.originSessionId, params.cwd, params.repositoryRoot,
         JSON.stringify(normalizeCronLaunch(params.launch ?? {})), params.repeat,
-        initiallyPaused ? 0 : 1, initiallyPaused ? "paused" : "scheduled", params.nextRunAt, now, now, params.notificationIntent ?? null);
+        initiallyPaused ? 0 : 1, initiallyPaused ? "paused" : "scheduled", params.nextRunAt, now, now, params.notificationIntent ?? null,
+        params.check ? JSON.stringify(params.check) : null);
     return this.getJob(params.jobId);
   }
 
@@ -160,11 +177,13 @@ export class CronStore {
   replaceJob(jobId, params, now = Date.now()) {
     const result = this.#db.prepare(`UPDATE cron_jobs SET name = ?, prompt = ?, schedule_json = ?,
       schedule_display = ?, timezone = ?, execution_mode = ?, launch_json = ?, repeat_times = ?, fire_count = ?,
-      enabled = ?, state = ?, next_run_at = ?, last_error = NULL, updated_at = ?, notification_intent = ?
+      enabled = ?, state = ?, next_run_at = ?, last_error = NULL, updated_at = ?, notification_intent = ?,
+      check_json = ?, check_failures = 0, check_alerted = 0
       WHERE id = ? AND state <> 'removed'`).run(params.name, params.prompt, JSON.stringify(params.schedule),
         params.scheduleDisplay, params.timezone, params.executionMode,
         JSON.stringify(normalizeCronLaunch(params.launch ?? {})), params.repeat, params.fireCount,
-        params.enabled ? 1 : 0, params.state, params.nextRunAt, now, params.notificationIntent ?? null, jobId);
+        params.enabled ? 1 : 0, params.state, params.nextRunAt, now, params.notificationIntent ?? null,
+        params.check ? JSON.stringify(params.check) : null, jobId);
     if (result.changes !== 1) throw new Error("cron job does not exist");
     return this.getJob(jobId);
   }
@@ -252,6 +271,69 @@ export class CronStore {
       const run = mapRun(this.#db.prepare("SELECT * FROM cron_runs WHERE id = ?").get(runId));
       this.#db.exec("COMMIT");
       return run;
+    } catch (error) { this.#db.exec("ROLLBACK"); throw error; }
+  }
+
+  hasActiveRun(jobId) {
+    return this.#db.prepare("SELECT 1 FROM cron_runs WHERE job_id = ? AND status IN ('claimed', 'running') LIMIT 1").get(jobId) !== undefined;
+  }
+
+  // Takes a checked job's due occurrence for its check, so no other tick starts a second one.
+  deferCheckedOccurrence(jobId, scheduledAt, nextRunAt, now = Date.now()) {
+    return this.#db.prepare(`UPDATE cron_jobs SET next_run_at = ?, updated_at = ? WHERE id = ? AND enabled = 1
+      AND state = 'scheduled' AND next_run_at = ? AND pending_check IS NULL`).run(nextRunAt, now, jobId, scheduledAt).changes === 1;
+  }
+
+  recordCheckSuccess(jobId, now = Date.now()) {
+    this.#db.prepare(`UPDATE cron_jobs SET check_failures = 0, check_alerted = 0,
+      last_error = CASE WHEN check_failures > 0 THEN NULL ELSE last_error END, updated_at = ? WHERE id = ?`).run(now, jobId);
+  }
+
+  // Returns whether this failure is the one that should wake the agent; that happens once per failing streak.
+  recordCheckFailure(jobId, error, threshold, now = Date.now()) {
+    this.#db.exec("BEGIN IMMEDIATE");
+    try {
+      this.#db.prepare("UPDATE cron_jobs SET check_failures = check_failures + 1, last_error = ?, updated_at = ? WHERE id = ?")
+        .run(`check failed: ${error}`, now, jobId);
+      const row = this.#db.prepare("SELECT check_failures, check_alerted FROM cron_jobs WHERE id = ?").get(jobId);
+      const alert = row !== undefined && Number(row.check_failures) >= threshold && row.check_alerted === 0;
+      if (alert) this.#db.prepare("UPDATE cron_jobs SET check_alerted = 1 WHERE id = ?").run(jobId);
+      this.#db.exec("COMMIT");
+      return { failures: Number(row?.check_failures ?? 0), alert };
+    } catch (error_) { this.#db.exec("ROLLBACK"); throw error_; }
+  }
+
+  setPendingCheck(jobId, pending, now = Date.now()) {
+    return this.#db.prepare(`UPDATE cron_jobs SET pending_check = ?, updated_at = ? WHERE id = ?
+      AND state <> 'removed' AND pending_check IS NULL`).run(JSON.stringify(pending), now, jobId).changes === 1;
+  }
+
+  listPendingCheckJobs(limit = 32) {
+    return this.#db.prepare(`SELECT * FROM cron_jobs WHERE pending_check IS NOT NULL AND state <> 'removed'
+      ORDER BY updated_at, id LIMIT ?`).all(limit).map(mapJob);
+  }
+
+  // Moves a pending check result into a new run. It waits while the job already has an active run.
+  claimCheckedRun(jobId, { runId }, now = Date.now()) {
+    this.#db.exec("BEGIN IMMEDIATE");
+    try {
+      const row = this.#db.prepare("SELECT * FROM cron_jobs WHERE id = ? AND pending_check IS NOT NULL AND state <> 'removed'").get(jobId);
+      const active = row && this.#db.prepare("SELECT 1 FROM cron_runs WHERE job_id = ? AND status IN ('claimed', 'running') LIMIT 1").get(jobId);
+      if (!row || active) { this.#db.exec("COMMIT"); return { claimed: false }; }
+      const pending = parseJson(row.pending_check);
+      const fireCount = Number(row.fire_count) + 1;
+      const exhausted = row.repeat_times != null && fireCount >= Number(row.repeat_times);
+      const state = exhausted ? "completed" : row.state;
+      this.#db.prepare(`INSERT INTO cron_runs(id, job_id, source, scheduled_at, status, execution_mode_requested,
+        claimed_at, notification_intent, check_result) VALUES (?, ?, 'scheduled', ?, 'claimed', ?, ?, ?, ?)`)
+        .run(runId, jobId, pending.at, row.execution_mode, now, row.notification_intent,
+          JSON.stringify({ kind: pending.kind, text: pending.text }));
+      this.#db.prepare(`UPDATE cron_jobs SET pending_check = NULL, fire_count = ?, state = ?, enabled = ?,
+        next_run_at = ?, last_run_at = ?, last_status = 'claimed', updated_at = ? WHERE id = ?`)
+        .run(fireCount, state, exhausted ? 0 : row.enabled, exhausted ? null : row.next_run_at, pending.at, now, jobId);
+      const run = mapRun(this.#db.prepare("SELECT * FROM cron_runs WHERE id = ?").get(runId));
+      this.#db.exec("COMMIT");
+      return { claimed: true, run, job: this.getJob(jobId) };
     } catch (error) { this.#db.exec("ROLLBACK"); throw error; }
   }
 

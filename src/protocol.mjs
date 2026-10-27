@@ -316,6 +316,13 @@ function optionalThinkingLevel(value) {
   if (value.thinkingLevel == null) return { thinkingLevel: null };
   return { thinkingLevel: thinkingLevel(value.thinkingLevel, "params.thinkingLevel") };
 }
+function cronCheck(value) {
+  if (!Object.hasOwn(value, "check")) return {};
+  if (value.check === null) return { check: null };
+  const item = record(value.check, "params.check"); exact(item, new Set(["command", "timeoutSeconds"]), "params.check");
+  return { check: { command: utf8(item.command, "params.check.command", 4096),
+    ...(item.timeoutSeconds === undefined ? {} : { timeoutSeconds: integer(item.timeoutSeconds, "params.check.timeoutSeconds", 1, 120) }) } };
+}
 function cronJob(params) {
   const value = record(params, "params"); const action = string(value.action, "params.action", 16);
   if (!["create", "list", "update", "pause", "resume", "run", "remove", "history", "report"].includes(action)) {
@@ -333,22 +340,22 @@ function cronJob(params) {
   if (action === "list") { exact(value, new Set(["action", "includeRemoved"]), "params"); return { action,
     includeRemoved: value.includeRemoved === undefined ? false : bool(value.includeRemoved, "params.includeRemoved") }; }
   if (action === "create") {
-    exact(value, new Set(["action", "name", "prompt", "schedule", "executionMode", "repeat", "provider", "model", "thinkingLevel", "notificationIntent"]), "params");
+    exact(value, new Set(["action", "name", "prompt", "schedule", "executionMode", "repeat", "provider", "model", "thinkingLevel", "notificationIntent", "check"]), "params");
     const executionMode = value.executionMode ?? "fresh";
     if (!["fresh", "origin"].includes(executionMode)) throw new ProtocolError("invalid_request", "params.executionMode must be fresh or origin");
     return { action, name: utf8(value.name, "params.name", 128), prompt: utf8(value.prompt, "params.prompt", MAX_USER_INPUT_BYTES),
       schedule: cronSchedule(value.schedule, "params.schedule"), executionMode, notificationIntent: value.notificationIntent ?? null,
       repeat: value.repeat == null ? null : integer(value.repeat, "params.repeat", 1, 1_000_000),
-      ...optionalProviderModel(value), ...optionalThinkingLevel(value) };
+      ...optionalProviderModel(value), ...optionalThinkingLevel(value), ...cronCheck(value) };
   }
   const selector = string(value.selector, "params.selector", 256);
   if (action === "update") {
-    exact(value, new Set(["action", "selector", "name", "prompt", "schedule", "executionMode", "repeat", "provider", "model", "thinkingLevel", "notificationIntent"]), "params");
+    exact(value, new Set(["action", "selector", "name", "prompt", "schedule", "executionMode", "repeat", "provider", "model", "thinkingLevel", "notificationIntent", "check"]), "params");
     const executionMode = value.executionMode;
     if (executionMode !== undefined && !["fresh", "origin"].includes(executionMode)) throw new ProtocolError("invalid_request", "params.executionMode must be fresh or origin");
     const pin = optionalProviderModel(value);
     const thinking = optionalThinkingLevel(value);
-    if ([value.name, value.prompt, value.schedule, value.executionMode, value.repeat, pin.provider, thinking.thinkingLevel, value.notificationIntent].every((item) => item === undefined)) {
+    if ([value.name, value.prompt, value.schedule, value.executionMode, value.repeat, pin.provider, thinking.thinkingLevel, value.notificationIntent, value.check].every((item) => item === undefined)) {
       throw new ProtocolError("invalid_request", "cron update requires at least one changed field");
     }
     return { action, selector,
@@ -358,7 +365,7 @@ function cronJob(params) {
       ...(executionMode === undefined ? {} : { executionMode }),
       ...(value.notificationIntent === undefined ? {} : { notificationIntent: value.notificationIntent }),
       ...(value.repeat === undefined ? {} : { repeat: value.repeat === null ? null : integer(value.repeat, "params.repeat", 1, 1_000_000) }),
-      ...pin, ...thinking };
+      ...pin, ...thinking, ...cronCheck(value) };
   }
   if (action === "history") { exact(value, new Set(["action", "selector", "limit"]), "params"); return { action, selector,
     limit: value.limit === undefined ? 20 : integer(value.limit, "params.limit", 1, 50) }; }
