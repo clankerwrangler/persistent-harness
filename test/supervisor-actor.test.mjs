@@ -2410,3 +2410,34 @@ test("a root's failed turn reaches Home, named in home.json, as a lifecycle repo
   assert.match(report.body, /root session room, turn room-turn, stopped abnormally/);
   assert.equal(room.deliveries.length, 0, "the failed root is not told about itself");
 });
+
+test("only Home, named in home.json, may start a new root session", async (t) => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "harness-home-create-root-"));
+  const skillsPath = path.join(root, "skills"); await mkdir(skillsPath);
+  const actors = new Map();
+  await writeFile(path.join(root, "home.json"), JSON.stringify({ sessionId: "home" }));
+  const supervisor = new HarnessSupervisor({ socketPath: path.join(root, "run/sock"), databasePath: path.join(root, "store.sqlite"),
+    pidPath: path.join(root, "run/pid"), skillsPath, actorInactivityMs: 0, runtimeProvisioner: async () => ({}),
+    homeSessionPath: path.join(root, "home.json"),
+    actorFactory: options => { const actor = new EarlyRegisteringActor(options); actors.set(options.session.sessionId, actor); return actor; },
+    processIdentityFactory: async pid => ({ version: 1, pid, processGroup: pid, startTime: "fake", ownerToken: "fake" }),
+    processTerminator: async () => ({ terminated: true }) });
+  await supervisor.start(); t.after(async () => { await supervisor.stop(); await rm(root, { recursive: true, force: true }); });
+  for (const id of ["home", "room"]) {
+    await writeFile(path.join(root, `${id}.jsonl`), JSON.stringify({ type: "session", version: 3, id, cwd: root, timestamp: new Date().toISOString() }) + "\n");
+    supervisor.store.createRoot({ sessionId: id, sessionFile: path.join(root, `${id}.jsonl`), cwd: root, name: id, actorToken: `${id}-token`, launch: {} });
+    supervisor.store.markActorLifecycle(id, 1, "passivated");
+  }
+  const client = new HarnessClient({ socketPath: supervisor.socketPath, heartbeatMs: 0 });
+  await client.start({ registrationType: "register_client", clientInstanceId: "home-create-root" }); t.after(() => client.stop());
+  const request = { cwd: root, repositoryRoot: null, provider: null, model: null, thinkingLevel: null };
+  await client.request("revive_session", { sessionId: "room" });
+  const room = await eventually(() => actors.get("room")); await eventually(() => room.isRunning);
+  await assert.rejects(room.control.request("create_root", { ...request, name: "From a room" }), /only Home can start a new root session/);
+  await client.request("revive_session", { sessionId: "home" });
+  const home = await eventually(() => actors.get("home")); await eventually(() => home.isRunning);
+  const { admission } = await home.control.request("create_root", { ...request, name: "Started by Home" });
+  const created = supervisor.store.getSession(admission.sessionId);
+  assert.equal(created.kind, "root"); assert.equal(created.depth, 0); assert.equal(created.name, "Started by Home");
+  assert.equal(supervisor.store.listSessions().filter(session => session.kind === "root").length, 3, "the refused request created nothing");
+});

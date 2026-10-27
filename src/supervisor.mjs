@@ -553,10 +553,8 @@ export class HarnessSupervisor {
     catch (error) { await this.#releaseInstanceLock(); throw error; }
     this.#ownedSocketPath = ownedSocketPath(this.socketPath, this.#ownerToken); this.#store = new HarnessStore(this.databasePath);
     // Home (named in home.json beside the database) hears when another root exits or a turn fails.
-    const homeSessionPath = this.homeSessionPath ?? path.join(path.dirname(this.databasePath), "home.json");
-    this.#store.rootFailureObserver = () => {
-      try { return JSON.parse(readFileSync(homeSessionPath, "utf8")).sessionId ?? null; } catch { return null; }
-    };
+    this.#homeSessionPath = this.homeSessionPath ?? path.join(path.dirname(this.databasePath), "home.json");
+    this.#store.rootFailureObserver = () => this.#homeSessionId();
     try {
       this.#cronStore = this.cronStoreFactory(this.databasePath);
       this.#notifications = new NotificationStore(this.databasePath, { idleMs: this.notificationIdleMs });
@@ -855,6 +853,11 @@ export class HarnessSupervisor {
 
   async #dispatchActor(state, type, params) {
     this.#requireActor(state);
+    // Home is the one session that may open a new room; others suggest one to the user.
+    if (type === "create_root") {
+      if (state.sessionId !== this.#homeSessionId()) throw requestFailure("create_root_forbidden", "only Home can start a new root session");
+      return this.#createRoot(params);
+    }
     if (["spawn_child", "send_message", "revive_child"].includes(type)) this.store.assertSessionAvailable(state.sessionId);
     if (type === "set_session_name") { const session = this.store.setSessionName(state.sessionId, params.name); this.#broadcastNavigator("name_changed"); return { session }; }
     if (type === "record_actor_turn_failure") {
@@ -2793,6 +2796,10 @@ export class HarnessSupervisor {
     });
   }
   #childExitDeliveries = new Set();
+  #homeSessionPath = null;
+  #homeSessionId() {
+    try { return JSON.parse(readFileSync(this.#homeSessionPath, "utf8")).sessionId ?? null; } catch { return null; }
+  }
   #childExitCursor = "";
   #retryChildExitMessages() {
     if (this.#stoppingPromise) return;

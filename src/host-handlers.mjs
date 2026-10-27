@@ -1116,6 +1116,22 @@ export function createHostHandlers({ cwd, scratch = null, getClient, getContext 
       return result;
     },
 
+    async "agent_message.start_session"(payload) {
+      const client = getClient();
+      if (!client?.isConnected) throw new Error("harness is offline");
+      const value = requireRecord(payload, "agent_message.start_session payload");
+      for (const key of Object.keys(value)) if (!["name", "task", "cwd"].includes(key)) throw new Error(`unsupported start_session option: ${key}`);
+      const name = requireString(value.name, "name", { maxBytes: 256 });
+      const task = requireString(value.task, "task", { maxBytes: 16 * 1024 });
+      const cwd = requireString(value.cwd, "cwd", { maxBytes: 4096 });
+      if (!path.isAbsolute(cwd)) throw new Error("cwd must be an absolute path");
+      const { admission } = await client.request("create_root", { cwd, repositoryRoot: null, name, provider: null, model: null, thinkingLevel: null });
+      // The task arrives as an ordinary sister message, so the room can reply to Home.
+      const sent = await client.request("send_message", { target: admission.sessionId, body: task, deliveryMode: "auto" });
+      await recordAgentMessage(sent.message);
+      return { sessionId: admission.sessionId, shortId: admission.shortId, name: admission.name, message: sent.message };
+    },
+
     async "rlm.spawn"(payload) {
       const client = getClient();
       const context = getContext();

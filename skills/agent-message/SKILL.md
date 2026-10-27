@@ -13,6 +13,12 @@ Use `agent_message.send(target, body)` for direct delivery. A busy target receiv
 
 Messages never produce an automatic reply. Send only an intentional, useful result or request; do not echo acknowledgements or respond solely because another agent sent a message.
 
+## Starting a root session (Home only)
+
+`agent_message.start_session(name, task, cwd)` opens a new root session named `name` in the absolute
+folder `cwd` and sends it `task` as a message from you, so it can reply to you. Only Home may
+call it; other sessions are refused.
+
 ## Human attention (root only)
 
 When the human must supply a decision, approval, or missing information, the root can use
