@@ -29,7 +29,8 @@ function discoverPi() {
   for (const name of readdirSync(runtimes).filter((entry) => entry.startsWith("pi-0.99.1-")).sort().reverse()) {
     const dist = path.join(runtimes, name, "node_modules/pi-sdk-runtime/node_modules/@earendil-works/pi-coding-agent/dist");
     if (existsSync(path.join(dist, "cli.js")) && existsSync(path.join(dist, "index.js"))) {
-      return { command: path.join(dist, "cli.js"), module: path.join(dist, "index.js"), root: path.join(runtimes, name) };
+      // The build root is the installed stock graph, the directory above its node_modules.
+      return { command: path.join(dist, "cli.js"), module: path.join(dist, "index.js"), root: path.join(runtimes, name, "node_modules/pi-sdk-runtime") };
     }
   }
   return null;
