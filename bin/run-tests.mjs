@@ -8,7 +8,7 @@
 // native:      test/native/*.test.mjs
 // Missing Pi or Python skips the groups that need them, with the reason, instead of failing.
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync } from "node:fs";
+import { cpSync, existsSync, mkdtempSync, readdirSync, readFileSync, rmSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
@@ -46,6 +46,25 @@ function discoverPython() {
   return null;
 }
 
+// The official (not source-built) Pi package, for the tests that check its pinned bundle.
+function discoverOfficialPi() {
+  if (process.env.PI_HARNESS_TEST_OFFICIAL_PI_MODULE) return process.env.PI_HARNESS_TEST_OFFICIAL_PI_MODULE;
+  const official = path.join(agentDir, "runtimes/pi-0.99.1/node_modules/@earendil-works/pi-coding-agent");
+  return existsSync(path.join(official, "dist/bundle/index.js")) ? official : null;
+}
+
+// Managed-runtime tests provision Python from scratch; offline they need the uv binary,
+// its cache and the installed interpreter. Copy them (never the live environments) so
+// the tests cannot write into the live runtime.
+function prepareManagedSeed(seedDir) {
+  if (process.env.PI_HARNESS_TEST_MANAGED_SEED) return process.env.PI_HARNESS_TEST_MANAGED_SEED;
+  const runtime = path.join(agentDir, "harness/kernel-runtime");
+  const parts = ["bin", "cache", "python"];
+  if (!parts.every((part) => existsSync(path.join(runtime, part)))) return null;
+  for (const part of parts) cpSync(path.join(runtime, part), path.join(seedDir, part), { recursive: true, verbatimSymlinks: true });
+  return seedDir;
+}
+
 const integration = new Set(readFileSync(path.join(checkout, "test/integration-files.txt"), "utf8")
   .split("\n").map((line) => line.trim()).filter((line) => line && !line.startsWith("#")));
 const all = readdirSync(path.join(checkout, "test")).filter((name) => name.endsWith(".test.mjs")).sort();
@@ -72,6 +91,9 @@ if (missing.length) {
 if (!files.length) { console.log("no test files to run"); process.exit(0); }
 
 const home = mkdtempSync(path.join(os.tmpdir(), "harness-tests-"));
+const officialPi = discoverOfficialPi();
+const seedUsers = files.filter((name) => readFileSync(path.join(checkout, "test", name), "utf8").includes("PI_HARNESS_TEST_MANAGED_SEED"));
+const managedSeed = seedUsers.length ? prepareManagedSeed(path.join(home, "managed-seed")) : null;
 const env = {
   ...process.env,
   HOME: path.join(home, "home"),
@@ -82,6 +104,8 @@ const env = {
   PI_HARNESS_PRESENTATION_NAMESPACE: process.env.PI_HARNESS_PRESENTATION_NAMESPACE ?? "harness",
   ...(pi ? { PI_HARNESS_PI_COMMAND: pi.command, PI_HARNESS_PI_MODULE: pi.module } : {}),
   ...(python ? { PI_HARNESS_PYTHON: python } : {}),
+  ...(officialPi ? { PI_HARNESS_TEST_OFFICIAL_PI_MODULE: officialPi } : {}),
+  ...(managedSeed ? { PI_HARNESS_TEST_MANAGED_SEED: managedSeed } : {}),
 };
 try {
   const result = spawnSync(process.execPath, ["--test", "--test-concurrency=1", ...files.map((name) => path.join("test", name))],
