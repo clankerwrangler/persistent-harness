@@ -38,3 +38,13 @@ def attachment(path: str) -> SkillResult:
     result = host_request("files.attachment", {"path": path})
     data = result.pop("data")
     return SkillResult(result, {result["mimeType"]: data})
+
+
+def show(path: str) -> SkillResult:
+    """Show an image to the user without passing its pixels to the model."""
+    result = host_request("files.attachment", {"path": path})
+    data = result.pop("data")
+    if not result["mimeType"].startswith("image/"):
+        raise ValueError("files.show displays images only; use files.attachment for other files")
+    return SkillResult({**result, "shownTo": "user only"},
+                       {"application/x-harness-shown-image": {"mimeType": result["mimeType"], "data": data, "fileName": result["fileName"]}})

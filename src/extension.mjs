@@ -195,7 +195,12 @@ function linesComponent(lines, color = (text) => text) {
   };
 }
 
-function pythonOutputContent(result) {
+// files.show(): an image for Commander only. It travels in the result's details, which the
+// conversation displays and the model never receives; the model gets a note in its place.
+export const SHOWN_IMAGE_MIME = "application/x-harness-shown-image";
+const SHOWABLE_IMAGE_TYPES = ["image/png", "image/jpeg", "image/gif", "image/webp"];
+
+function pythonOutputContent(result, shown = null) {
   const outputs = Array.isArray(result.outputs) ? result.outputs : [
     ...[result.stdout, result.stderr].filter(Boolean).map((text) => ({ text: text.trimEnd() })),
     ...(result.mime ? [{ mime: result.mime }] : []),
@@ -207,8 +212,12 @@ function pythonOutputContent(result) {
     const text = [mime["text/plain"], mime["text/x-diff"]].filter(Boolean).map(String).join("\n");
     if (text) content.push({ type: "text", text });
     for (const [mimeType, data] of Object.entries(mime)) {
-      if (["image/png", "image/jpeg", "image/gif", "image/webp"].includes(mimeType) && typeof data === "string") {
+      if (SHOWABLE_IMAGE_TYPES.includes(mimeType) && typeof data === "string") {
         content.push({ type: "image", data, mimeType });
+      } else if (mimeType === SHOWN_IMAGE_MIME && data && SHOWABLE_IMAGE_TYPES.includes(data.mimeType) && typeof data.data === "string") {
+        const name = typeof data.fileName === "string" ? data.fileName.slice(0, 200) : "image";
+        shown?.push({ type: "image", data: data.data, mimeType: data.mimeType, name });
+        content.push({ type: "text", text: `[Image shown to Commander: ${name}. It is not visible to you.]` });
       }
     }
   }
@@ -228,7 +237,9 @@ const PYTHON_DETAIL_PAYLOAD_KEYS = ["code", "stdout", "stderr", "outputs", "mime
 function pythonToolResult(result) {
   const details = { ...result };
   for (const key of PYTHON_DETAIL_PAYLOAD_KEYS) delete details[key];
-  const content = pythonOutputContent(result);
+  const shown = [];
+  const content = pythonOutputContent(result, shown);
+  if (shown.length) details.shownImages = shown;
   if (result.namespaceCheckpointState === "pending") {
     content.push({ type: "text", text: "Python execution has ended; its namespace save is pending." });
   }

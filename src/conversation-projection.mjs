@@ -40,6 +40,12 @@ function visibleUserImages(content, { references = false, entryId } = {}) {
   } catch { return []; }
 }
 
+// Images a tool result shows the user: those the model also saw, then those shown to the user only.
+export function toolResultImages(message) {
+  const parts = [...(Array.isArray(message?.content) ? message.content : []), ...(Array.isArray(message?.details?.shownImages) ? message.details.shownImages : [])];
+  return parts.filter((part) => part?.type === "image").map((part) => ({ type: "image", data: part.data, mimeType: part.mimeType }));
+}
+
 function iso(value) { if (value === undefined || value === null) return null; const date = new Date(value); return Number.isNaN(date.valueOf()) ? null : date.toISOString(); }
 
 export function canonicalUserInputId(entry) {
@@ -235,7 +241,7 @@ export function projectVisibleMessage(entry, { streaming = false, imageReference
   if (entry?.type !== "message") return undefined;
   const message = entry.message;
   if (allowToolImages && message?.role === "toolResult") {
-    const images = visibleUserImages(message.content, { references: imageReferences, entryId: entry.id })
+    const images = visibleUserImages(toolResultImages(message), { references: imageReferences, entryId: entry.id })
       .map((image, index) => ({ ...image, name: `Output image ${index + 1}` }));
     if (!images.length) return undefined;
     return { id: entry.id, role: "tool_output", text: "", images,
