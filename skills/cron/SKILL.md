@@ -77,7 +77,30 @@ Mutating actions identify a job by exact ID or case-insensitive live name. Use `
 
 Missed recurring occurrences collapse into one catch-up attempt. The same job never overlaps; an occurrence encountered while its prior run remains active is recorded as skipped. The default global limit is two concurrent runs. If the supervisor restarts during a run, that attempt becomes `unknown` and is never automatically replayed.
 
-Prompts must be self-contained and safe for unattended execution. Do not schedule credential disclosure, unbounded side effects, or ambiguous destructive work.
+Every run starts with the session's normal rules and skills, so a prompt needs only the task and the skill to follow. Do not schedule credential disclosure, unbounded side effects, or ambiguous destructive work.
+
+## Check commands
+
+A recurring job can have a check: a shell command that the scheduler runs at each occurrence instead of starting an agent. The agent runs only when the check prints something.
+
+```python
+await cron(
+    action="create",
+    name="New mail",
+    prompt="Tell the user about these new emails if they matter.",
+    schedule={"kind": "every", "intervalSeconds": 60},
+    execution_mode="origin",
+    check={"command": "python3 ~/bin/new-mail-check.py", "timeoutSeconds": 30},
+)
+```
+
+- If the check exits 0 without output, nothing happens.
+- If the check exits 0 with output, a run starts and the output follows the prompt under **Check output**. The output counts as delivered, so the check must remember what it has already printed, for example by saving its position in a file.
+- If the check exits nonzero or times out, the check failed. After three failures in a row, one run starts that reports the failure instead of doing the task. The next success resets the count.
+- A check runs as the agent's shell user, in the job's working directory, with a timeout from 1 through 120 seconds (default 30). Output is capped at 16 KiB.
+- A checked job can use intervals down to 60 seconds. A check is skipped while the job's previous run is still active; the next check catches up.
+- To remove a check, use `update` with `check=None`.
+
 
 ## Notification intent and run disposition
 

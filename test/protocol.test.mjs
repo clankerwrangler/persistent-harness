@@ -154,6 +154,11 @@ test("protocol validates exact durable cron operations and execution modes", () 
     schedule: { kind: "every", intervalSeconds: 300 }, executionMode: "steer" })), /fresh or origin/);
   assert.throws(() => validateRequest(frame("cron_job", { action: "update", selector: "Morning" })), /at least one/);
   assert.throws(() => validateRequest(frame("cron_job", { action: "list", includeRemoved: false, secret: true })), /not supported/);
+  const checked = validateRequest(frame("cron_job", { action: "create", name: "Watch", prompt: "Report",
+    schedule: { kind: "every", intervalSeconds: 60 }, check: { command: "true", timeoutSeconds: 10 } }));
+  assert.deepEqual(checked.params.check, { command: "true", timeoutSeconds: 10 });
+  assert.deepEqual(validateRequest(frame("cron_job", { action: "update", selector: "Watch", check: null })).params.check, null);
+  assert.throws(() => validateRequest(frame("cron_job", { action: "update", selector: "Watch", check: { command: "true", shell: "zsh" } })), /params.check/);
   const pinned = validateRequest(frame("cron_job", { action: "create", name: "Pinned", prompt: "Report",
     schedule: { kind: "every", intervalSeconds: 300 }, provider: "grok-cli", model: "grok-4.6", thinkingLevel: "high" }));
   assert.equal(pinned.params.provider, "grok-cli"); assert.equal(pinned.params.model, "grok-4.6");
