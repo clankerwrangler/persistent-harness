@@ -3,6 +3,8 @@ import { DatabaseSync } from "node:sqlite";
 
 export const NOTIFICATION_IDLE_MS = 3_000;
 export const NOTIFICATION_RETRY_MS = [5_000, 30_000, 120_000, 300_000, 900_000];
+// An idle notice stays until it is read or a newer episode replaces it; this only bounds forgotten ones.
+export const IDLE_NOTIFICATION_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 export function notificationId(key) { return createHash("sha256").update(key).digest("hex"); }
 const parse = (value) => value ? JSON.parse(value) : null;
 const clean = (text, max) => String(text ?? "").replace(/[\x00-\x1f\x7f]/g, " ").trim().slice(0, max);
@@ -172,7 +174,7 @@ export class NotificationStore {
       return this.#create({ key: `idle:${episode.episode_id}`, rootId: family.rootId, sessionId: family.rootId,
         episodeId: episode.episode_id, kind: "idle", title: clean(family.title, 120) || "Activity stopped",
         body: `The conversation and its agents are now idle.${backgroundCount ? ` ${backgroundCount} background job${backgroundCount === 1 ? " is" : "s are"} still running.` : ""}`,
-        expiresAt: now + 300_000, source: { type: "family_idle", episodeId: episode.episode_id, backgroundCount } }, now);
+        expiresAt: now + IDLE_NOTIFICATION_TTL_MS, source: { type: "family_idle", episodeId: episode.episode_id, backgroundCount } }, now);
     });
   }
   openFamilies() { return this.#db.prepare("SELECT root_id FROM notification_families WHERE episode_id IS NOT NULL AND closed_at IS NULL").all().map(r => r.root_id); }

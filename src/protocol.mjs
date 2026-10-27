@@ -72,7 +72,7 @@ const requestTypes = new Set([
   "set_session_name", "record_actor_turn_failure", "update_activity", "update_progress_heading", "record_progress_entry", "record_agent_message_entry", "record_child_creation_entry", "set_skill_manifest", "record_usage", "record_context_usage",
   "get_actor_input", "accept_actor_input", "record_input_delivery", "flush_actor_inputs",
   "get_roster", "send_message", "ack_message", "spawn_child", "list_children", "session_history", "cron_job",
-  "request_attention", "resolve_attention", "list_notifications", "get_notification", "read_notification", "claim_notification_delivery", "record_notification_delivery",
+  "request_attention", "resolve_attention", "list_notifications", "get_notification", "read_notification", "dismiss_notification", "claim_notification_delivery", "record_notification_delivery",
   "stop_child", "revive_child", "delete_child",
   "create_root", "list_sessions", "rename_session", "subscribe_session", "unsubscribe_session", "subscribe_root_output", "unsubscribe_root_output",
   "submit_input", "respond_extension_ui", "get_session_inference", "set_session_inference", "set_session_fast_mode", "get_actor_state", "get_actor_entries", "get_visible_messages", "get_visible_image", "compact_session", "restart_kernel", "abort_session",
@@ -401,7 +401,7 @@ function notificationParam(params) {
 }
 const validators = new Map([
   ["request_attention", attentionRequest], ["resolve_attention", p => attentionRequest(p, true)],
-  ["get_notification", notificationParam], ["read_notification", notificationParam],
+  ["get_notification", notificationParam], ["read_notification", notificationParam], ["dismiss_notification", notificationParam],
   ["list_notifications", params => { const p = record(params, "params"); exact(p, new Set(["limit", "before", "view"]), "params");
     const view = p.view === undefined ? "all" : p.view;
     if (!["all", "inbox", "history"].includes(view)) throw new ProtocolError("invalid_request", "params.view must be all, inbox, or history");

@@ -946,6 +946,7 @@ export class HarnessSupervisor {
     if (type === "list_notifications") return this.#notifications.list(params);
     if (type === "get_notification") return { notification: this.#notifications.get(params.id), deliveries: this.#notifications.deliveries(params.id) };
     if (type === "read_notification") return { notification: this.#notifications.read(params.id) };
+    if (type === "dismiss_notification") return { notification: this.#notifications.transition(params.id, "resolved") };
     if (type === "claim_notification_delivery") return { claims: this.#notifications.claim(params.endpointIds) };
     if (type === "record_notification_delivery") return this.#notifications.receipt(params);
     if (type === "create_root") return this.#createRoot(params);
