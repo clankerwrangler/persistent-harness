@@ -6,6 +6,7 @@ import os from "node:os";
 import path from "node:path";
 import { HarnessStore } from "../src/store.mjs";
 import { NotificationStore } from "../src/notification-store.mjs";
+import { IDLE_NOTIFICATION_TTL_MS } from "../src/notification-store.mjs";
 
 async function fixture(t) {
   const dir = await mkdtemp(path.join(os.tmpdir(), "notification-store-")), file = path.join(dir, "h.sqlite"), harness = new HarnessStore(file);
@@ -79,7 +80,7 @@ test("family episode survives store restart and detached jobs do not extend idle
   assert.equal(reads, 1, "explicit undefined also reads current state");
   const next = store.observe("root", { now: 2000, backgroundCount: 2 });
   assert.equal(next.title, "Next title"); assert.match(next.body, /2 background jobs are still running/);
-  assert.equal(next.createdAt, 2000); assert.equal(next.expiresAt, 302000);
+  assert.equal(next.createdAt, 2000); assert.equal(next.expiresAt, 2000 + IDLE_NOTIFICATION_TTL_MS);
   const order = [], now = Date.now;
   store.family = id => { order.push("family"); return readFamily(id); };
   Date.now = () => { order.push("now"); return 2100; };
@@ -200,3 +201,4 @@ test("inbox and history partition canonical kinds before bounded pagination with
   assert.deepEqual(restarted.list({ view: "inbox" }, now), page, "viewing preserves durable read and pending state across reopen");
   for (const view of [null, "", "active", "INBOX", 1, {}, []]) assert.throws(() => store.list({ view }, now), /view/);
 });
+
