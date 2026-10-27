@@ -5,6 +5,7 @@ import { ActorToolDispatch, addToolUsage } from "./actor-tool-dispatch.mjs";
 import { createActorStreamPlanner } from "./actor-stream.mjs";
 import { evaluateInferenceRetry } from "./inference-retry.mjs";
 import { fastModeOptions, streamSessionRequest, supportsFastMode } from "./fast-mode.mjs";
+import { STREAM_STALL_MS, watchStreamStall } from "./stream-stall.mjs";
 import { randomUUID } from "node:crypto";
 import { TURN_FAILURE_ENTRY_TYPE } from "./child-turn-failure.mjs";
 import { readFile } from "node:fs/promises";
@@ -45,9 +46,9 @@ class LocalPreparationError extends Error {
 /** One actor's inference, execution, canonical writer, and public extension lifecycle owner. */
 export class ActorCoordinator {
   constructor({ session, runner, sdk, api, core, models, simpleOptions, nativeAdapter, projectContext, planRecovery,
-    contextMode = "array", eventMode = "full", lifecycle = {}, resources, promptCapture, publish = () => {}, basePromptOptions = {}, onTiming = () => {}, compactionDriver, navigationDriver, automaticCompactionAllowed = () => true, isProjectTrusted = () => false }) {
+    contextMode = "array", eventMode = "full", lifecycle = {}, resources, promptCapture, publish = () => {}, basePromptOptions = {}, onTiming = () => {}, compactionDriver, navigationDriver, automaticCompactionAllowed = () => true, isProjectTrusted = () => false, streamStallMs = STREAM_STALL_MS }) {
     Object.assign(this, { session, runner, sdk, api, core, models, simpleOptions, nativeAdapter, projectContext, planRecovery,
-      contextMode, eventMode, lifecycle, resources, promptCapture, publish, basePromptOptions, onTiming, compactionDriver, navigationDriver, automaticCompactionAllowed, isProjectTrusted });
+      contextMode, eventMode, lifecycle, resources, promptCapture, publish, basePromptOptions, onTiming, compactionDriver, navigationDriver, automaticCompactionAllowed, isProjectTrusted, streamStallMs });
     this.manager = session.sessionManager;
     this.birthClock = new ConversationBirthClock();
     this.birthClock.sequence = sessionBranchHeaders(this.manager).reduce((n, entry) => Math.max(n, entry.birthSequence), 0);
@@ -510,7 +511,7 @@ export class ActorCoordinator {
     const abort = () => requestController.abort(this.controller.signal.reason);
     this.controller.signal.addEventListener("abort", abort, { once: true });
     this.flight = { ...attempt, controller: requestController, observation: attempt };
-    let planner, lastTerminal, useNative;
+    let planner, lastTerminal, useNative, stalled = false;
     const started = new Set();
     const live = () => {
       if (epoch !== this.attemptEpoch || requestController.signal.aborted) throw new Error("retired inference attempt");
@@ -601,7 +602,7 @@ export class ActorCoordinator {
       const context = { systemPrompt: this.currentPrompt, messages: this.sdk.convertToLlm(renderUserLocations(messages)), tools: toolSchemas };
       this.runProviderStarted = true;
       const stream = useNative ? this.nativeAdapter.stream(this.session.model, context, options) : streamSessionRequest(this.models, this.session.model, context, options, this);
-      for await (const event of stream) {
+      for await (const event of watchStreamStall(stream, this.streamStallMs, error => { stalled = true; requestController.abort(error); })) {
         live();
         if (event.type === "done" || event.type === "error") lastTerminal = event.message ?? event.error;
         const candidateProof = useNative ? this.nativeAdapter.nativeCompletion(event) : null;
@@ -635,7 +636,7 @@ export class ActorCoordinator {
       }
     } catch (error) {
       if (error instanceof LocalPreparationError) throw error;
-      const wasAborted = requestController.signal.aborted;
+      const wasAborted = requestController.signal.aborted && !stalled;
       this.failure = error;
       const terminal = error.providerEvent?.error ?? lastTerminal;
       const message = this.assistant([], attempt.usageCommitted ? zeroUsage() : clone(terminal?.usage ?? zeroUsage()), wasAborted ? "aborted" : "error");

@@ -14,7 +14,7 @@ const { sdk, api, core } = await loadExternalPi();
 const deferred = () => Promise.withResolvers();
 const wait = async (promise, message) => Promise.race([promise, new Promise((_, reject) => { const timer = setTimeout(() => reject(new Error(message)), 5000); timer.unref(); })]);
 const usage = () => ({ input: 1, output: 1, cacheRead: 0, cacheWrite: 0, totalTokens: 2, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } });
-async function fixture(t, { persistent = false, contextMode = "array", prepareManager, prepareRequest, script, retry, compaction, compactionDriver, hooks, promptExtensions = [], captureFirst = false, basePromptOptions, automaticCompactionAllowed, model: suppliedModel } = {}) {
+async function fixture(t, { persistent = false, contextMode = "array", prepareManager, prepareRequest, script, retry, compaction, compactionDriver, hooks, promptExtensions = [], captureFirst = false, basePromptOptions, automaticCompactionAllowed, model: suppliedModel, streamStallMs } = {}) {
   const root = await mkdtemp(path.join(os.tmpdir(), "sc-"));
   const model = suppliedModel ?? { id: "fixture", name: "Fixture", provider: "coordinator-test", api: "coordinator-test-api", reasoning: false,
     input: ["text"], cost: usage().cost, contextWindow: 32000, maxTokens: 1000 };
@@ -33,6 +33,7 @@ async function fixture(t, { persistent = false, contextMode = "array", prepareMa
           ...(scripted?.errorMessage ? { errorMessage: scripted.errorMessage } : {}),
           ...(scripted?.diagnostics ? { diagnostics: scripted.diagnostics } : {}) };
         stream.push({ type: "start", partial: { ...message, content: [] } });
+        if (scripted?.stall) return; // a dead socket: no further events, abort ignored
         for (const event of scripted?.events?.(message) ?? []) stream.push(event);
         if (message.stopReason === "error") stream.push({ type: "error", reason: "error", error: message });
         else stream.push({ type: "done", message, reason: message.stopReason });
@@ -66,7 +67,7 @@ async function fixture(t, { persistent = false, contextMode = "array", prepareMa
   const { session } = await sdk.createAgentSession({ cwd: root, agentDir: path.join(root, "agent"), model: models.getModel(model.provider, model.id), modelRuntime: models, settingsManager: settings, sessionManager: manager, contextMode, resourceLoader: empty, tools: [] });
   const loaded = active.getExtensions(); const runner = new sdk.ExtensionRunner(loaded.extensions, loaded.runtime, root, manager, new sdk.ModelRegistry(models));
   coor = new ActorCoordinator({ session, runner, sdk, api, core, models, contextMode, resources: active, promptCapture, lifecycle: { prepareRequest }, publish: event => events.push(event),
-    basePromptOptions: basePromptOptions ?? { contextFiles: [], cwd: root }, isProjectTrusted: () => false, compactionDriver, automaticCompactionAllowed });
+    basePromptOptions: basePromptOptions ?? { contextFiles: [], cwd: root }, isProjectTrusted: () => false, compactionDriver, automaticCompactionAllowed, ...(streamStallMs ? { streamStallMs } : {}) });
   await coor.start(); await runner.emit({ type: "session_start", reason: "startup" });
   t.after(async () => { held.resolve(); await coor.close(); await rm(root, { recursive: true, force: true }); });
   return { coor, requests, requestModels, events, manager, held, toolStarted, capture, runs: () => runs };
@@ -460,6 +461,18 @@ test("transient failed inference retries with a fresh queued steering snapshot",
   assert.equal(records.length, 2); assert(records.every(e => e.data.observations.admittedCount === 0 && e.data.decision.retry));
   assert(records[1].data.snapshotVersion > records[0].data.snapshotVersion);
   assert(!f.manager.getEntries().some(e => e.customType === TURN_FAILURE_ENTRY_TYPE));
+});
+test("a provider stream that goes silent fails the attempt and retries instead of holding the turn", async t => {
+  const f = await fixture(t, { retry: { enabled: true, maxRetries: 2, baseDelayMs: 10 }, streamStallMs: 100,
+    script: (_context, n) => n === 1 ? { content: [], stall: true } : [{ type: "text", text: "recovered" }] });
+  await f.coor.submit("start stalled request");
+  await wait(f.coor.waitForIdle(), "stalled stream held the turn");
+  assert.equal(f.requests.length, 2);
+  const records = f.manager.getBranch().filter(e => e.type === "custom" && e.customType === "persistent-harness.inference-retry-v1");
+  assert.equal(records.length, 2); assert.equal(records[0].data.classification, "retry_transient");
+  const failed = f.manager.getBranch().find(e => e.type === "message" && e.message.role === "assistant" && e.message.stopReason === "error");
+  assert.match(failed.message.errorMessage, /stream stalled/);
+  assert(f.manager.getBranch().some(e => e.type === "message" && e.message.content?.some?.(part => part.text === "recovered")));
 });
 test("abort cancels retry delay before another provider request", async t => {
   const f = await fixture(t, { retry: { enabled: true, maxRetries: 2, baseDelayMs: 1000 },
