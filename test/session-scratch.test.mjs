@@ -290,6 +290,9 @@ test("retirement proof reaches beyond presentation cache and does not reaudit un
   await until(() => absent(scratchOf(f, root)));
 });
 
+// Several 100 ms background scans (recursive-delete-fixture), enough to observe that nothing changed.
+const SCAN_SETTLE_MS = 400;
+
 test("unknown and partial background identities repair without losing owner or freezing incomplete facts", async t => {
   for (const mode of ["unknown", "missing-birth", "invalid-kind", "invalid-pid"]) await t.test(mode, async t => {
     const f = await deletionFixture(t), root = await f.admit("Root"), held = await heldProcess(t);
@@ -303,18 +306,18 @@ test("unknown and partial background identities repair without losing owner or f
     await writeMeta(incomplete);
     const result = await f.client.request("delete_session", { sessionId: root.sessionId });
     assert.equal(result.scratchCleanup, "deleting");
-    await new Promise(resolve => setTimeout(resolve, 1200));
+    await new Promise(resolve => setTimeout(resolve, SCAN_SETTLE_MS));
     assert.equal(await absent(scratchOf(f, root)), false);
     if (mode !== "unknown") {
       await writeMeta({ ...valid, session_id: "unrelated-owner" });
-      await new Promise(resolve => setTimeout(resolve, 1100));
+      await new Promise(resolve => setTimeout(resolve, SCAN_SETTLE_MS));
       assert.equal(await absent(scratchOf(f, root)), false, "a known association cannot be erased by metadata retargeting");
     }
     await writeMeta(valid);
-    await new Promise(resolve => setTimeout(resolve, 1100));
+    await new Promise(resolve => setTimeout(resolve, SCAN_SETTLE_MS));
     assert.equal(await absent(scratchOf(f, root)), false, "repair must observe the active replacement PID/birth, not freeze the earlier partial PID");
     await writeMeta({ ...valid, pid: 2 ** 30, starttime: "1" });
-    await new Promise(resolve => setTimeout(resolve, 1100));
+    await new Promise(resolve => setTimeout(resolve, SCAN_SETTLE_MS));
     assert.equal(await absent(scratchOf(f, root)), false, "a complete established process identity remains pinned");
     assert.equal(held.child.exitCode, null);
     await held.finish(); await until(() => absent(scratchOf(f, root)));
