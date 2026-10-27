@@ -145,7 +145,7 @@ test("true live supervisor with matching identity and listening socket still ref
   const before = JSON.parse(await readFile(paths.pidPath, "utf8"));
   assert.equal(before.pid, daemon.pid);
   const second = new HarnessSupervisor({ ...paths, actorInactivityMs: 0 });
-  await assert.rejects(() => second.start(), /live process|already listening/);
+  await assert.rejects(() => second.start(), /live process|already listening|already starting or running/);
   const after = JSON.parse(await readFile(paths.pidPath, "utf8"));
   assert.equal(after.pid, daemon.pid);
   assert.equal(after.ownerToken, before.ownerToken);

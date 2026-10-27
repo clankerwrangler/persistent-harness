@@ -97,6 +97,7 @@ effort; other Python threads can mutate history independently.
 - `harness/supervisor.sock`: local control socket.
 - `harness/harness.sqlite`: durable supervision, inputs, schedules, and telemetry.
 - `harness/supervisor.pid`: supervised process ownership metadata.
+- `harness/supervisor.pid.lock`: claimed by a starting supervisor before it opens the database and held until it stops; a second `start` exits while the owner is alive. A lock left by a killed supervisor is reclaimed.
 - `harness/kernel-runtime/`: managed interpreter and dependency environments.
 - `harness/skill-artifacts/`: private verified skill trees shared by content-addressed version; an explicit database path places this directory beside that database.
 - `harness/entry-index-cache/`: optional private derived entry indexes for supported SDKs and explicit sessions; canonical transcripts remain authoritative.
