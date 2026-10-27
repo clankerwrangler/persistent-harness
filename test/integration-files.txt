@@ -32,6 +32,7 @@ kernel-async.test.mjs
 kernel-cold-memory.test.mjs
 kernel-completion.test.mjs
 kernel-deferred-checkpoint.test.mjs
+kernel-heap-release.test.mjs
 kernel-recovery-lifetime.test.mjs
 kernel-rich-output.test.mjs
 kernel-scratch.test.mjs
