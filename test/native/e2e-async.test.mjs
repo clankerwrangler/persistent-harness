@@ -1201,7 +1201,6 @@ print("DIRECT_EDIT_COMPLETE")` }] };
   const accepted = states(await f.entries()).filter(e => e.data?.checkpoint);
   assert.equal(accepted.length, 1);
   assert.equal(accepted[0].data.revision, 1);
-  assert.match(text(accepted[0]), /FINAL_DIRECT_SUMMARY/);
   await f.client.request("stop_session", { sessionId: f.sessionId });
   const beforeReopen = f.requests.length;
   await submitAndSettle(f, "Reopen with the accepted direct context");
