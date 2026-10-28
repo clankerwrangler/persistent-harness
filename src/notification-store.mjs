@@ -12,7 +12,7 @@ function map(row) {
   if (!row) return null;
   return { id: row.id, seq: row.seq, rootId: row.root_id, sessionId: row.session_id, kind: row.kind,
     title: row.title, body: row.body, createdAt: row.created_at, expiresAt: row.expires_at,
-    state: row.state, readAt: row.read_at, updatedAt: row.updated_at, source: parse(row.source_json),
+    state: row.state, readAt: row.read_at, updatedAt: row.updated_at, closedBy: row.closed_by ?? null, source: parse(row.source_json),
     url: `/?session=${encodeURIComponent(row.session_id)}&notification=${encodeURIComponent(row.id)}` };
 }
 
@@ -63,6 +63,15 @@ export class NotificationStore {
     `);
     if (!this.#db.prepare("PRAGMA table_info(notification_families)").all().some(column => column.name === "pending_owner")) {
       this.#db.exec("ALTER TABLE notification_families ADD COLUMN pending_owner TEXT");
+    }
+    if (!this.#db.prepare("PRAGMA table_info(notifications)").all().some(column => column.name === "closed_by")) {
+      this.#db.exec("ALTER TABLE notifications ADD COLUMN closed_by TEXT");
+    }
+    if (!this.#db.prepare("PRAGMA table_info(notification_deliveries)").all().some(column => column.name === "close_claimed_at")) {
+      // Requests closed before this column existed were already seen; only later closes are sent to devices.
+      this.#db.exec(`ALTER TABLE notification_deliveries ADD COLUMN close_claimed_at INTEGER;
+        UPDATE notification_deliveries SET close_claimed_at=0
+        WHERE notification_id IN (SELECT id FROM notifications WHERE state<>'pending')`);
     }
     if (this.#db.prepare("SELECT value FROM notification_meta WHERE key='version'").get().value !== "1") {
       this.#db.close(); throw new Error("unsupported notification schema version");
@@ -194,7 +203,7 @@ export class NotificationStore {
       expiresAt: now + params.expiresIn * 1000, source: { type: "explicit", key: params.key, actorGeneration } }, now);
   }
   resolveKey(sessionId, key, now = Date.now()) {
-    return this.transition(notificationId(`attention:${sessionId}:${key}`), "resolved", now);
+    return this.transition(notificationId(`attention:${sessionId}:${key}`), "resolved", now, "agent");
   }
   get(id, now = Date.now()) {
     this.expire(now); return map(this.#db.prepare("SELECT * FROM notifications WHERE id=?").get(id));
@@ -215,10 +224,12 @@ export class NotificationStore {
     this.#db.prepare("UPDATE notifications SET read_at=coalesce(read_at,?),updated_at=? WHERE id=?").run(now, now, id);
     return this.get(id, now);
   }
-  transition(id, state, now = Date.now()) {
+  // closedBy records who resolved it: "agent" withdrew the request, "user" dismissed it.
+  transition(id, state, now = Date.now(), closedBy = null) {
     if (!["resolved", "cancelled", "superseded"].includes(state)) throw new Error("invalid notification transition");
+    if (![null, "agent", "user"].includes(closedBy)) throw new Error("invalid notification closer");
     this.expire(now);
-    this.#db.prepare("UPDATE notifications SET state=?,updated_at=? WHERE id=? AND state='pending'").run(state, now, id);
+    this.#db.prepare("UPDATE notifications SET state=?,closed_by=?,updated_at=? WHERE id=? AND state='pending'").run(state, closedBy, now, id);
     return this.get(id, now);
   }
   cancelSession(id, now = Date.now()) {
@@ -254,6 +265,25 @@ export class NotificationStore {
         }
       }
       return claims;
+    });
+  }
+  // A needs-you request stays on a device until closed there. Once it leaves pending, each endpoint
+  // that accepted it gets one close; at most once, since a missed close only leaves a stale entry.
+  claimClosures(endpoints, now = Date.now()) {
+    return this.#transaction(() => {
+      this.expire(now);
+      const closures = [];
+      for (const endpoint of endpoints) {
+        const rows = this.#db.prepare(`SELECT d.notification_id FROM notification_deliveries d JOIN notifications n ON n.id=d.notification_id
+          WHERE d.endpoint_id=? AND d.state='accepted' AND d.close_claimed_at IS NULL AND n.kind='attention' AND n.state<>'pending'
+          ORDER BY n.updated_at LIMIT ?`).all(endpoint, Math.max(0, 8 - closures.length));
+        for (const row of rows) {
+          this.#db.prepare("UPDATE notification_deliveries SET close_claimed_at=? WHERE notification_id=? AND endpoint_id=?")
+            .run(now, row.notification_id, endpoint);
+          closures.push({ notification: this.get(row.notification_id, now), endpointId: endpoint });
+        }
+      }
+      return closures;
     });
   }
   receipt({ id, endpointId, leaseId, status }, now = Date.now()) {
