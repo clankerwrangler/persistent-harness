@@ -15,15 +15,35 @@ const providerErrorCodes = new Map([
   ["rate_limit_exceeded", "rate_limit"], ["insufficient_quota", "quota"],
   ["server_error", "server"], ["internal_error", "server"], ["service_unavailable", "server"],
   ["previous_response_not_found", "transport"], ["websocket_connection_limit_reached", "transport"],
+  ["invalid_prompt", "request"], ["data_residency_mismatch", "permission"],
+  ["bio_policy", "content_policy"], ["misalignment_policy_violation", "content_policy"],
+  ["vector_store_timeout", "server"], ["invalid_image", "request"], ["invalid_image_format", "request"],
+  ["invalid_base64_image", "request"], ["invalid_image_url", "request"], ["image_too_large", "request"],
+  ["image_too_small", "request"], ["image_parse_error", "request"], ["image_content_policy_violation", "content_policy"],
+  ["invalid_image_mode", "request"], ["image_file_too_large", "request"], ["unsupported_image_media_type", "request"],
+  ["empty_image_file", "request"], ["failed_to_download_image", "request"], ["image_file_not_found", "request"],
 ]);
 const providerErrorTypes = new Map([
   ["invalid_request_error", "request"], ["authentication_error", "authentication"],
   ["permission_error", "permission"], ["not_found_error", "not_found"],
   ["rate_limit_error", "rate_limit"], ["server_error", "server"], ["api_error", "server"],
 ]);
-function safeProviderError(code, type) {
-  return Object.freeze({ version: 1, code: providerErrorCodes.has(code) ? code : "unknown",
-    category: providerErrorCodes.get(code) ?? providerErrorTypes.get(type) ?? "unknown" });
+function diagnosticShape(value) {
+  return value === undefined ? "missing" : value === null ? "null" : typeof value === "string" ? "string"
+    : typeof value === "object" && !Array.isArray(value) ? "object" : "other";
+}
+function providerErrorState(value, known) {
+  return value == null ? "absent" : known.has(value) ? "known" : typeof value === "string" ? "unknown" : "invalid";
+}
+function safeProviderError(raw, code) {
+  const error = raw.type === "response.failed" ? raw.response?.error : raw.error;
+  const type = error?.type;
+  const message = raw.type === "error" && Object.hasOwn(raw, "message") ? raw.message
+    : typeof error === "string" ? error : error?.message;
+  return Object.freeze({ version: 2, code: providerErrorCodes.has(code) ? code : "unknown",
+    category: providerErrorCodes.get(code) ?? providerErrorTypes.get(type) ?? "unknown",
+    event: raw.type, codeState: providerErrorState(code, providerErrorCodes), typeState: providerErrorState(type, providerErrorTypes),
+    errorShape: diagnosticShape(error), messageShape: diagnosticShape(message) });
 }
 const clone = (value) => JSON.parse(JSON.stringify(value));
 const nonempty = (value) => typeof value === "string" && value.length > 0;
@@ -407,7 +427,7 @@ export function createNativeProviderAdapter({ api, responsesApi, modelRuntime, t
             }
             if (raw.type === "error") {
               const code = raw.code ?? raw.error?.code;
-              nativeProviderError = safeProviderError(code, raw.error?.type);
+              nativeProviderError = safeProviderError(raw, code);
               if (!sawRaw && rejectedCodes.has(code)) {
                 attempt.outcome = "rejected"; attempt.possibleUsage = false; fail(code);
               }
@@ -440,7 +460,7 @@ export function createNativeProviderAdapter({ api, responsesApi, modelRuntime, t
                 api.calculateCost(model, output.usage);
               }
               if (raw.type === "response.failed") {
-                nativeProviderError = safeProviderError(raw.response?.error?.code, raw.response?.error?.type);
+                nativeProviderError = safeProviderError(raw, raw.response?.error?.code);
                 fail(raw.response?.error?.code === "context_length_exceeded" ? "context_length_exceeded" : "provider_response_failed");
               }
               // Preflight every reasoning item before normalizing ANY terminal

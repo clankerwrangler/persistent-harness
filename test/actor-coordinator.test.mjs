@@ -7,14 +7,15 @@ import { createAgentStartPromptCapture } from "../src/actor-prompt.mjs";
 import { projectCanonicalContext, ORDINARY_NON_ADMISSION_CUSTOM_TYPE, registerCanonicalSessionManager } from "../src/canonical-context.mjs";
 import { TURN_FAILURE_ENTRY_TYPE } from "../src/child-turn-failure.mjs";
 import { ActorCoordinator } from "../src/actor-coordinator.mjs";
+import { createNativeProviderAdapter } from "../src/native-provider.mjs";
 import { createCompactionDriver, createCompactionPreparationCapture } from "../src/actor-compaction.mjs";
 import { projectVisibleMessage } from "../src/conversation-projection.mjs";
 const { loadExternalPi } = await import("../src/external-pi.mjs");
-const { sdk, api, core } = await loadExternalPi();
+const { sdk, api, core, responsesApi } = await loadExternalPi();
 const deferred = () => Promise.withResolvers();
 const wait = async (promise, message) => Promise.race([promise, new Promise((_, reject) => { const timer = setTimeout(() => reject(new Error(message)), 5000); timer.unref(); })]);
 const usage = () => ({ input: 1, output: 1, cacheRead: 0, cacheWrite: 0, totalTokens: 2, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } });
-async function fixture(t, { persistent = false, contextMode = "array", prepareManager, prepareRequest, script, retry, compaction, compactionDriver, hooks, promptExtensions = [], captureFirst = false, basePromptOptions, automaticCompactionAllowed, model: suppliedModel, streamStallMs } = {}) {
+async function fixture(t, { persistent = false, sessionFile, contextMode = "array", prepareManager, prepareRequest, script, retry, compaction, compactionDriver, hooks, promptExtensions = [], captureFirst = false, basePromptOptions, automaticCompactionAllowed, model: suppliedModel, streamStallMs } = {}) {
   const root = await mkdtemp(path.join(os.tmpdir(), "sc-"));
   const model = suppliedModel ?? { id: "fixture", name: "Fixture", provider: "coordinator-test", api: "coordinator-test-api", reasoning: false,
     input: ["text"], cost: usage().cost, contextWindow: 32000, maxTokens: 1000 };
@@ -60,7 +61,7 @@ async function fixture(t, { persistent = false, contextMode = "array", prepareMa
   await dormant.reload();
   const empty = { getExtensions: () => dormant.getExtensions() };
   for (const name of ["getSkills", "getPrompts", "getThemes", "getAgentsFiles", "getSystemPrompt", "getSystemPromptSource", "getAppendSystemPrompt", "getAppendSystemPromptSources", "extendResources", "reload"]) empty[name] = active[name].bind(active);
-  const manager = persistent
+  const manager = sessionFile ? sdk.SessionManager.open(sessionFile, undefined, undefined, { entryRetention: { maxCachedBytes: 1024 } }) : persistent
     ? sdk.SessionManager.create(root, path.join(root, "sessions"), { entryRetention: { maxCachedBytes: 1024 } })
     : sdk.SessionManager.inMemory(root);
   await prepareManager?.(manager);
@@ -960,3 +961,68 @@ test("a native-owned failed final never emits an ordinary witness even without n
   assert(projectCanonicalContext({ entries: f.manager.getEntries(), leafId: f.manager.getLeafId(), mode: "ordinary",
     buildSessionProjection: sdk.buildSessionProjection }).diagnostics.some(d => d.code === "ORDINARY_ASSISTANT_NOT_REPLAYABLE"));
 });
+
+for (const contextMode of ["array", "source"]) for (const afterTool of [false, true]) {
+  test(`native provider diagnostics survive canonical reopen and explicit continuation: ${contextMode}, afterTool=${afterTool}`, async t => {
+    const previous = process.env.PI_HARNESS_NATIVE_ASYNC;
+    process.env.PI_HARNESS_NATIVE_ASYNC = "1";
+    t.after(() => { if (previous === undefined) delete process.env.PI_HARNESS_NATIVE_ASYNC; else process.env.PI_HARNESS_NATIVE_ASYNC = previous; });
+    const model = { id: "gpt-6-astra", name: "Fixture Native", provider: "openai-codex", api: "openai-codex-responses",
+      baseUrl: "http://127.0.0.1:1", compat: { supportsAsyncTools: true }, reasoning: false, input: ["text"],
+      cost: usage().cost, contextWindow: 32000, maxTokens: 1000 };
+    const legacy = { version: 1, code: "unknown", category: "unknown" }, future = { version: 99, futureField: "opaque metadata" };
+    const options = { contextMode, model, retry: { enabled: false }, compaction: { enabled: false } };
+    const f = await fixture(t, { ...options, persistent: true, prepareManager(manager) {
+      for (const nativeProviderError of [legacy, future]) manager.appendMessage({ role: "assistant", content: [],
+        provider: model.provider, api: model.api, model: model.id, stopReason: "error", errorMessage: "provider_error",
+        timestamp: 1, usage: usage(), nativeProviderError });
+    } });
+    const requests = [];
+    const created = id => ({ type: "response.created", response: { id, status: "in_progress" } });
+    const complete = (id, output = []) => ({ type: "response.completed", response: { id, status: "completed", output } });
+    const call = { type: "function_call", id: "item-held", call_id: "call-held", name: "hold", arguments: "{}", status: "completed" };
+    const auth = { getAuth: async () => ({ auth: { apiKey: `fixture.${Buffer.from(JSON.stringify({
+      "https://api.openai.com/auth": { chatgpt_account_id: "fixture" } })).toString("base64url")}.fixture` } }) };
+    const attach = (fixture, reply) => {
+      fixture.coor.projectContext = projectCanonicalContext;
+      fixture.coor.nativeAdapter = createNativeProviderAdapter({ api, responsesApi, modelRuntime: auth,
+        transportOptions: { fetch: async (_url, init) => {
+          requests.push(JSON.parse(init.body));
+          return new Response(reply().map(event => `data: ${JSON.stringify(event)}\n\n`).join(""));
+        } } });
+    };
+    const code = afterTool ? "PRIVATE_UNKNOWN_CODE" : "invalid_prompt";
+    attach(f, () => afterTool && requests.length === 1
+      ? [created("response-call"), { type: "response.output_item.done", output_index: 0, item: call }, complete("response-call")]
+      : [created("response-error"), { type: "error", error: { code, type: "PRIVATE_UNKNOWN_TYPE", message: "PRIVATE_BODY", param: "PRIVATE_PARAM" } }]);
+    f.held.resolve();
+    await f.coor.submit("initial synthetic input"); await wait(f.coor.waitForIdle(), "native error did not settle");
+    const before = f.manager.getEntries();
+    const terminal = before.filter(e => e.message?.nativeProviderError?.version === 2).at(-1).message;
+    assert.equal(terminal.stopReason, "error"); assert.equal(terminal.errorMessage, "provider_error");
+    assert.deepEqual(terminal.nativeProviderError, { version: 2, code: afterTool ? "unknown" : "invalid_prompt",
+      category: afterTool ? "unknown" : "request", event: "error", codeState: afterTool ? "unknown" : "known",
+      typeState: "unknown", errorShape: "object", messageShape: "string" });
+    assert.equal(requests.length, afterTool ? 2 : 1, "diagnostics must not add a retry");
+    assert.equal(f.runs(), afterTool ? 1 : 0);
+    assert.equal(before.filter(e => e.message?.role === "toolResult").length, afterTool ? 1 : 0);
+    const file = f.manager.getSessionFile();
+    await f.coor.close();
+    const bytes = await readFile(file, "utf8"); assert.equal(bytes.includes("PRIVATE_"), false);
+    const g = await fixture(t, { ...options, sessionFile: file });
+    attach(g, () => [created("response-resumed"), complete("response-resumed")]);
+    assert.deepEqual(g.manager.getEntries().filter(e => e.message?.nativeProviderError).map(e => e.message.nativeProviderError),
+      [legacy, future, terminal.nativeProviderError], "v1, unknown and v2 metadata remain readable without migration");
+    await g.coor.submit("explicit continuation"); await wait(g.coor.waitForIdle(), "resumed native request did not settle");
+    assert.equal(g.coor.failure, null); assert.equal(g.runs(), 0, "reopening cannot replay the completed tool");
+    assert.equal(requests.length, afterTool ? 3 : 2);
+    const sent = requests.at(-1);
+    assert.equal(JSON.stringify(sent).includes("nativeProviderError"), false, "metadata stays off provider wire");
+    assert.equal(sent.input.filter(item => item.type === "function_call_output" && item.call_id === "call-held").length, afterTool ? 1 : 0);
+    if (afterTool) {
+      const result = g.manager.getEntries().find(e => e.message?.role === "toolResult").message;
+      assert.notEqual(result.isError, true); assert.equal(result.content[0].text, "REAL");
+      assert.equal(sent.input.find(item => item.type === "function_call_output").output, "REAL");
+    }
+  });
+}

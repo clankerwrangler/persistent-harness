@@ -743,7 +743,7 @@ test("SSE EOF code cannot swallow malformed raw JSON or private hook exceptions"
 });
 
 
-test("provider error diagnostics retain only fixed code/category, never raw strings or payloads", async (t) => {
+test("provider error diagnostics retain only fixed tokens and shapes, never raw strings or payloads", async (t) => {
   const privateText = "PRIVATE_PROVIDER_DIAGNOSTIC";
   const known = [
     ["context_length_exceeded", "context"], ["invalid_request_error", "request"],
@@ -754,6 +754,13 @@ test("provider error diagnostics retain only fixed code/category, never raw stri
     ["rate_limit_exceeded", "rate_limit"], ["insufficient_quota", "quota"],
     ["server_error", "server"], ["internal_error", "server"], ["service_unavailable", "server"],
     ["previous_response_not_found", "transport"], ["websocket_connection_limit_reached", "transport"],
+    ["invalid_prompt", "request"], ["data_residency_mismatch", "permission"],
+    ["bio_policy", "content_policy"], ["misalignment_policy_violation", "content_policy"],
+    ["vector_store_timeout", "server"], ["invalid_image", "request"], ["invalid_image_format", "request"],
+    ["invalid_base64_image", "request"], ["invalid_image_url", "request"], ["image_too_large", "request"],
+    ["image_too_small", "request"], ["image_parse_error", "request"], ["image_content_policy_violation", "content_policy"],
+    ["invalid_image_mode", "request"], ["image_file_too_large", "request"], ["unsupported_image_media_type", "request"],
+    ["empty_image_file", "request"], ["failed_to_download_image", "request"], ["image_file_not_found", "request"],
   ];
   const cases = [
     ...known.map(([code, category]) => ({ code, type: privateText, expectedCode: code, category })),
@@ -779,10 +786,34 @@ test("provider error diagnostics retain only fixed code/category, never raw stri
     assert.equal(result.message.stopReason, "error");
     assert.equal(result.message.errorMessage, fixture.code === "context_length_exceeded"
       ? "context_length_exceeded" : source === "terminal" ? "provider_response_failed" : "provider_error");
-    assert.deepEqual(result.message.nativeProviderError, { version: 1, code: fixture.expectedCode, category: fixture.category });
+    assert.deepEqual(result.message.nativeProviderError, { version: 2, code: fixture.expectedCode, category: fixture.category,
+      event: source === "terminal" ? "response.failed" : "error",
+      codeState: fixture.expectedCode !== "unknown" ? "known" : fixture.code == null ? "absent" : typeof fixture.code === "string" ? "unknown" : "invalid",
+      typeState: fixture.category !== "unknown" && fixture.expectedCode === "unknown" ? "known" : fixture.type === "authentication_error" ? "known"
+        : fixture.type == null ? "absent" : typeof fixture.type === "string" ? "unknown" : "invalid",
+      errorShape: "object", messageShape: "string" });
     assert.ok(Object.isFrozen(result.message.nativeProviderError));
     assert.equal(JSON.stringify(result).includes(privateText), false);
     assert.equal(requests, 1, "auxiliary diagnostics never trigger retries");
+  }
+});
+
+test("unknown provider errors distinguish missing, unrecognized and malformed fields without retaining values", async (t) => {
+  const fixtures = [
+    [{ type: "error", message: "PRIVATE_message_only" }, "absent", "absent", "missing", "string"],
+    [{ type: "error", code: null, error: null, message: null }, "absent", "absent", "null", "null"],
+    [{ type: "error", error: "PRIVATE_string_error" }, "absent", "absent", "string", "string"],
+    [{ type: "error", error: { code: "PRIVATE_code", type: "PRIVATE_type", message: "PRIVATE_message" } }, "unknown", "unknown", "object", "string"],
+    [{ type: "error", error: { code: {}, type: [], message: {} } }, "invalid", "invalid", "object", "object"],
+    [{ type: "error", error: [] }, "absent", "absent", "other", "missing"],
+  ];
+  for (const [raw, codeState, typeState, errorShape, messageShape] of fixtures) {
+    const a = await adapter(t, { fetch: async () => response([created(), raw]) });
+    const result = await a.stream(model, context, { transport: "sse" }).result();
+    assert.equal(result.errorMessage, "provider_error");
+    assert.deepEqual(result.nativeProviderError, { version: 2, code: "unknown", category: "unknown", event: "error",
+      codeState, typeState, errorShape, messageShape });
+    assert.equal(JSON.stringify(result).includes("PRIVATE_"), false);
   }
 });
 
@@ -791,7 +822,8 @@ test("raw provider top-level code precedence and private hook errors keep existi
     error: { code: "context_length_exceeded", type: "invalid_request_error", message: "PRIVATE_PAYLOAD" } }]) });
   const result = await a.stream(model, context, { transport: "sse" }).result();
   assert.equal(result.errorMessage, "provider_error");
-  assert.deepEqual(result.nativeProviderError, { version: 1, code: "unknown", category: "request" });
+  assert.deepEqual(result.nativeProviderError, { version: 2, code: "unknown", category: "request",
+    event: "error", codeState: "unknown", typeState: "known", errorShape: "object", messageShape: "string" });
   assert.equal(JSON.stringify(result).includes("PRIVATE_"), false);
   const hook = await a.stream(model, context, { transport: "sse", onResponse() {
     throw Object.assign(new Error("PRIVATE_PAYLOAD"), { code: "context_length_exceeded" });
@@ -814,7 +846,8 @@ for (const ending of ["unknown", "provider_error"]) test(`rejected retry metadat
   assert.equal(result.nativeTransport.attempts.length, 2);
   assert.equal(result.errorMessage, ending === "unknown" ? "websocket_closed" : "provider_error");
   if (ending === "unknown") assert.equal(Object.hasOwn(result, "nativeProviderError"), false);
-  else assert.deepEqual(result.nativeProviderError, { version: 1, code: "unknown", category: "unknown" });
+  else assert.deepEqual(result.nativeProviderError, { version: 2, code: "unknown", category: "unknown",
+    event: "error", codeState: "unknown", typeState: "unknown", errorShape: "object", messageShape: "missing" });
   assert.equal(JSON.stringify(result).includes("PRIVATE_RETRY"), false);
   assert.equal(f.requests.length, 2);
 });
