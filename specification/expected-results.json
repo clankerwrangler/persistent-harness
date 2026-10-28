@@ -451,5 +451,6 @@
   "NotificationLifecycle.MigrationNonAtomic.cfg": "violation",
   "ChildTurnFailure.ReplaceFirst.cfg": "violation",
   "ChildTurnFailure.SharedOperation.cfg": "violation",
-  "ChildTurnFailure.StaleResult.cfg": "violation"
+  "ChildTurnFailure.StaleResult.cfg": "violation",
+  "ActorInputReconciliation.OverlappingReports.cfg": "violation"
 }
