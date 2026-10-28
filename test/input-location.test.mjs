@@ -5,6 +5,7 @@ import os from "node:os";
 import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { normalizeInputLocation, renderUserLocations, renderCompactionLocations } from "../src/input-location.mjs";
+import { renderMessageTimes } from "../src/message-time.mjs";
 import { actorInputDigest, validateRequest, PROTOCOL_VERSION } from "../src/protocol.mjs";
 import { HarnessStore } from "../src/store.mjs";
 import { canonicalActorInputContent, pendingInputMessage, projectVisibleMessage } from "../src/conversation-projection.mjs";
@@ -90,8 +91,8 @@ test("render copies only same-role user context; public projections and raw fork
   assert.equal(rendered[0].location, undefined);
   assert.deepEqual(renderUserLocations(rendered), rendered);
   const prep = { messagesToSummarize: messages, turnPrefixMessages: [original] };
-  assert.deepEqual(renderCompactionLocations(prep).messagesToSummarize, rendered);
-  assert.deepEqual(renderCompactionLocations(prep).turnPrefixMessages, [rendered[0]]);
+  assert.deepEqual(renderCompactionLocations(prep).messagesToSummarize, renderMessageTimes(rendered));
+  assert.deepEqual(renderCompactionLocations(prep).turnPrefixMessages, renderMessageTimes([rendered[0]]));
   assert.equal(prep.messagesToSummarize, messages);
   const entry = { type: "message", id: "entry", timestamp: 1, message: original };
   assert.deepEqual(canonicalActorInputContent(entry).location, location);
