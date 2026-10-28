@@ -375,27 +375,59 @@ export async function deliverIncomingFamilyMessage({ persist, inject, onPersistE
 export function createActorInputDelivery({ pi, getClient, getContext }) {
   const enqueued = new Set();
   const pendingReports = new Set();
+  const reports = new Map();
+  let epoch = 0;
   let cursor = { index: 0, anchor: null };
-  function validateInput(inputId, input) {
-    if (input && (input.inputId !== inputId || input.sessionId !== getContext()?.sessionManager.getSessionId())) {
+  function capture() {
+    const manager = getContext()?.sessionManager;
+    return { epoch, manager, sessionId: manager?.getSessionId(), client: getClient() };
+  }
+  function assertCurrent(context) {
+    if (context.epoch !== epoch || context.manager !== getContext()?.sessionManager
+      || context.sessionId !== context.manager?.getSessionId() || context.client !== getClient()) {
+      throw new Error("input delivery context changed");
+    }
+  }
+  function validateInput(inputId, input, context) {
+    assertCurrent(context);
+    if (input && (input.inputId !== inputId || input.sessionId !== context.manager?.getSessionId())) {
       throw new Error("input is not reserved for this actor");
     }
   }
-  async function report(inputId, input, association, entries) {
-    const client = getClient(); if (!client?.isConnected) return false;
+  async function report(inputId, input, association, entries, context) {
+    assertCurrent(context);
+    const { client } = context; if (!client?.isConnected) return false;
     if (!input) return true;
-    validateInput(inputId, input);
+    validateInput(inputId, input, context);
     if (input.deliveredAt !== null && input.deliveredAt !== undefined) { enqueued.delete(inputId); return true; }
     if (association.state === "unresolved") return false;
     if (association.state === "absent") {
       if (entries.some((entry) => entry.type === "custom_message")) throw new Error("input entry provenance conflicts with its receipt");
       return true;
     }
-    await client.request("record_input_delivery", { inputId, entryId: association.entryId, deliveredAt: association.deliveredAt });
+    // Flush hooks and already-proven commands share one physical report per input.
+    // Validate each caller before joining; never share a different proof/lifetime.
+    pendingReports.add(inputId);
+    let active = reports.get(inputId);
+    if (active) {
+      if (active.context.epoch !== context.epoch || active.context.manager !== context.manager
+        || active.context.sessionId !== context.sessionId || active.context.client !== client) {
+        throw new Error("input delivery context changed");
+      }
+      if (!isDeepStrictEqual(active.association, association)) throw new Error("input delivery proof changed");
+    } else {
+      active = { context, association: structuredClone(association) };
+      active.promise = client.request("record_input_delivery", { inputId, entryId: association.entryId, deliveredAt: association.deliveredAt })
+        .finally(() => { if (reports.get(inputId) === active) reports.delete(inputId); });
+      reports.set(inputId, active);
+    }
+    await active.promise;
+    assertCurrent(context);
     enqueued.delete(inputId); return true;
   }
   async function flush() {
-    const scanned = appendedSessionEntries(getContext()?.sessionManager, cursor);
+    const context = capture();
+    const scanned = appendedSessionEntries(context.manager, cursor);
     for (const entry of scanned.entries) {
       const inputId = inputIdForEntry(entry);
       if (typeof inputId === "string" && inputId && inputId.length <= 128) pendingReports.add(inputId);
@@ -404,13 +436,14 @@ export function createActorInputDelivery({ pi, getClient, getContext }) {
     if (!pendingReports.size) return;
     const receipts = new Map();
     for (const inputId of pendingReports) {
-      const client = getClient(); if (!client?.isConnected) return;
+      assertCurrent(context);
+      const { client } = context; if (!client?.isConnected) return;
       const { input } = await client.request("get_actor_input", { inputId });
-      validateInput(inputId, input); receipts.set(inputId, input);
+      validateInput(inputId, input, context); receipts.set(inputId, input);
     }
     // Capture complete historical evidence after receipt awaits, then resolve once per input.
     const groups = new Map();
-    const manager = getContext()?.sessionManager;
+    const { manager } = context;
     for (const entry of manager ? sessionEntriesMatching(manager, header => receipts.has(header.inputId)) : []) {
       const inputId = inputIdForEntry(entry);
       const entries = groups.get(inputId) ?? []; entries.push(entry); groups.set(inputId, entries);
@@ -418,15 +451,20 @@ export function createActorInputDelivery({ pi, getClient, getContext }) {
     for (const [inputId, input] of receipts) {
       const entries = groups.get(inputId) ?? [];
       const association = resolveActorInputAssociation(entries, { sessionId: input?.sessionId, inputReceipt: input });
-      if (await report(inputId, input, association, entries)) pendingReports.delete(inputId);
+      const reported = await report(inputId, input, association, entries, context);
+      assertCurrent(context);
+      if (reported) pendingReports.delete(inputId);
     }
   }
   async function deliver(args, ctx) {
     const inputId = decodeURIComponent(args);
     if (!inputId || inputId.length > 128 || encodeURIComponent(inputId) !== args) throw new Error("invalid durable input selector");
-    const client = getClient(); if (!client?.isConnected) throw new Error("harness is offline");
+    const context = capture();
+    if (ctx.sessionManager !== context.manager) throw new Error("input delivery context changed");
+    const { client } = context; if (!client?.isConnected) throw new Error("harness is offline");
     const { input } = await client.request("get_actor_input", { inputId });
-    if (!input || input.inputId !== inputId || input.sessionId !== ctx.sessionManager.getSessionId()) throw new Error("input is not reserved for this actor");
+    validateInput(inputId, input, context);
+    if (!input) throw new Error("input is not reserved for this actor");
     if (!["cron", "background"].includes(input.source)) throw new Error("custom input requires a verified internal source");
     if (input.state === "completed") { enqueued.delete(inputId); return; }
     const payload = actorInputCustomPayload(input);
@@ -437,7 +475,7 @@ export function createActorInputDelivery({ pi, getClient, getContext }) {
       const existing = entries.find((entry) => entry.id === association.entryId);
       if (association.proof.kind === "custom" && (!isDeepStrictEqual(existing.details, payload.details)
         || !isDeepStrictEqual(existing.content, payload.content))) throw new Error("canonical input conflicts with its durable reservation");
-      await report(inputId, input, association, entries); return;
+      await report(inputId, input, association, entries, context); return;
     }
     if (entries.some((entry) => entry.type === "custom_message")) throw new Error("canonical input conflicts with its durable reservation");
     if (!enqueued.has(inputId)) {
@@ -447,11 +485,14 @@ export function createActorInputDelivery({ pi, getClient, getContext }) {
       enqueued.add(inputId);
     }
     await client.request("accept_actor_input", { inputId });
+    assertCurrent(context);
   }
   return {
     handle: deliver,
     flush,
     reset(entries) {
+      epoch++;
+      // Retain old physical owners until settlement, but revoke their local writes.
       enqueued.clear(); pendingReports.clear();
       // The supervisor reconciles durable pending inputs against full canonical
       // history before submission. This actor reports only subsequent appends.

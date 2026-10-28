@@ -160,9 +160,10 @@ function deliveryFixture(store, entries = []) {
     }
     throw new Error(`unexpected actor request ${type}`);
   } };
-  const helper = createActorInputDelivery({ pi: { sendMessage: (payload, options) => sent.push({ payload, options }) }, getClient: () => client, getContext: () => ctx });
-  return { helper, ctx, sent, entries, requests, client,
-    append(index, timestamp = 30) { const { payload } = sent[index]; const entry = { type: "custom_message", id: `entry-${index}`, timestamp: new Date(timestamp).toISOString(), ...payload }; entries.push(entry); return entry; } };
+  const owner = { ctx, client };
+  const helper = createActorInputDelivery({ pi: { sendMessage: (payload, options) => sent.push({ payload, options }) }, getClient: () => owner.client, getContext: () => owner.ctx });
+  return Object.assign(owner, { helper, sent, entries, requests,
+    append(index, timestamp = 30) { const { payload } = sent[index]; const entry = { type: "custom_message", id: `entry-${index}`, timestamp: new Date(timestamp).toISOString(), ...payload }; entries.push(entry); return entry; } });
 }
 
 test("both internal sources stay custom, retain authenticated details, and deliver only after canonical append", async (t) => {
@@ -350,4 +351,83 @@ test("background completion routing uses the existing busy/idle options without 
     f.append(0); await f.helper.flush(); await f.helper.handle(inputId, f.ctx);
     assert.equal(f.sent.length, 1); assert.equal(store.getActorInput(inputId, "root").state, "completed"); assert.equal(digest(), before);
   }
+});
+
+
+test("shared delivery failure rejects all waiters and a later flush reports without reinjection", async t => {
+  const { store } = await storeFixture(t), f = deliveryFixture(store);
+  store.createActorInput("root", { inputId: "shared", message: "synthetic body", source: "background", origin: { jobId: "job" } }, 10);
+  await f.helper.handle("shared", f.ctx); const entry = f.append(0);
+  const entered = Promise.withResolvers(), release = Promise.withResolvers(), original = new Error("synthetic proof failure");
+  const request = f.client.request; let reports = 0;
+  f.client.request = async (type, params) => {
+    if (type === "record_input_delivery" && ++reports === 1) { entered.resolve(); await release.promise; throw original; }
+    return request(type, params);
+  };
+  const first = f.helper.flush(); await entered.promise;
+  const waiting = Promise.allSettled([first, f.helper.handle("shared", f.ctx), f.helper.flush()]);
+  await new Promise(setImmediate); assert.equal(reports, 1);
+  release.resolve(); const results = await waiting;
+  assert(results.every(result => result.status === "rejected" && result.reason === original));
+  assert.equal(store.getActorInput("shared", "root").state, "accepted");
+  await f.helper.flush();
+  assert.equal(reports, 2); assert.equal(store.getActorInput("shared", "root").entryId, entry.id);
+  assert.equal(f.sent.length, 1); assert.equal(f.entries.length, 1);
+});
+
+test("an in-flight report does not replace each waiter's canonical and reservation checks", async t => {
+  const { store } = await storeFixture(t), f = deliveryFixture(store);
+  store.createActorInput("root", { inputId: "proof", message: "synthetic body", source: "background", origin: { jobId: "job" } }, 10);
+  await f.helper.handle("proof", f.ctx); const entry = f.append(0);
+  const entered = Promise.withResolvers(), release = Promise.withResolvers(), request = f.client.request;
+  let reports = 0, foreign = false;
+  f.client.request = async (type, params) => {
+    if (type === "get_actor_input" && foreign) return { input: { ...store.getActorInput(params.inputId, "root"), sessionId: "foreign" } };
+    if (type === "record_input_delivery") { reports++; entered.resolve(); await release.promise; }
+    return request(type, params);
+  };
+  const first = f.helper.flush(); await entered.promise;
+  f.entries.push({ ...entry, id: "ambiguous-copy" });
+  await f.helper.handle("proof", f.ctx); await f.helper.flush();
+  assert.equal(store.getActorInput("proof", "root").state, "accepted");
+  f.entries.pop();
+  const timestamp = entry.timestamp; entry.timestamp = new Date(31).toISOString();
+  await assert.rejects(f.helper.handle("proof", f.ctx), /input delivery proof changed/);
+  entry.timestamp = timestamp;
+  const content = entry.content; entry.content = "conflicting canonical body";
+  await assert.rejects(f.helper.handle("proof", f.ctx), /canonical input conflicts/);
+  entry.content = content;
+  foreign = true; await assert.rejects(f.helper.flush(), /not reserved for this actor/); foreign = false;
+  assert.equal(reports, 1); assert.equal(f.sent.length, 1);
+  release.resolve(); await first;
+  assert.equal(store.getActorInput("proof", "root").entryId, entry.id);
+});
+
+for (const change of ["reset", "client", "manager", "sessionId"]) test(`delivery report cannot join or write through a changed ${change}`, async t => {
+  const { store } = await storeFixture(t), f = deliveryFixture(store);
+  store.createActorInput("root", { inputId: "lifetime", message: "synthetic body", source: "background", origin: { jobId: "job" } }, 10);
+  await f.helper.handle("lifetime", f.ctx); f.append(0);
+  const entered = Promise.withResolvers(), release = Promise.withResolvers(), originalClient = f.client;
+  const request = f.client.request; let reports = 0;
+  f.client.request = async (type, params) => {
+    if (type === "record_input_delivery") { reports++; entered.resolve(); await release.promise; }
+    return request(type, params);
+  };
+  const first = f.helper.flush(), rejected = assert.rejects(first, /input delivery context changed/);
+  await entered.promise;
+  if (change === "reset") f.helper.reset([]);
+  if (change === "client") f.client = { ...f.client };
+  if (change === "manager") f.ctx = { ...f.ctx, sessionManager: { ...f.ctx.sessionManager } };
+  if (change === "sessionId") f.ctx.sessionManager.getSessionId = () => "foreign";
+  await assert.rejects(f.helper.flush(), change === "sessionId" ? /not reserved for this actor/ : /input delivery context changed/);
+  assert.equal(reports, 1, "a foreign lifetime never starts a second physical report");
+  release.resolve(); await rejected;
+  // Physical success may complete the durable receipt, but stale local work rejects.
+  assert.equal(store.getActorInput("lifetime", "root").state, "completed");
+  f.client = originalClient; f.ctx.sessionManager.getSessionId = () => "root";
+  store.createActorInput("root", { inputId: "after-change", message: "fresh body", source: "background", origin: { jobId: "fresh" } }, 40);
+  await f.helper.handle("after-change", f.ctx); const entry = f.append(1, 50);
+  await f.helper.flush();
+  assert.equal(store.getActorInput("after-change", "root").entryId, entry.id);
+  assert.equal(reports, 2); assert.equal(f.sent.length, 2);
 });

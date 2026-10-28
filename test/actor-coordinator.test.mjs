@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { createAgentStartPromptCapture } from "../src/actor-prompt.mjs";
@@ -15,7 +15,7 @@ const { sdk, api, core, responsesApi } = await loadExternalPi();
 const deferred = () => Promise.withResolvers();
 const wait = async (promise, message) => Promise.race([promise, new Promise((_, reject) => { const timer = setTimeout(() => reject(new Error(message)), 5000); timer.unref(); })]);
 const usage = () => ({ input: 1, output: 1, cacheRead: 0, cacheWrite: 0, totalTokens: 2, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } });
-async function fixture(t, { persistent = false, sessionFile, contextMode = "array", prepareManager, prepareRequest, script, retry, compaction, compactionDriver, hooks, promptExtensions = [], captureFirst = false, basePromptOptions, automaticCompactionAllowed, model: suppliedModel, streamStallMs } = {}) {
+async function fixture(t, { persistent = false, sessionFile, contextMode = "array", prepareManager, prepareRequest, script, retry, compaction, compactionDriver, hooks, promptExtensions = [], captureFirst = false, basePromptOptions, automaticCompactionAllowed, model: suppliedModel, streamStallMs, nativeTool = false, beforeClose } = {}) {
   const root = await mkdtemp(path.join(os.tmpdir(), "sc-"));
   const model = suppliedModel ?? { id: "fixture", name: "Fixture", provider: "coordinator-test", api: "coordinator-test-api", reasoning: false,
     input: ["text"], cost: usage().cost, contextWindow: 32000, maxTokens: 1000 };
@@ -49,7 +49,7 @@ async function fixture(t, { persistent = false, sessionFile, contextMode = "arra
     extensionsOverride: promptCapture.orderLast,
     extensionFactories: [...(captureFirst ? [promptCapture.extension] : []), pi => {
       hooks?.(pi);
-      pi.registerTool({ name: "hold", label: "Hold", description: "Held test tool", parameters: { type: "object", properties: {}, additionalProperties: false }, executionMode: "sequential",
+      pi.registerTool({ name: "hold", label: "Hold", description: "Held test tool", parameters: { type: "object", properties: {}, additionalProperties: false }, executionMode: "sequential", ...(nativeTool ? { async: true } : {}),
         async execute(_id, _args, signal) { runs++; toolStarted.resolve(); await Promise.race([held.promise, new Promise((_, reject) => signal.addEventListener("abort", () => reject(new Error("cancelled actual tool")), { once: true }))]); return { content: [{ type: "text", text: "REAL" }], details: {} }; } });
       pi.on("session_start", () => pi.setActiveTools(["hold"]));
     }, ...promptExtensions, ...(!captureFirst ? [promptCapture.extension] : [])] });
@@ -70,7 +70,7 @@ async function fixture(t, { persistent = false, sessionFile, contextMode = "arra
   coor = new ActorCoordinator({ session, runner, sdk, api, core, models, contextMode, resources: active, promptCapture, lifecycle: { prepareRequest }, publish: event => events.push(event),
     basePromptOptions: basePromptOptions ?? { contextFiles: [], cwd: root }, isProjectTrusted: () => false, compactionDriver, automaticCompactionAllowed, ...(streamStallMs ? { streamStallMs } : {}) });
   await coor.start(); await runner.emit({ type: "session_start", reason: "startup" });
-  t.after(async () => { held.resolve(); await coor.close(); await rm(root, { recursive: true, force: true }); });
+  t.after(async () => { held.resolve(); await beforeClose?.(); await coor.close(); await rm(root, { recursive: true, force: true }); });
   return { coor, requests, requestModels, events, manager, held, toolStarted, capture, runs: () => runs };
 }
 
@@ -1142,4 +1142,128 @@ test("handled inner Error reused after successful work belongs to the later esca
   const diagnostic = f.manager.getEntries().find(e => e.customType === TURN_FAILURE_DIAGNOSTIC_TYPE).data;
   assert.equal(diagnostic.operation, "after_commit"); assert.equal(diagnostic.errorKind, "type_error");
   assert.equal(f.coor.failure, reused); assert.equal(f.runs(), 1);
+});
+
+
+for (const firstReporter of ["context_source", "handle"]) test(`installed afterCommit shares a physical delivery report with ${firstReporter}`, { timeout: 20_000 }, async t => {
+  const { EventEmitter } = await import("node:events");
+  const { HarnessClient } = await import("../src/client.mjs");
+  const { HarnessSupervisor } = await import("./fixtures/isolated-supervisor.mjs");
+  const { VisibleTranscriptReader } = await import("../src/visible-transcript-reader.mjs");
+  const { actorInputCustomPayload } = await import("../src/protocol.mjs");
+  const env = { ...process.env };
+  t.after(() => { for (const key of Object.keys(process.env)) if (!(key in env)) delete process.env[key]; Object.assign(process.env, env); });
+  delete process.env.PI_HARNESS_INBOX_PORT; delete process.env.PI_HARNESS_INBOX_HOST;
+  delete process.env.PI_HARNESS_ACTOR_SKILL_GRANT;
+  process.env.PI_HARNESS_NATIVE_ASYNC = "1";
+  const model = { id: "gpt-6-astra", name: "Fixture Native", provider: "openai-codex", api: "openai-codex-responses",
+    baseUrl: "http://127.0.0.1:1", compat: { supportsAsyncTools: true }, reasoning: false, input: ["text"],
+    cost: usage().cost, contextWindow: 32000, maxTokens: 1000 };
+  let shutdown; const release = deferred();
+  const f = await fixture(t, { persistent: true, contextMode: "source", model, nativeTool: true,
+    beforeClose: async () => { release.resolve(); await shutdown?.(); shutdown = undefined; },
+    retry: { enabled: false }, compaction: { enabled: false } });
+  const root = path.dirname(f.manager.getSessionFile()), sessionId = f.manager.getSessionId();
+  f.manager.appendCustomEntry("fixture-boot", {});
+  registerCanonicalSessionManager(f.manager, { estimateContextTokens: core.estimateContextTokens });
+  f.coor.projectContext = projectCanonicalContext;
+  const wire = [], reader = new VisibleTranscriptReader({ inputReceiptReader: (id, target) => supervisor.store.getActorInput(id, target) }), entered = deferred();
+  let hold = false, proofReads = 0;
+  await mkdir(path.join(root, "empty-skills"));
+  const socketPath = path.join(root, "supervisor.sock");
+  const supervisor = new HarnessSupervisor({ socketPath, databasePath: path.join(root, "harness.sqlite"),
+    pidPath: path.join(root, "supervisor.pid"), skillsPath: path.join(root, "empty-skills"),
+    actorInactivityMs: 0, runtimeProvisioner: async () => ({}), sessionHistoryIndex: { close() {} },
+    transcriptReader: { async read(options) {
+      const view = await reader.read(options);
+      if (hold && Array.isArray(options.inputProofIds) && options.inputProofIds.includes("tail-input")) {
+        proofReads++; entered.resolve(); await release.promise;
+      }
+      return view;
+    } },
+    logger: { error(value) { assert.fail(String(value)); } },
+    processIdentityFactory: async pid => ({ version: 1, pid, processGroup: pid, startTime: "fixture", ownerToken: "fixture" }),
+    processTerminator: async () => ({ terminated: true }),
+    actorFactory: options => new class extends EventEmitter {
+      constructor() { super(); this.pid = process.pid; this.isRunning = false; }
+      async start() { this.isRunning = true; return this.state(); }
+      state() { return { sessionId, sessionFile: options.session.sessionFile, isStreaming: false, model: null, thinkingLevel: "off" }; }
+      async request() { return this.state(); }
+      async submit() { assert.fail("receipt reconciliation cannot replay an effect"); }
+      send() {}
+      async close() { this.isRunning = false; this.emit("exit", { code: 0, signal: "SIGTERM", expected: true, error: null }); }
+    }() });
+  let ui;
+  t.after(async () => { release.resolve(); try { await shutdown?.(); } finally { await ui?.stop(); await supervisor.stop(); } });
+  await supervisor.start();
+  supervisor.store.createRoot({ sessionId, sessionFile: f.manager.getSessionFile(), cwd: root,
+    repositoryRoot: null, name: "Isolated tail", actorToken: "tail-fixture", launch: {} });
+  ui = new HarnessClient({ socketPath, heartbeatMs: 0 });
+  await ui.start({ registrationType: "register_client", clientInstanceId: "tail-fixture" });
+  await ui.request("get_actor_state", { sessionId });
+  process.env.PI_HARNESS_ACTOR_ID = sessionId; process.env.PI_HARNESS_ACTOR_TOKEN = "tail-fixture";
+  process.env.PI_HARNESS_ACTOR_GENERATION = String(supervisor.store.getSession(sessionId).actorGeneration);
+  process.env.PI_HARNESS_SOCKET = socketPath;
+  const { default: installed } = await import(`../src/extension.mjs?delivery-tail=${sessionId}`);
+  const hooks = new Map(), commands = new Map(), owner = {}, ctx = { cwd: root, model, isIdle: () => false, sessionManager: f.manager,
+    ui: { setStatus() {}, notify() {} } };
+  installed({ events: { on() {} }, registerTool() {}, registerMessageRenderer() {}, registerCommand: (name, command) => commands.set(name, command),
+    on: (name, hook) => hooks.set(name, hook), getActiveTools: () => ["ipython", "wait_for_ipython"], setActiveTools() {},
+    getAllTools: () => [{ name: "ipython" }, { name: "wait_for_ipython" }], getCommands: () => [], sendMessage() { assert.fail("no input replay"); } }, owner);
+  await hooks.get("session_start")({}, ctx);
+  shutdown = hooks.get("session_shutdown");
+  f.coor.lifecycle.afterCommit = owner.afterCommit;
+  f.coor.nativeAdapter = createNativeProviderAdapter({ api, responsesApi, modelRuntime: { getAuth: async () => ({ auth: {
+    apiKey: `fixture.${Buffer.from(JSON.stringify({ "https://api.openai.com/auth": { chatgpt_account_id: "fixture" } })).toString("base64url")}.fixture` } }) },
+    transportOptions: { fetch: async (_url, init) => {
+      wire.push(JSON.parse(init.body));
+      const id = `tail-response-${wire.length}`;
+      const call = { type: "function_call", id: "tail-item", call_id: "tail-call", name: "hold", arguments: "{}", async: true, status: "completed" };
+      const events = [{ type: "response.created", response: { id, status: "in_progress" } },
+        ...(wire.length === 1 ? [{ type: "response.output_item.done", output_index: 0, item: call }] : []),
+        { type: "response.completed", response: { id, status: "completed", output: [] } }];
+      return new Response(events.map(event => `data: ${JSON.stringify(event)}\n\n`).join(""));
+    } } });
+  await f.coor.submit("offline synthetic initial input"); await wait(f.toolStarted.promise, "native tool did not start");
+  await wait((async () => { while (f.coor.flight) await new Promise(setImmediate); })(), "native flight did not retire");
+  const input = supervisor.store.createActorInput(sessionId, { inputId: "tail-input", message: "synthetic pending input",
+    source: "background", behavior: "auto", origin: { jobId: "fixture-job" } });
+  const payload = actorInputCustomPayload(input);
+  const entryId = f.manager.appendCustomMessageEntry(payload.customType, payload.content, payload.display, payload.details);
+  hold = true;
+  const handle = id => commands.get("persistent-harness-input").handler(id, ctx);
+  const first = firstReporter === "handle" ? handle(input.inputId) : hooks.get("context_source")();
+  await wait(entered.promise, "physical delivery proof was not held");
+  const joined = firstReporter === "handle" ? hooks.get("context_source")() : handle(input.inputId);
+  // Record rejection without an unhandled-rejection side channel in the red control.
+  const joinedResult = joined.then(() => null, error => error);
+  f.held.resolve();
+  await wait((async () => { while (!f.manager.getEntries().some(e => e.message?.role === "toolResult")) await new Promise(setImmediate); })(), "successful result was not appended");
+  await new Promise(setImmediate); await new Promise(setImmediate);
+  assert.equal(f.coor.failure, null, "the actual supervisor fence must not fail the successful result tail");
+  assert.equal(f.coor.tasks.size, 1, "afterCommit remains awaited until the shared physical proof finishes");
+  assert.equal(supervisor.store.getActorInput(input.inputId, sessionId).state, "queued");
+  // Another proven input is independent of the held input's owner.
+  const fresh = supervisor.store.createActorInput(sessionId, { inputId: "independent-input", message: "independent synthetic input",
+    source: "background", behavior: "auto", origin: { jobId: "independent-job" } });
+  const freshPayload = actorInputCustomPayload(fresh);
+  const freshEntryId = f.manager.appendCustomMessageEntry(freshPayload.customType, freshPayload.content, freshPayload.display, freshPayload.details);
+  await wait(handle(fresh.inputId), "an unrelated input was blocked behind the held proof");
+  assert.equal(supervisor.store.getActorInput(fresh.inputId, sessionId).entryId, freshEntryId);
+  release.resolve(); await first; assert.equal(await joinedResult, null);
+  await wait(f.coor.waitForIdle(), "shared report did not release the result tail");
+  const entries = sdk.SessionManager.open(f.manager.getSessionFile()).getEntries();
+  assert.equal(f.coor.failure, null);
+  assert.equal(entries.filter(e => e.customType === TURN_FAILURE_DIAGNOSTIC_TYPE || e.customType === TURN_FAILURE_ENTRY_TYPE).length, 0);
+  assert.equal(entries.filter(e => e.message?.role === "toolResult").length, 1);
+  assert.equal(entries.find(e => e.message?.role === "toolResult").message.isError, false);
+  assert.equal(entries.filter(e => e.message?.stopReason === "error").length, 0);
+  assert.equal(wire.length, 2); assert.equal(f.runs(), 1); assert.equal(proofReads, 1);
+  assert.equal(supervisor.store.getActorInput(input.inputId, sessionId).entryId, entryId);
+  assert.equal(supervisor.store.getActorInput(input.inputId, sessionId).state, "completed");
+  await f.coor.submit("fresh explicit continuation"); await wait(f.coor.waitForIdle(), "fresh request did not settle");
+  assert.equal(f.coor.failure, null); assert.equal(f.runs(), 1); assert.equal(wire.length, 3);
+  assert.equal(f.manager.getEntries().filter(e => e.message?.role === "toolResult").length, 1);
+  t.diagnostic(JSON.stringify({ firstReporter, proofReads, successfulResults: 1,
+    toolExecutions: f.runs(), providerAttempts: wire.length, freshInputProgress: true, inputDeliveredOnce: true }));
 });
