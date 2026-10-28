@@ -1,6 +1,7 @@
 import { ConversationBirthClock, conversationBirth } from "./conversation-birth.mjs";
 import { PROGRESS_ENTRY_TYPE } from "./progress-projection.mjs";
 import { normalizeInputLocation, renderUserLocations } from "./input-location.mjs";
+import { renderMessageTimes } from "./message-time.mjs";
 import { ActorToolDispatch, addToolUsage } from "./actor-tool-dispatch.mjs";
 import { createActorStreamPlanner } from "./actor-stream.mjs";
 import { evaluateInferenceRetry } from "./inference-retry.mjs";
@@ -653,7 +654,7 @@ export class ActorCoordinator {
       this.onTiming({ phase: "inference_start", at: performance.now(), turnIndex: this.turnIndex });
       const toolSchemas = tools.map(({ name, description, parameters, async: native, constrainedSampling }) => ({ name, description, parameters,
         ...(native ? { async: true } : {}), ...(constrainedSampling ? { constrainedSampling } : {}) }));
-      const context = { systemPrompt: this.currentPrompt, messages: this.sdk.convertToLlm(renderUserLocations(messages)), tools: toolSchemas };
+      const context = { systemPrompt: this.currentPrompt, messages: this.sdk.convertToLlm(renderMessageTimes(renderUserLocations(messages))), tools: toolSchemas };
       this.runProviderStarted = true;
       const stream = useNative ? this.nativeAdapter.stream(this.session.model, context, options) : streamSessionRequest(this.models, this.session.model, context, options, this);
       for await (const event of watchStreamStall(stream, this.streamStallMs, error => { stalled = true; requestController.abort(error); })) {

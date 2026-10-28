@@ -1,3 +1,4 @@
+import { renderMessageTimes } from "./message-time.mjs";
 // Optional user-supplied attachment. Error text must never contain coordinates.
 export function normalizeInputLocation(value) {
   if (value === undefined) return undefined;
@@ -28,6 +29,6 @@ export function renderUserLocation(message) {
 }
 export function renderUserLocations(messages) { return messages.map(renderUserLocation); }
 export function renderCompactionLocations(preparation) {
-  return { ...preparation, messagesToSummarize: renderUserLocations(preparation.messagesToSummarize),
-    turnPrefixMessages: renderUserLocations(preparation.turnPrefixMessages) };
+  return { ...preparation, messagesToSummarize: renderMessageTimes(renderUserLocations(preparation.messagesToSummarize)),
+    turnPrefixMessages: renderMessageTimes(renderUserLocations(preparation.turnPrefixMessages)) };
 }
