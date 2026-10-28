@@ -162,7 +162,13 @@ null, and equivalent decisions. Its reread, stale, null-fallback, and root-only
 controls must fail. The external-write configuration intentionally demonstrates
 non-equivalence between the old sample times; neither version guarantees
 latest-at-commit family state. SQL isolation and runtime allocation are outside
-this finite abstraction.
+this finite abstraction. `NotificationLifecycle.Migration.cfg` checks atomic
+publication of the close-delivery column and historical initialization through
+failure/reopen; its non-atomic control must violate the historical-close invariant.
+Real SQLite regressions abort the initialization statement before its first row
+and after one row, require schema and row rollback, and then reopen successfully
+without claiming historical closures. These checks do not make a pre-upgrade
+state snapshot safe to restore after successor writes.
 
 `CronActiveRunProbe` compares a fresh session-specific active-run existence
 query with the full-list predicate across all run statuses and two observations.

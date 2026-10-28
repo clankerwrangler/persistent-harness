@@ -3,12 +3,15 @@ EXTENDS Naturals, FiniteSets, Sequences
 CONSTANTS Actors, Root, MaxEpisodes
 VARIABLES episode, busy, pending, quiet, closed, needs, idleNotices, needNotices, background, owner, pendingUser, jobOwner, pendingOwner
 vars == <<episode, busy, pending, quiet, closed, needs, idleNotices, needNotices, background, owner, pendingUser, jobOwner, pendingOwner>>
-VARIABLE observation
+VARIABLE observation, migration
 SnapshotInitial == [phase |-> "pick", n |-> 0, entry |-> "supplied", current |-> 0,
                     outer |-> [index |-> 0, version |-> 0], previous |-> [index |-> 0, version |-> 0],
                     used |-> [index |-> 0, version |-> 0], reads |-> 0, oldReads |-> 0,
                     expected |-> "unobserved", result |-> "unobserved"]
-Init == /\ observation = SnapshotInitial /\ episode = 0 /\ busy = {} /\ pending = {} /\ quiet = 0
+MigrationInitial == [phase |-> "closed", column |-> FALSE, initialized |-> FALSE,
+  stagedColumn |-> FALSE, stagedInitialized |-> FALSE,
+  restarts |-> 0, historicalClosure |-> FALSE]
+Init == /\ migration = MigrationInitial /\ observation = SnapshotInitial /\ episode = 0 /\ busy = {} /\ pending = {} /\ quiet = 0
         /\ closed = TRUE /\ needs = FALSE /\ idleNotices = {} /\ needNotices = {} /\ background = FALSE /\ owner = "user" /\ pendingUser = FALSE /\ jobOwner = "none" /\ pendingOwner = "none"
 \* Actors includes root, child, and grandchild. Retained idle/inactive actors
 \* are absent from busy. Live inference, tools, and starting handoffs are busy.
@@ -61,7 +64,7 @@ TypeOK == /\ pendingOwner \in {"none", "user", "cron", "unknown"} /\ jobOwner \i
 NoPrematureIdle == episode \in idleNotices => closed /\ busy = {} /\ quiet = 2
 NoRelatedDoublePing == closed /\ needs => episode \notin idleNotices
 CronIntentNotBypassed == owner # "user" => episode \notin idleNotices
-Spec == Init /\ [][Next /\ UNCHANGED observation]_<<vars, observation>>
+Spec == Init /\ [][Next /\ UNCHANGED <<observation, migration>>]_<<vars, observation, migration>>
 
 \* One uninterrupted supervisor observation owns its newly read projection.
 \* Cases abstract SQL rows/options; only the external control mutates between reads.
@@ -129,18 +132,56 @@ SnapshotAgain ==
     /\ observation.phase = "done" /\ observation.n = 0
     /\ observation' = [SnapshotInitial EXCEPT !.n = 1, !.previous = observation.outer]
 SnapshotNext(policy) == /\ (SnapshotPick(policy) \/ SnapshotCapture \/ SnapshotEnter(policy) \/ SnapshotObserve(policy) \/ SnapshotAgain)
-                        /\ UNCHANGED vars
+                        /\ UNCHANGED <<vars, migration>>
 SnapshotEquivalent == observation.phase = "done" => observation.result = observation.expected
 SnapshotNoFallback == observation.phase = "done" /\ observation.entry = "null" => observation.reads = 0 /\ observation.used.index = 0
 SnapshotOneRead == observation.phase = "done" => observation.reads = (IF observation.entry = "null" THEN 0 ELSE 1)
 SnapshotFresh == observation.phase = "done" => observation.used = SnapshotProjection(IF observation.entry = "null" THEN 0 ELSE observation.current, observation.n)
 SnapshotSameProjection == observation.phase = "done" /\ observation.entry = "supplied" => observation.used = observation.outer
 SnapshotWorkRemoved == observation.phase = "done" => observation.oldReads >= observation.reads
-SnapshotSpec == Init /\ [][SnapshotNext("correct")]_<<vars, observation>>
-SnapshotRereadSpec == Init /\ [][SnapshotNext("reread")]_<<vars, observation>>
-SnapshotStaleSpec == Init /\ [][SnapshotNext("stale")]_<<vars, observation>>
-SnapshotNullFallbackSpec == Init /\ [][SnapshotNext("nullfallback")]_<<vars, observation>>
-SnapshotRootOnlySpec == Init /\ [][SnapshotNext("rootonly")]_<<vars, observation>>
+SnapshotSpec == Init /\ [][SnapshotNext("correct")]_<<vars, observation, migration>>
+SnapshotRereadSpec == Init /\ [][SnapshotNext("reread")]_<<vars, observation, migration>>
+SnapshotStaleSpec == Init /\ [][SnapshotNext("stale")]_<<vars, observation, migration>>
+SnapshotNullFallbackSpec == Init /\ [][SnapshotNext("nullfallback")]_<<vars, observation, migration>>
+SnapshotRootOnlySpec == Init /\ [][SnapshotNext("rootonly")]_<<vars, observation, migration>>
 \* Expected non-equivalence: another connection changes sessions between old reads.
-SnapshotExternalSpec == Init /\ [][SnapshotNext("external")]_<<vars, observation>>
+SnapshotExternalSpec == Init /\ [][SnapshotNext("external")]_<<vars, observation, migration>>
+\* An existing closed/accepted delivery must acquire its historical marker in
+\* the same durable transaction that publishes close_claimed_at. Crash/reopen
+\* skips initialization only when the entire migration was already committed.
+MigrationOpen == /\ migration.phase = "closed"
+                 /\ migration' = [migration EXCEPT !.phase = "check"]
+MigrationCheck(atomic) ==
+  /\ migration.phase = "check"
+  /\ migration' = [migration EXCEPT !.phase = IF migration.column THEN "ready" ELSE "add"]
+MigrationAdd(atomic) ==
+  /\ migration.phase = "add"
+  /\ migration' = [migration EXCEPT !.phase = "initialize", !.stagedColumn = TRUE,
+       !.column = IF atomic THEN @ ELSE TRUE]
+MigrationInitialize(atomic) ==
+  /\ migration.phase = "initialize"
+  /\ migration' = [migration EXCEPT !.phase = "commit", !.stagedInitialized = TRUE,
+       !.initialized = IF atomic THEN @ ELSE TRUE]
+MigrationCommit ==
+  /\ migration.phase = "commit"
+  /\ migration' = [migration EXCEPT !.phase = "ready", !.column = migration.stagedColumn,
+       !.initialized = migration.stagedInitialized]
+MigrationCrash ==
+  /\ migration.phase \in {"add", "initialize", "commit"} /\ migration.restarts = 0
+  /\ migration' = [migration EXCEPT !.phase = "closed",
+       !.stagedColumn = migration.column, !.stagedInitialized = migration.initialized,
+       !.restarts = 1]
+MigrationClaim ==
+  /\ migration.phase = "ready"
+  /\ migration' = [migration EXCEPT !.phase = "finished",
+       !.historicalClosure = migration.column /\ ~migration.initialized]
+MigrationNext(atomic) ==
+  /\ (MigrationOpen \/ MigrationCheck(atomic) \/ MigrationAdd(atomic)
+       \/ MigrationInitialize(atomic) \/ MigrationCommit \/ MigrationCrash \/ MigrationClaim)
+  /\ UNCHANGED <<vars, observation>>
+MigrationAtomicPublication == migration.column => migration.initialized
+MigrationNoHistoricalClosure == ~migration.historicalClosure
+MigrationReady == migration.phase \in {"ready", "finished"} => migration.column /\ migration.initialized
+MigrationSpec == Init /\ [][MigrationNext(TRUE)]_<<vars, observation, migration>>
+MigrationNonAtomicSpec == Init /\ [][MigrationNext(FALSE)]_<<vars, observation, migration>>
 =======================================================================
