@@ -50,6 +50,36 @@ test("read suppresses pending retry without resolution; expiry cannot reopen; ex
   assert.deepEqual(store.claim([endpoint], 330000), []); assert.equal(store.deliveries(exhaust.id)[0].state, "failed");
 });
 
+test("withdrawn and dismissed requests record their closer and close each accepted device once", async t => {
+  const { file, store } = await fixture(t), other = "b".repeat(64);
+  const withdrawn = store.request("root", request, 1000), dismissed = store.request("root", { ...request, key: "dismiss" }, 1000);
+  const unsent = store.request("root", { ...request, key: "unsent" }, 1000);
+  for (const claim of store.claim([endpoint, other], 1000)) {
+    if (claim.notification.id === unsent.id) continue;
+    store.receipt({ id: claim.notification.id, endpointId: claim.endpointId, leaseId: claim.leaseId,
+      status: claim.endpointId === other && claim.notification.id === dismissed.id ? "failed" : "accepted" }, 1001);
+  }
+  assert.deepEqual(store.claimClosures([endpoint, other], 1002), []);
+  assert.equal(store.resolveKey("root", request.key, 2000).closedBy, "agent");
+  assert.equal(store.transition(dismissed.id, "resolved", 2000, "user").closedBy, "user");
+  store.transition(unsent.id, "resolved", 2000, "user");
+  assert.throws(() => store.transition(unsent.id, "resolved", 2000, "someone"), /invalid notification closer/);
+  const closures = store.claimClosures([endpoint, other], 2001).map(c => [c.notification.id, c.endpointId]).sort();
+  assert.deepEqual(closures, [[withdrawn.id, endpoint], [withdrawn.id, other], [dismissed.id, endpoint]].sort());
+  const reconnected = new NotificationStore(file); t.after(() => reconnected.close());
+  assert.deepEqual(reconnected.claimClosures([endpoint, other], 3000), []);
+  assert.equal(reconnected.get(withdrawn.id).closedBy, "agent");
+});
+
+test("closes already finished before the close column existed are not sent", async t => {
+  const { file, store } = await fixture(t), item = store.request("root", request, 1000);
+  const claim = store.claim([endpoint], 1000)[0]; store.receipt({ id: item.id, endpointId: endpoint, leaseId: claim.leaseId, status: "accepted" }, 1001);
+  store.resolveKey("root", request.key, 2000);
+  const db = new DatabaseSync(file); db.exec("ALTER TABLE notification_deliveries DROP COLUMN close_claimed_at"); db.close();
+  const upgraded = new NotificationStore(file); t.after(() => upgraded.close());
+  assert.deepEqual(upgraded.claimClosures([endpoint], 3000), []);
+});
+
 test("family episode survives store restart and detached jobs do not extend idle", async t => {
   const { file, store } = await fixture(t);
   store.observe("root", { liveActors: ["root"], now: 1000 }); store.observe("root", { now: 1100 });
