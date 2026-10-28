@@ -1,7 +1,34 @@
+import { types } from "node:util";
 import { normalizeTurnFailure } from "./protocol.mjs";
 export { normalizeTurnFailure } from "./protocol.mjs";
 export const TURN_FAILURE_ENTRY_TYPE = "persistent-harness.turn-failure-v1";
 export const TURN_FAILURE_ACCEPTED_TYPE = "persistent-harness.turn-failure-accepted-v1";
+// This companion remains local canonical metadata; the v1 notice/receipt is unchanged.
+export const TURN_FAILURE_DIAGNOSTIC_TYPE = "persistent-harness.turn-failure-diagnostic-v1";
+const errorKinds = new Map([[Error.prototype, "error"], [TypeError.prototype, "type_error"],
+  [RangeError.prototype, "range_error"], [SyntaxError.prototype, "syntax_error"],
+  [ReferenceError.prototype, "reference_error"], [AggregateError.prototype, "aggregate_error"]]);
+const errorCodes = new Set(["ERR_LOCAL_PREPARATION", "ERR_CONTEXT_DATA_LIMIT", "ERR_CONTEXT_DATA_TYPE",
+  "ERR_CONTEXT_SOURCE_PROJECTION", "ERR_CONTEXT_HELPER_FAILED", "ERR_STREAM_DATA_LIMIT", "ERR_STREAM_FAILED",
+  "ERR_COMPACTION_STALE_SNAPSHOT", "ERR_COMPACTION_COMMITTED"]);
+
+const origins = new Set(["drive_rejection", "tool_tail_rejection", "async_callback"]);
+const operations = new Set(["drive", "tool_tail", "callback", "extension_message", "extension_user_input", "compaction_callback",
+  "tool_update", "message_commit", "message_hook", "context_refresh", "message_publish", "after_commit", "run_start", "recovery",
+  "threshold_preflight", "queued_delivery", "inference", "settlement"]);
+export function turnFailureSiteTokens(origin, operation) {
+  return { origin: origins.has(origin) ? origin : "unknown", operation: operations.has(operation) ? operation : "unknown" };
+}
+
+// Reject proxies before reflection, including revoked proxies. Never read name,
+// message, stack, cause, inherited properties, or invoke user formatting hooks.
+export function turnFailureErrorTokens(error) {
+  if (types.isProxy(error) || !types.isNativeError(error)) return { errorKind: "unknown", errorCode: "unknown" };
+  const code = Object.getOwnPropertyDescriptor(error, "code");
+  return { errorKind: errorKinds.get(Object.getPrototypeOf(error)) ?? "native_error",
+    errorCode: code && Object.hasOwn(code, "value") && errorCodes.has(code.value) ? code.value : "unknown" };
+}
+
 // The latest ordered acceptance witness is a frontier, not a list of all old
 // receipts. Restore reads one witness body and only the pending marker suffix.
 export function pendingTurnFailureJournal(headers, read) {

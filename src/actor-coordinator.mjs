@@ -7,7 +7,8 @@ import { evaluateInferenceRetry } from "./inference-retry.mjs";
 import { fastModeOptions, streamSessionRequest, supportsFastMode } from "./fast-mode.mjs";
 import { STREAM_STALL_MS, watchStreamStall } from "./stream-stall.mjs";
 import { randomUUID } from "node:crypto";
-import { TURN_FAILURE_ENTRY_TYPE } from "./child-turn-failure.mjs";
+import { AsyncLocalStorage } from "node:async_hooks";
+import { TURN_FAILURE_ENTRY_TYPE, TURN_FAILURE_DIAGNOSTIC_TYPE, turnFailureErrorTokens, turnFailureSiteTokens } from "./child-turn-failure.mjs";
 import { readFile } from "node:fs/promises";
 import { isDeepStrictEqual } from "node:util";
 import { createOrdinaryNonAdmissionWitness, ORDINARY_NON_ADMISSION_CUSTOM_TYPE, projectCanonicalBranch, projectCanonicalContext, projectCanonicalSource, refreshCanonicalSessionContext, sessionContextInput, sessionBranchHeaders, sessionCallIssuer } from "./canonical-context.mjs";
@@ -63,6 +64,8 @@ export class ActorCoordinator {
     this.pendingInference = null;
     this.runId = null; this.runFailure = null; this.runFailureReport = null; this.runFailureEntryId = null;
     this.runProviderStarted = false; this.runToolDispatched = false;
+    this.failureScopes = new AsyncLocalStorage(); this.runFailureDiagnostic = null;
+    this.runResultAppended = false; this.runResultCommitFinished = false;
     this.failedAttempt = null; this.retryAttemptNumber = 1; this.retrying = false; this.overflowRecoveryAttempted = false;
     this.steeringMode = "all"; this.followUpMode = "all"; this.contextUsage = undefined;
     this.compactionHistoryBarrier = null; this.runPromptOptions = undefined;
@@ -74,9 +77,11 @@ export class ActorCoordinator {
     if (!this.runner) throw new Error("an independently owned public ExtensionRunner is required");
     if (this.runner === this.session.extensionRunner) throw new Error("active runner must not share the dormant SDK service runtime");
     const core = {
-      sendMessage: (message, options) => { this.sendCustom(message, options).catch(error => this.fail(error)); },
-      sendUserMessage: (content, options = {}) => { this.submit(textOf(content), options.deliverAs === "followUp" ? "follow_up" : "auto",
-        Array.isArray(content) ? content.filter(p => p.type === "image") : [], null, { source: "extension", expandPromptTemplates: options.expandPromptTemplates === true }).catch(error => this.fail(error)); },
+      sendMessage: (message, options) => { const scope = this.failureScope("async_callback", "extension_message");
+        this.sendCustom(message, options).catch(error => this.fail(error, scope)); },
+      sendUserMessage: (content, options = {}) => { const scope = this.failureScope("async_callback", "extension_user_input");
+        this.submit(textOf(content), options.deliverAs === "followUp" ? "follow_up" : "auto",
+        Array.isArray(content) ? content.filter(p => p.type === "image") : [], null, { source: "extension", expandPromptTemplates: options.expandPromptTemplates === true }).catch(error => this.fail(error, scope)); },
       appendEntry: (type, data) => { const id = this.manager.appendCustomEntry(type, data); this.publish({ type: "entry_appended", entryId: id }); },
       setSessionName: name => { this.manager.appendSessionInfo(name); void this.emit({ type: "session_info_changed", name }); },
       getSessionName: () => this.manager.getSessionName(),
@@ -98,7 +103,8 @@ export class ActorCoordinator {
       isIdle: () => !this.isBusy, isProjectTrusted: () => this.isProjectTrusted(), getSignal: () => this.controller?.signal,
       abort: () => { void this.abort(); }, hasPendingMessages: () => this.queue.length > 0,
       shutdown: () => { if (this.lifecycle.requestShutdown) this.lifecycle.requestShutdown(); else void this.close(); }, getContextUsage: () => this.contextUsage,
-      compact: options => { this.compact(options?.customInstructions).then(options?.onComplete, options?.onError ?? (error => this.fail(error))); },
+      compact: options => { const scope = this.failureScope("async_callback", "compaction_callback");
+        this.compact(options?.customInstructions).then(options?.onComplete, options?.onError ?? (error => this.fail(error, scope))); },
       getSystemPrompt: () => this.runPrompt, getSystemPromptOptions: () => this.promptOptions(),
     }, { registerProvider: (name, config) => this.models.registerProvider(name, config),
       registerNativeProvider: provider => this.models.registerNativeProvider(provider), unregisterProvider: name => this.models.unregisterProvider(name) });
@@ -201,15 +207,47 @@ export class ActorCoordinator {
     if (event.type === "message_end") throw new Error("message_end must use the canonical commit path");
     await this.runner.emit(event); await this.publish(event);
   }
-  fail(error) { this.failure = error instanceof Error ? error : new Error(String(error)); this.wake(); }
+  failureScope(origin, operation, { resultState } = {}) {
+    return { runId: this.failureScopes.getStore()?.runId ?? this.runId, origin, operation, resultState, rejection: null };
+  }
+  failureObservation(error, scope) {
+    return Object.freeze({ version: 1, turnId: scope.runId, ...turnFailureSiteTokens(scope.origin, scope.operation),
+      ...turnFailureErrorTokens(error), resultAppended: scope.resultState?.appended ?? this.runResultAppended,
+      resultCommitFinished: scope.resultState?.finished ?? this.runResultCommitFinished,
+      flightPresent: Boolean(this.flight), failedAttemptPresent: Boolean(this.failedAttempt), toolWorkPresent: this.tasks.size > 0 });
+  }
+  rememberFailure(error, scope) {
+    if (!this.running || !scope || scope.runId !== this.runId || this.runFailureDiagnostic) return;
+    this.runFailureDiagnostic = scope.rejection && Object.is(scope.rejection.error, error)
+      ? scope.rejection.metadata : this.failureObservation(error, scope);
+  }
+  async failureOperation(operation, action, { propagate = false } = {}) {
+    const parent = this.failureScopes.getStore();
+    if (!parent) return action();
+    const scope = { ...parent, operation, rejection: null };
+    return this.failureScopes.run(scope, async () => {
+      try { return await action(); }
+      catch (error) {
+        // Only catch-free owned composition can forward a child tag. An opaque
+        // callback can handle and later reuse the same thrown value internally.
+        parent.rejection = propagate && scope.rejection && Object.is(scope.rejection.error, error)
+          ? scope.rejection : { error, metadata: this.failureObservation(error, scope) };
+        throw error;
+      } finally { scope.rejection = null; }
+    });
+  }
+  fail(error, scope = this.failureScopes.getStore()) {
+    this.rememberFailure(error, scope ?? this.failureScope("async_callback", "callback"));
+    this.failure = error instanceof Error ? error : new Error(String(error)); this.wake();
+  }
   createTextBirth(text) {
     return (this.lifecycle.projectPublicText?.(text) ?? text).trim() ? this.birthClock.next() : undefined;
   }
   async commit(message, { immutableCalls = false, prepare, guard, onCommit } = {}) {
-    const operation = this.commitTail.then(async () => {
+    const operation = this.commitTail.then(() => this.failureOperation("message_commit", async () => {
       const originalCalls = message.role === "assistant" ? JSON.stringify(message.content.filter(part => part.type === "toolCall")) : null;
       const hookInput = clone(message);
-      const replacement = await this.runner.emitMessageEnd({ type: "message_end", message: hookInput });
+      const replacement = await this.failureOperation("message_hook", () => this.runner.emitMessageEnd({ type: "message_end", message: hookInput }));
       let final = replacement ?? hookInput;
       if (prepare) final = prepare(final).message;
       else if (final.role === "assistant") final.content = final.content.map((part, index) => {
@@ -222,12 +260,22 @@ export class ActorCoordinator {
       if (immutableCalls && JSON.stringify(final.content.filter(part => part.type === "toolCall")) !== originalCalls) throw new Error("a message hook changed an admitted native call");
       guard?.(final);
       const entryId = this.manager.appendMessage(final);
+      if (final.role === "toolResult") {
+        const scope = this.failureScopes.getStore();
+        if (scope?.resultState) scope.resultState.appended = true;
+        if (scope?.runId === this.runId) this.runResultAppended = true;
+      }
       onCommit?.({ entryId, message: final });
-      if (this.contextMode === "source") refreshCanonicalSessionContext(this.session, this.sdk.buildSessionProjection);
-      await this.publish({ type: "message_end", message: final, messageId: final.id, entryId });
-      await this.lifecycle.afterCommit?.();
+      if (this.contextMode === "source") await this.failureOperation("context_refresh", () => refreshCanonicalSessionContext(this.session, this.sdk.buildSessionProjection));
+      await this.failureOperation("message_publish", () => this.publish({ type: "message_end", message: final, messageId: final.id, entryId }));
+      await this.failureOperation("after_commit", () => this.lifecycle.afterCommit?.());
+      if (final.role === "toolResult") {
+        const scope = this.failureScopes.getStore();
+        if (scope?.resultState) scope.resultState.finished = true;
+        if (scope?.runId === this.runId) this.runResultCommitFinished = true;
+      }
       return { entryId, message: final };
-    });
+    }, { propagate: true }));
     this.commitTail = operation.catch(() => {}); return operation;
   }
 
@@ -283,7 +331,10 @@ export class ActorCoordinator {
 
   wake() {
     if (this.closed || this.drivePromise) return;
-    this.drivePromise = Promise.resolve().then(() => this.drive()).catch(async error => {
+    const scope = this.failureScope("drive_rejection", "drive");
+    scope.runId = this.runId; // A drive belongs to the actor's current run, not its caller's callback.
+    this.drivePromise = this.failureScopes.run(scope, () => Promise.resolve().then(() => this.drive()).catch(async error => {
+      this.rememberFailure(error, scope);
       this.failure = error;
       if (error instanceof LocalPreparationError) this.runFailure = error.failureClass;
       else if (!this.stopping && !this.controller?.signal.aborted) this.runFailure ??= "turn_failed";
@@ -297,7 +348,7 @@ export class ActorCoordinator {
       message.errorMessage = error.message;
       try { await this.commit(message); }
       catch (commitError) { this.failure = new AggregateError([error, commitError], `${error.message}; terminal commit failed: ${commitError.message}`); }
-    })
+    }).finally(() => { scope.rejection = null; }))
       .finally(() => { this.drivePromise = null; this.notifyIdle(); if (this.shouldDrive()) this.wake(); });
   }
   shouldDrive() {
@@ -383,30 +434,33 @@ export class ActorCoordinator {
     await this.applyPendingInference();
     if ((this.stopping || this.failure) && this.running) {
       if (this.failure && !this.stopping && await this.recoverInference()) {
-        if (this.failure) { if (!this.tasks.size && !this.failedAttempt) await this.settle(); return; }
-      } else { if (!this.tasks.size) await this.settle(); return; }
+        if (this.failure) { if (!this.tasks.size && !this.failedAttempt) await this.failureOperation("settlement", () => this.settle()); return; }
+      } else { if (!this.tasks.size) await this.failureOperation("settlement", () => this.settle()); return; }
     }
     if (!this.running) {
       if (!this.queue.some(item => item.behavior !== "next_turn")) return;
       this.controller = new AbortController(); this.runPrompt = this.session.systemPrompt; this.runPromptOptions = undefined; this.running = true; this.stopping = false; this.turnIndex = 0; this.retryAttemptNumber = 1; this.failedAttempt = null; this.overflowRecoveryAttempted = false;
       this.runId = randomUUID(); this.runFailure = null; this.runFailureReport = null; this.runFailureEntryId = null;
       this.runProviderStarted = false; this.runToolDispatched = false;
-      await this.emit({ type: "agent_start" }); await this.recover();
-      await this.maybeAutoCompact();
+      this.runFailureDiagnostic = null; this.runResultAppended = false; this.runResultCommitFinished = false;
+      const scope = this.failureScopes.getStore(); if (scope) scope.runId = this.runId;
+      await this.failureOperation("run_start", () => this.emit({ type: "agent_start" }));
+      await this.failureOperation("recovery", () => this.recover());
+      await this.failureOperation("threshold_preflight", () => this.maybeAutoCompact());
     }
     while (!this.closed && !this.stopping && !this.failure) {
       if (this.hasOrdinaryBarrier()) return;
       // A completed answer admits eligible follow-ups with queued auto input.
       // Do not let auto delivery erase that boundary, or bypass unseen results.
-      await this.deliverQueued(this.naturalStop && !this.tasks.size && this.revision === this.sentRevision);
+      await this.failureOperation("queued_delivery", () => this.deliverQueued(this.naturalStop && !this.tasks.size && this.revision === this.sentRevision));
       if (this.revision > this.sentRevision || this.continueNative) {
-        this.continueNative = false; await this.inference(); await this.maybeAutoCompact(); continue;
+        this.continueNative = false; await this.failureOperation("inference", () => this.inference()); await this.failureOperation("threshold_preflight", () => this.maybeAutoCompact()); continue;
       }
       if (this.tasks.size) return;
       if (this.naturalStop && await this.deliverQueued(true)) continue;
-      await this.settle(); return;
+      await this.failureOperation("settlement", () => this.settle()); return;
     }
-    if (!this.tasks.size && !this.failedAttempt) await this.settle();
+    if (!this.tasks.size && !this.failedAttempt) await this.failureOperation("settlement", () => this.settle());
   }
 
   retryObservation(attempt) {
@@ -665,7 +719,8 @@ export class ActorCoordinator {
     } else if (!this.seenCalls.has(call.id) || this.tasks.has(call.id)) throw new Error("invalid admitted tool dispatch");
     const executionController = this.controller;
     const task = { call: clone(call), native, resultCommitted: false }; this.tasks.set(call.id, task);
-    const run = this.toolTail.then(async () => {
+    const scope = this.failureScope("tool_tail_rejection", "tool_tail", { resultState: { appended: false, finished: false } });
+    const run = this.toolTail.then(() => this.failureScopes.run(scope, async () => {
       let result, isError = false;
       const registered = this.runner.getAllRegisteredTools().find(item => item.definition.name === call.name && this.activeTools.has(call.name));
       const tool = registered?.definition;
@@ -688,7 +743,8 @@ export class ActorCoordinator {
         this.runToolDispatched = true;
         this.onTiming({ phase: "tool_dispatch", at: performance.now(), toolCallId: call.id });
         result = await this.sdk.wrapRegisteredTool(registered, this.runner).execute(call.id, args, executionController.signal,
-          partialResult => { void this.emit({ type: "tool_execution_update", toolCallId: call.id, toolName: call.name, args, partialResult }).catch(error => this.fail(error)); });
+          partialResult => { const updateScope = this.failureScope("async_callback", "tool_update", { resultState: this.failureScopes.getStore()?.resultState });
+            void this.emit({ type: "tool_execution_update", toolCallId: call.id, toolName: call.name, args, partialResult }).catch(error => this.fail(error, updateScope)); });
         isError = result.isError === true;
       } catch (error) { isError = true; result = { content: [{ type: "text", text: error.message }], details: { error: error.message } }; }
       const patch = await this.runner.emitToolResult({ type: "tool_result", toolCallId: call.id, toolName: call.name, input: call.arguments,
@@ -706,8 +762,8 @@ export class ActorCoordinator {
       this.onTiming({ phase: "real_result_committed", at: performance.now(), toolCallId: call.id }); this.wake();
       // PythonKernel owns the remaining checkpoint FIFO and drains it on close/reload.
       // The real result, not later namespace durability, completes this tool call.
-    });
-    this.toolTail = run.catch(error => this.fail(error)).finally(() => { this.tasks.delete(call.id); this.wake(); });
+    }));
+    this.toolTail = run.catch(error => this.fail(error, scope)).finally(() => { scope.rejection = null; this.tasks.delete(call.id); this.wake(); });
     task.promise = this.toolTail;
   }
   journalTurnFailure() {
@@ -719,6 +775,10 @@ export class ActorCoordinator {
         : this.runProviderStarted ? "provider_dispatch_unknown" : "before_provider_dispatch" };
     this.runFailureEntryId = this.manager.appendCustomEntry(TURN_FAILURE_ENTRY_TYPE, report);
     this.runFailureReport = report;
+    if (this.runFailureDiagnostic?.turnId === this.runId) {
+      try { this.manager.appendCustomEntry(TURN_FAILURE_DIAGNOSTIC_TYPE, this.runFailureDiagnostic); }
+      catch { /* Keep the original failure and its durable v1 receipt. */ }
+    }
   }
   async settle() {
     if (this.tasks.size || this.flight || !this.running) return;

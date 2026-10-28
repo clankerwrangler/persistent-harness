@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { setImmediate as tick } from "node:timers/promises";
 import { ActorToolDispatch } from "../src/actor-tool-dispatch.mjs";
-import { TURN_FAILURE_ENTRY_TYPE } from "../src/child-turn-failure.mjs";
+import { TURN_FAILURE_ENTRY_TYPE, TURN_FAILURE_DIAGNOSTIC_TYPE } from "../src/child-turn-failure.mjs";
 import { ActorCoordinator } from "../src/actor-coordinator.mjs";
 
 const gate = () => Promise.withResolvers();
@@ -26,8 +26,9 @@ async function fixture(t) {
     getSessionId: () => "result-lifetime-fixture",
   };
   const tool = { name: "fixture", async: true, parameters: { type: "object", properties: {} },
-    async execute(id) {
+    async execute(id, _args, _signal, onUpdate) {
       current.started.resolve();
+      if (current.holdUpdate) onUpdate({ content: [{ type: "text", text: "synthetic update" }] });
       if (current.mode.startsWith("late")) await current.release.promise; // Deliberately completes after cancellation.
       const result = { content: [{ type: "text", text: id.padEnd(128 * 1024, "t") },
         { type: "image", mimeType: "image/png", data: "A".repeat(128 * 1024) }],
@@ -99,13 +100,16 @@ async function fixture(t) {
     promptCapture: { prepare: async () => ({ systemPrompt: "fixture", systemPromptOptions: {} }) },
     onTiming: event => { if (event.phase === "real_result_committed") current.committed.resolve(); },
     publish: async event => {
+      if (event.type === "tool_execution_update" && current.holdUpdate) {
+        const owner = current; owner.updateEntered.resolve(); await owner.updateRelease.promise; throw owner.updateError;
+      }
       if (event.type === "message_end" && event.message.role === "toolResult" && current.holdCommit) {
         current.appended.resolve(); await current.publish.promise;
       }
     } });
   await coor.start(); coor.activeTools.add("fixture");
   t.after(async () => {
-    current?.release.resolve(); current?.publish.resolve(); current?.finish.resolve();
+    current?.release.resolve(); current?.publish.resolve(); current?.finish.resolve(); current?.updateRelease.resolve();
     await coor.close();
     if (previous === undefined) delete process.env.PI_HARNESS_NATIVE_ASYNC;
     else process.env.PI_HARNESS_NATIVE_ASYNC = previous;
@@ -114,7 +118,7 @@ async function fixture(t) {
     results: () => entries.filter(e => e.message?.role === "toolResult").map(e => e.message),
     async start(mode, options = {}) {
       current = { mode, requests: 0, started: gate(), committed: gate(), release: gate(), firstTurn: gate(),
-        continuation: gate(), finish: gate(), appended: gate(), publish: gate(), ...options };
+        continuation: gate(), finish: gate(), appended: gate(), publish: gate(), updateEntered: gate(), updateRelease: gate(), ...options };
       run++; await coor.submit(`run ${run}`); return current;
     },
   };
@@ -196,6 +200,7 @@ test("local preparation journals possible effects before an admitted native task
   f.coor.runner.emitToolCall = async () => { hookEntered.resolve(); await release.promise; };
   let preparations = 0;
   f.coor.lifecycle.prepareRequest = async () => { if (++preparations === 2) throw new Error("SECRET local preparation"); };
+  f.coor.lifecycle.afterCommit = () => { if (f.results().length) throw new TypeError("SECRET secondary rejection"); };
   await f.start("prepare-race", { hookEntered });
   await hookEntered.promise; await f.coor.submit("steer before pending native dispatch");
   while (!f.coor.runFailureReport) await tick();
@@ -206,6 +211,10 @@ test("local preparation journals possible effects before an admitted native task
   const reports = f.coor.manager.getEntries().filter(entry => entry.customType === TURN_FAILURE_ENTRY_TYPE);
   assert.equal(reports.length, 1); assert.equal(reports[0].data.dispatchBoundary, "tool_effects_possible");
   assert.doesNotMatch(JSON.stringify(reports[0].data), /SECRET|steer/);
+  const diagnostics = f.coor.manager.getEntries().filter(e => e.customType === TURN_FAILURE_DIAGNOSTIC_TYPE);
+  assert.equal(diagnostics.length, 1); assert.equal(diagnostics[0].data.errorCode, "ERR_LOCAL_PREPARATION");
+  assert.equal(diagnostics[0].data.origin, "drive_rejection"); assert.equal(diagnostics[0].data.resultAppended, false);
+  assert.doesNotMatch(JSON.stringify(diagnostics), /SECRET|steer/);
 });
 
 test("tool session values stay borrowed through nested drain; exposed arrays survive source release", async () => {
@@ -261,4 +270,56 @@ test("tool session values stay borrowed through nested drain; exposed arrays sur
       assert.throws(() => context.messages, /no longer borrowed/, "an unexposed plan cannot outlive its scope");
     }
   }
+});
+
+
+test("late callback rejection from an older run cannot own the current run diagnostic", { timeout: 10000 }, async t => {
+  const f = await fixture(t), oldError = new RangeError("PRIVATE_OLD"), currentError = new TypeError("PRIVATE_CURRENT");
+  const previous = await f.start("normal", { holdUpdate: true, updateError: oldError });
+  t.after(() => previous.updateRelease.resolve());
+  await previous.updateEntered.promise; await f.coor.waitForIdle(); const oldTurn = f.coor.runId;
+  const next = await f.start("late"); await next.firstTurn.promise;
+  await f.coor.submit("steer current run while its native result is pending"); await next.continuation.promise;
+  const currentTurn = f.coor.runId; assert.notEqual(currentTurn, oldTurn);
+  previous.updateRelease.resolve();
+  while (f.coor.failure !== oldError) await tick();
+  assert.equal(f.coor.runFailureDiagnostic, null, "an old scoped callback is not a current-run cause");
+  let armed = true;
+  f.coor.lifecycle.afterCommit = () => { if (armed && f.results().some(r => r.toolCallId === "call-2|item-2")) { armed = false; throw currentError; } };
+  next.release.resolve(); next.finish.resolve(); await f.coor.waitForIdle();
+  const entries = f.coor.manager.getEntries(), diagnostics = entries.filter(e => e.customType === TURN_FAILURE_DIAGNOSTIC_TYPE);
+  assert.equal(diagnostics.length, 1); assert.equal(diagnostics[0].data.turnId, currentTurn);
+  assert.equal(diagnostics[0].data.origin, "tool_tail_rejection"); assert.equal(diagnostics[0].data.operation, "after_commit");
+  assert.equal(diagnostics[0].data.errorKind, "type_error"); assert.equal(diagnostics[0].data.resultAppended, true);
+  assert.equal(diagnostics[0].data.resultCommitFinished, false); assert.equal(f.results().length, 2);
+  assert(f.results().every(r => r.isError === false)); assert.doesNotMatch(JSON.stringify(diagnostics), /PRIVATE_/);
+});
+
+
+test("a tool-originated drive queues a fresh run without inheriting the old result state", { timeout: 10000 }, async t => {
+  const f = await fixture(t); let queued = false, firstTurn;
+  f.coor.compactionDriver = async () => assert.fail("must not compact");
+  f.coor.session.settingsManager.getCompactionSettings = () => ({ enabled: true });
+  f.coor.session.getContextUsage = () => undefined;
+  f.coor.automaticCompactionAllowed = () => {
+    if (queued && f.coor.runId !== firstTurn) throw new TypeError("PRIVATE_NEW_RUN_THRESHOLD");
+    return true;
+  };
+  const emit = f.coor.runner.emit;
+  f.coor.runner.emit = async event => {
+    await emit(event);
+    if (event.type === "agent_settled" && !queued) {
+      queued = true; await f.coor.submit("queued next logical run at previous settlement");
+    }
+  };
+  const state = await f.start("late"); await state.firstTurn.promise; firstTurn = f.coor.runId;
+  state.finish.resolve(); state.release.resolve(); await f.coor.waitForIdle();
+  const entries = f.coor.manager.getEntries(), diagnostic = entries.find(e => e.customType === TURN_FAILURE_DIAGNOSTIC_TYPE).data;
+  const report = entries.find(e => e.customType === TURN_FAILURE_ENTRY_TYPE).data;
+  assert.notEqual(diagnostic.turnId, firstTurn); assert.equal(diagnostic.turnId, report.turnId);
+  assert.equal(diagnostic.origin, "drive_rejection"); assert.equal(diagnostic.operation, "threshold_preflight");
+  assert.equal(diagnostic.resultAppended, false); assert.equal(diagnostic.resultCommitFinished, false);
+  assert.equal(diagnostic.flightPresent, false); assert.equal(diagnostic.toolWorkPresent, false);
+  assert.equal(report.dispatchBoundary, "before_provider_dispatch"); assert.equal(f.results().length, 1);
+  assert.equal(f.results()[0].isError, false);
 });

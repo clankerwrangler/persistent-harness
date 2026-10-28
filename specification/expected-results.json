@@ -448,5 +448,8 @@
   "WorkerResultWire.leak.cfg": "violation",
   "WorkerResultWire.mutateCanonical.cfg": "violation",
   "NotificationLifecycle.Migration.cfg": "pass",
-  "NotificationLifecycle.MigrationNonAtomic.cfg": "violation"
+  "NotificationLifecycle.MigrationNonAtomic.cfg": "violation",
+  "ChildTurnFailure.ReplaceFirst.cfg": "violation",
+  "ChildTurnFailure.SharedOperation.cfg": "violation",
+  "ChildTurnFailure.StaleResult.cfg": "violation"
 }

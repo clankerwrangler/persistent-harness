@@ -17,6 +17,7 @@ import { PiSessionActor } from "../src/session-actor.mjs";
 import { createCompactionDriver, prepareActorCompaction } from "../src/actor-compaction.mjs";
 import { AUTOMATIC_COMPACTION_CHECK as compactionChannel, createAutomaticCompactionPermission } from "../src/automatic-compaction-permission.mjs";
 import { explicitHeapCap } from "./fixtures/node-heap-cap.mjs";
+import { TurnFailureReporter, pendingTurnFailureJournal, TURN_FAILURE_ENTRY_TYPE, TURN_FAILURE_ACCEPTED_TYPE, TURN_FAILURE_DIAGNOSTIC_TYPE } from "../src/child-turn-failure.mjs";
 import { projectCanonicalBranch } from "../src/canonical-context.mjs";
 
 const workerHeapCap = explicitHeapCap();
@@ -1075,4 +1076,71 @@ test("source-aware supervised turns avoid raw hydration while direct worker end 
       }
     } finally { await worker.close(); }
   }
+});
+
+
+for (const site of ["after_commit", "threshold_preflight"]) test(`actual isolated worker preserves tool result and old receipt flow with diagnostic: ${site}`, { timeout: 15000 }, async () => {
+  let worker, reporter, requests = 0, effects = 0, armed = true, receiptRequests = 0;
+  const accepted = new Set(), outbound = [], original = new TypeError("PRIVATE_WORKER_SENTINEL");
+  const f = await fixture({ eventMode: "supervised-source", extensionFactory(pi, lifecycle) {
+    pi.registerProvider("worker-fixture", { ...modelConfig, streamSimple(model, context) {
+      outbound.push(JSON.stringify(context)); const first = ++requests === 1;
+      const stream = external.api.createAssistantMessageEventStream();
+      const message = { role: "assistant", api: model.api, provider: model.provider, model: model.id,
+        content: first ? [{ type: "toolCall", id: "worker-counter-call", name: "counter", arguments: {} }] : [{ type: "text", text: "done" }],
+        stopReason: first ? "toolUse" : "stop", timestamp: Date.now(),
+        usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0, totalTokens: 2, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } } };
+      queueMicrotask(() => { stream.push({ type: "start", partial: { ...message, content: [] } });
+        stream.push({ type: "done", reason: message.stopReason, message }); stream.end(); });
+      return stream;
+    } });
+    pi.registerTool({ name: "counter", label: "Counter", description: "Synthetic local effect counter",
+      parameters: { type: "object", properties: {}, additionalProperties: false },
+      async execute() { effects++; return { content: [{ type: "text", text: "completed" }], details: { ok: true } }; } });
+    pi.on("session_start", () => pi.setActiveTools(["counter"]));
+    lifecycle.afterCommit = () => {
+      if (site === "after_commit" && armed && worker?.session.sessionManager.getBranch().at(-1)?.message?.role === "toolResult") {
+        armed = false; throw original;
+      }
+    };
+    lifecycle.reportTurnFailure = async (value, entryId) => {
+      const entries = worker.session.sessionManager.getEntries();
+      reporter.remember(value, { entryId, position: entries.findIndex(e => e.id === entryId) }); await reporter.flush();
+    };
+  } });
+  worker = f.worker;
+  try {
+    assert.equal(worker.coordinator.contextMode, "source");
+    const manager = worker.session.sessionManager;
+    const client = { isConnected: true, async request(type, value) {
+        assert.equal(type, "record_actor_turn_failure");
+        assert.deepEqual(Object.keys(value).sort(), ["version", "turnId", "failureClass", "dispatchBoundary"].sort());
+        accepted.add(value.turnId); if (++receiptRequests === 1) throw new Error("synthetic lost receipt ACK");
+        return { recorded: true };
+      } };
+    reporter = new TurnFailureReporter({ retryMs: 5, client: () => client,
+      onRecorded: async (_value, journal) => manager.appendCustomEntry(TURN_FAILURE_ACCEPTED_TYPE, { version: 1, ...journal }) });
+    if (site === "threshold_preflight") worker.coordinator.automaticCompactionAllowed = () => {
+      if (armed && manager.getEntries().some(e => e.message?.role === "toolResult")) { armed = false; throw original; }
+      return true;
+    };
+    await worker.handle({ type: "prompt", message: "synthetic initial request" }); await worker.coordinator.waitForIdle();
+    await until(() => reporter.pending.size === 0);
+    assert.equal(worker.coordinator.failure, original); assert.equal(effects, 1); assert.equal(requests, 1);
+    assert.equal(receiptRequests, 2); assert.equal(accepted.size, 1);
+    const read = () => integratedExternal.sdk.SessionManager.open(manager.getSessionFile(), undefined, undefined, { entryRetention: { maxCachedBytes: 1024 } });
+    const entries = read().getEntries(), diagnostic = entries.find(e => e.customType === TURN_FAILURE_DIAGNOSTIC_TYPE);
+    const marker = entries.find(e => e.customType === TURN_FAILURE_ENTRY_TYPE);
+    assert.equal(diagnostic.data.turnId, marker.data.turnId); assert.equal(diagnostic.data.operation, site);
+    assert.equal(diagnostic.data.resultAppended, true); assert.equal(diagnostic.data.resultCommitFinished, site !== "after_commit");
+    assert.equal(entries.filter(e => e.message?.role === "toolResult").length, 1);
+    assert.equal(entries.find(e => e.message?.role === "toolResult").message.isError, false);
+    assert.equal(entries.filter(e => e.message?.stopReason === "error").length, 0);
+    const headers = entries.map((e, position) => ({ ...e, position }));
+    assert.equal(pendingTurnFailureJournal(headers, id => entries.find(e => e.id === id)).pending.length, 0);
+    await worker.handle({ type: "prompt", message: "fresh explicit request" }); await worker.coordinator.waitForIdle();
+    assert.equal(effects, 1); assert.equal(requests, 2); assert.equal(worker.coordinator.failure, null);
+    assert.equal(read().getEntries().filter(e => e.customType === TURN_FAILURE_DIAGNOSTIC_TYPE).length, 1);
+    assert(!outbound.join("").includes(TURN_FAILURE_DIAGNOSTIC_TYPE)); assert(!outbound.join("").includes("PRIVATE_WORKER_SENTINEL"));
+  } finally { reporter?.close(); await worker.close(); }
 });
