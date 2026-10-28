@@ -446,5 +446,7 @@
   "WorkerResultWire.compactFull.cfg": "violation",
   "WorkerResultWire.dropImage.cfg": "violation",
   "WorkerResultWire.leak.cfg": "violation",
-  "WorkerResultWire.mutateCanonical.cfg": "violation"
+  "WorkerResultWire.mutateCanonical.cfg": "violation",
+  "NotificationLifecycle.Migration.cfg": "pass",
+  "NotificationLifecycle.MigrationNonAtomic.cfg": "violation"
 }

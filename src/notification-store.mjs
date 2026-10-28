@@ -69,9 +69,9 @@ export class NotificationStore {
     }
     if (!this.#db.prepare("PRAGMA table_info(notification_deliveries)").all().some(column => column.name === "close_claimed_at")) {
       // Requests closed before this column existed were already seen; only later closes are sent to devices.
-      this.#db.exec(`ALTER TABLE notification_deliveries ADD COLUMN close_claimed_at INTEGER;
+      this.#transaction(() => this.#db.exec(`ALTER TABLE notification_deliveries ADD COLUMN close_claimed_at INTEGER;
         UPDATE notification_deliveries SET close_claimed_at=0
-        WHERE notification_id IN (SELECT id FROM notifications WHERE state<>'pending')`);
+        WHERE notification_id IN (SELECT id FROM notifications WHERE state<>'pending')`));
     }
     if (this.#db.prepare("SELECT value FROM notification_meta WHERE key='version'").get().value !== "1") {
       this.#db.close(); throw new Error("unsupported notification schema version");

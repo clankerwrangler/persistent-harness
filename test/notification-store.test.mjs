@@ -80,6 +80,34 @@ test("closes already finished before the close column existed are not sent", asy
   assert.deepEqual(upgraded.claimClosures([endpoint], 3000), []);
 });
 
+for (const updatedRowsBeforeFailure of [0, 1]) test(`close migration rolls back schema and rows after ${updatedRowsBeforeFailure} legacy updates`, async t => {
+  const { file, store } = await fixture(t);
+  for (const key of ["old-a", "old-b"]) {
+    const item = store.request("root", { ...request, key }, 1000);
+    const claim = store.claim([endpoint], 1000)[0];
+    store.receipt({ id: item.id, endpointId: endpoint, leaseId: claim.leaseId, status: "accepted" }, 1001);
+    store.resolveKey("root", key, 2000);
+  }
+  const db = new DatabaseSync(file); t.after(() => db.close());
+  db.exec("ALTER TABLE notification_deliveries DROP COLUMN close_claimed_at");
+  const before = db.prepare("SELECT * FROM notification_deliveries ORDER BY notification_id").all();
+  const version = db.prepare("PRAGMA user_version").get().user_version;
+  // Fail the real second migration statement, after the ALTER and optionally
+  // a prior row update, rather than mocking the constructor's call sequence.
+  db.exec(`CREATE TRIGGER interrupted_close_initialization BEFORE UPDATE ON notification_deliveries
+    WHEN (SELECT count(*) FROM notification_deliveries WHERE close_claimed_at=0) >= ${updatedRowsBeforeFailure}
+    BEGIN SELECT RAISE(ABORT, 'interrupted_close_initialization'); END;`);
+  assert.throws(() => new NotificationStore(file), /interrupted_close_initialization/);
+  assert.equal(db.prepare("PRAGMA table_info(notification_deliveries)").all().some(c => c.name === "close_claimed_at"), false,
+    "a failed initialization must not publish a column that makes reopen skip it");
+  assert.deepEqual(db.prepare("SELECT * FROM notification_deliveries ORDER BY notification_id").all(), before);
+  assert.equal(db.prepare("PRAGMA user_version").get().user_version, version);
+  db.exec("DROP TRIGGER interrupted_close_initialization");
+  const upgraded = new NotificationStore(file); t.after(() => upgraded.close());
+  assert.deepEqual(upgraded.claimClosures([endpoint], 3000), [], "reopen must initialize all historical closed deliveries");
+  assert.deepEqual(db.prepare("SELECT close_claimed_at FROM notification_deliveries").all().map(r => r.close_claimed_at), [0, 0]);
+});
+
 test("family episode survives store restart and detached jobs do not extend idle", async t => {
   const { file, store } = await fixture(t);
   store.observe("root", { liveActors: ["root"], now: 1000 }); store.observe("root", { now: 1100 });
