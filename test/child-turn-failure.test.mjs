@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { TurnFailureReporter, normalizeTurnFailure, pendingTurnFailureJournal, TURN_FAILURE_ENTRY_TYPE, TURN_FAILURE_ACCEPTED_TYPE } from "../src/child-turn-failure.mjs";
+import { TurnFailureReporter, normalizeTurnFailure, pendingTurnFailureJournal, TURN_FAILURE_ENTRY_TYPE, TURN_FAILURE_ACCEPTED_TYPE, TURN_FAILURE_DIAGNOSTIC_TYPE, turnFailureErrorTokens } from "../src/child-turn-failure.mjs";
 import { PROTOCOL_VERSION, validateRequest } from "../src/protocol.mjs";
 
 const report = { version: 1, turnId: "turn-1", failureClass: "request_preparation", dispatchBoundary: "before_provider_dispatch" };
@@ -56,6 +56,8 @@ test("startup reads only the last acceptance witness and unaccepted failure bodi
   for (let i = 0; i < 1000; i++) {
     const marker = { id: `failure-${i}`, type: "custom", customType: TURN_FAILURE_ENTRY_TYPE, position: headers.length };
     headers.push(marker); entries.set(marker.id, { ...marker, data: { ...report, turnId: `turn-${i}` } });
+    const diagnostic = { id: `diagnostic-${i}`, type: "custom", customType: TURN_FAILURE_DIAGNOSTIC_TYPE, position: headers.length };
+    headers.push(diagnostic); entries.set(diagnostic.id, { ...diagnostic, data: { version: 1, turnId: `turn-${i}` } });
     const ack = { id: `accepted-${i}`, type: "custom", customType: TURN_FAILURE_ACCEPTED_TYPE, position: headers.length };
     headers.push(ack); entries.set(ack.id, { ...ack, data: { version: 1, entryId: marker.id, position: marker.position } });
   }
@@ -63,7 +65,7 @@ test("startup reads only the last acceptance witness and unaccepted failure bodi
   headers.push(marker); entries.set(marker.id, { ...marker, data: report });
   const restored = pendingTurnFailureJournal(headers, id => { reads.push(id); return entries.get(id); });
   assert.deepEqual(reads, ["accepted-999", "pending"]);
-  assert.equal(restored.acceptedThrough, 1998); assert.equal(restored.pending.length, 1);
+  assert.equal(restored.acceptedThrough, 2997); assert.equal(restored.pending.length, 1);
   assert.equal(restored.pending[0].journal.entryId, "pending");
 });
 
@@ -82,4 +84,30 @@ test("a lost local acceptance witness retries its pending receipt before advanci
   assert.equal(reporter.acceptedThrough, 5); assert.equal(reporter.pending.size, 0);
   reporter.remember(report, { entryId: "first", position: 3 }); await reporter.flush();
   assert.equal(requests.length, 3, "already witnessed reports are not resent");
+});
+
+
+test("error token projection never invokes thrown getters, formatters, or proxy traps", () => {
+  let invoked = 0;
+  const hostile = () => { invoked++; throw new Error("PRIVATE_SENTINEL"); };
+  const error = new TypeError("PRIVATE_SENTINEL");
+  for (const key of ["name", "message", "stack", "cause", "code", "toString", "toJSON"]) {
+    Object.defineProperty(error, key, { configurable: true, get: hostile });
+  }
+  assert.deepEqual(turnFailureErrorTokens(error), { errorKind: "type_error", errorCode: "unknown" });
+  const proxy = new Proxy(error, { get: hostile, getOwnPropertyDescriptor: hostile, getPrototypeOf: hostile,
+    ownKeys: hostile, has: hostile });
+  const revoked = Proxy.revocable(error, {}); revoked.revoke();
+  const inherited = new Error("PRIVATE_SENTINEL"); Object.setPrototypeOf(inherited, proxy);
+  for (const value of [proxy, revoked.proxy, { get code() { return hostile(); } }, "PRIVATE_SENTINEL", null, undefined, Symbol("PRIVATE_SENTINEL")]) {
+    assert.deepEqual(turnFailureErrorTokens(value), { errorKind: "unknown", errorCode: "unknown" });
+  }
+  assert.deepEqual(turnFailureErrorTokens(inherited), { errorKind: "native_error", errorCode: "unknown" });
+  const known = Object.assign(new Error("PRIVATE_SENTINEL"), { code: "ERR_CONTEXT_DATA_LIMIT" });
+  assert.deepEqual(turnFailureErrorTokens(known), { errorKind: "error", errorCode: "ERR_CONTEXT_DATA_LIMIT" });
+  known.code = "PRIVATE_SENTINEL";
+  assert.deepEqual(turnFailureErrorTokens(known), { errorKind: "error", errorCode: "unknown" });
+  known.code = proxy;
+  assert.deepEqual(turnFailureErrorTokens(known), { errorKind: "error", errorCode: "unknown" });
+  assert.equal(invoked, 0);
 });

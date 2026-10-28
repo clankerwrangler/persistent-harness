@@ -137,6 +137,18 @@ An unexpected child actor exit atomically records its lifecycle error and queues
 
 Reports contain a bounded child ID, generation or turn ID, and a fixed failure class. Resident-turn reports distinguish failure before provider dispatch, attempted provider dispatch, and possible admitted or started tool effects. They contain no display names, raw errors, prompts, or transcript content. These are supervisor-generated lifecycle reports, not messages authored by the failed child.
 
+Outer coordinator failures can also append one local canonical
+`persistent-harness.turn-failure-diagnostic-v1` companion for the same turn. It
+records the first escaping failure's fixed origin/operation, allowlisted error
+kind/internal code, and result/flight/work state booleans. The v1 notice and
+receipt are unchanged. Per-operation scopes preserve provenance across overlap;
+new input cannot replace a frozen cause or carry it to the next logical run.
+Unknown exceptions yield fixed `unknown` tokens without invoking their getters,
+formatters, or proxy traps. The companion contains no exception text, stack,
+cause, paths, payloads, or private-string hashes and stays off the provider wire.
+A failed companion append preserves the original failure and v1 receipt; it is
+not retried or used to replay work. A missing diagnostic does not identify a cause.
+
 The existing durable family-message path wakes a passivated parent and retries the same message ID after a disconnect or supervisor restart. Recipient history deduplicates logical incorporation; acknowledgement is not proof that inference completed recovery. Stopped or errored parents retain pending messages until explicitly recovered. Parent deletion rejects pending delivery. Intentional cancellation, stop, delete, passivation, and supervisor shutdown do not generate failure reports. The failed child is not restarted and work is not replayed. No historical error backfill, busy-work timeout, or new human-notification source is added. Inspect the retained child state and verified saved artifacts before deciding how to continue.
 
 Upgrade and rollback require a compatible reader for canonical assistant metadata, input receipts, and compaction details. Old implementations that do not understand the harness's versioned signature or projection metadata are not an automatically safe rollback after new histories have been written. Keep the tested source, dependency pins, and recovery-compatible state together.

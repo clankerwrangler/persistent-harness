@@ -5,7 +5,7 @@ import os from "node:os";
 import path from "node:path";
 import { createAgentStartPromptCapture } from "../src/actor-prompt.mjs";
 import { projectCanonicalContext, ORDINARY_NON_ADMISSION_CUSTOM_TYPE, registerCanonicalSessionManager } from "../src/canonical-context.mjs";
-import { TURN_FAILURE_ENTRY_TYPE } from "../src/child-turn-failure.mjs";
+import { TURN_FAILURE_ENTRY_TYPE, TURN_FAILURE_DIAGNOSTIC_TYPE } from "../src/child-turn-failure.mjs";
 import { ActorCoordinator } from "../src/actor-coordinator.mjs";
 import { createNativeProviderAdapter } from "../src/native-provider.mjs";
 import { createCompactionDriver, createCompactionPreparationCapture } from "../src/actor-compaction.mjs";
@@ -1026,3 +1026,120 @@ for (const contextMode of ["array", "source"]) for (const afterTool of [false, t
     }
   });
 }
+
+
+for (const site of ["after_commit", "threshold_preflight"]) test(`outer failure diagnostic survives canonical reopen: ${site}`, async t => {
+  const original = Object.assign(new TypeError("PRIVATE_OUTER_SENTINEL"), { code: "ERR_CONTEXT_DATA_LIMIT" });
+  let armed = true;
+  const f = await fixture(t, { persistent: true, contextMode: "source", retry: { enabled: false },
+    compactionDriver: () => assert.fail("must not compact") });
+  registerCanonicalSessionManager(f.manager, { estimateContextTokens: core.estimateContextTokens });
+  f.coor.projectContext = projectCanonicalContext;
+  const hasResult = () => f.manager.getEntries().some(e => e.message?.role === "toolResult");
+  const reject = () => { if (armed && hasResult()) { armed = false; throw original; } };
+  if (site === "after_commit") f.coor.lifecycle.afterCommit = reject;
+  else f.coor.automaticCompactionAllowed = () => { reject(); return true; };
+  await f.coor.submit("synthetic initial request"); await wait(f.toolStarted.promise, "tool did not start");
+  f.held.resolve(); await wait(f.coor.waitForIdle(), "outer failure did not settle");
+  assert.equal(f.coor.failure, original); assert.equal(f.runs(), 1); assert.equal(f.requests.length, 1);
+  const entries = f.manager.getEntries(), report = entries.find(e => e.customType === TURN_FAILURE_ENTRY_TYPE);
+  const diagnostic = entries.find(e => e.customType === TURN_FAILURE_DIAGNOSTIC_TYPE);
+  assert.deepEqual(diagnostic.data, { version: 1, turnId: report.data.turnId,
+    origin: site === "after_commit" ? "tool_tail_rejection" : "drive_rejection", operation: site,
+    errorKind: "type_error", errorCode: "ERR_CONTEXT_DATA_LIMIT", resultAppended: true,
+    resultCommitFinished: site !== "after_commit", flightPresent: site === "after_commit",
+    failedAttemptPresent: false, toolWorkPresent: site === "after_commit" });
+  assert.equal(entries.filter(e => e.message?.role === "toolResult").length, 1);
+  assert.equal(entries.find(e => e.message?.role === "toolResult").message.isError, false);
+  assert.equal(entries.filter(e => e.message?.stopReason === "error").length, 0);
+  assert.equal(entries.filter(e => e.customType === "persistent-harness.inference-retry-v1").length, 0);
+  assert(!JSON.stringify(diagnostic.data).includes("PRIVATE_OUTER_SENTINEL"));
+  assert.deepEqual(Object.keys(report.data).sort(), ["version", "turnId", "failureClass", "dispatchBoundary"].sort());
+  const reopen = () => sdk.SessionManager.open(f.manager.getSessionFile(), undefined, undefined, { entryRetention: { maxCachedBytes: 1024 } });
+  assert.deepEqual(reopen().getEntries().find(e => e.customType === TURN_FAILURE_DIAGNOSTIC_TYPE).data, diagnostic.data);
+  await f.coor.submit("fresh explicit request"); await wait(f.coor.waitForIdle(), "fresh request did not settle");
+  assert.equal(f.coor.failure, null); assert.equal(f.coor.runFailureDiagnostic, null);
+  assert.equal(f.runs(), 1); assert.equal(f.requests.length, 2);
+  assert.equal(reopen().getEntries().filter(e => e.customType === TURN_FAILURE_DIAGNOSTIC_TYPE).length, 1);
+  assert(!JSON.stringify(f.requests).includes(TURN_FAILURE_DIAGNOSTIC_TYPE));
+  assert(!JSON.stringify(f.requests).includes("PRIVATE_OUTER_SENTINEL"));
+});
+
+for (const writeThenThrow of [false, true]) test(`diagnostic append failure preserves original cause and v1 report: writeThenThrow=${writeThenThrow}`, async t => {
+  const original = new Error("PRIVATE_PRIMARY"); let armed = true, attempts = 0, reports = 0;
+  const f = await fixture(t, { persistent: true, contextMode: "source", retry: { enabled: false } });
+  f.coor.lifecycle.afterCommit = () => { if (armed && f.manager.getEntries().some(e => e.message?.role === "toolResult")) { armed = false; throw original; } };
+  const append = f.manager.appendCustomEntry.bind(f.manager);
+  f.manager.appendCustomEntry = (type, data) => {
+    if (type !== TURN_FAILURE_DIAGNOSTIC_TYPE) return append(type, data);
+    attempts++; if (writeThenThrow) append(type, data); throw new Error("PRIVATE_DIAGNOSTIC_WRITE_FAILURE");
+  };
+  f.coor.lifecycle.reportTurnFailure = async report => {
+    reports++; assert.deepEqual(Object.keys(report).sort(), ["version", "turnId", "failureClass", "dispatchBoundary"].sort());
+    throw new Error("PRIVATE_REPORT_FAILURE");
+  };
+  await f.coor.submit("synthetic request"); await wait(f.toolStarted.promise, "tool did not start");
+  f.held.resolve(); await wait(f.coor.waitForIdle(), "write failure did not settle");
+  assert.equal(f.coor.failure, original); assert.equal(attempts, 1); assert.equal(reports, 1); assert.equal(f.runs(), 1);
+  await f.coor.submit("fresh explicit request"); await wait(f.coor.waitForIdle(), "fresh request did not settle");
+  const entries = sdk.SessionManager.open(f.manager.getSessionFile()).getEntries();
+  assert.equal(entries.filter(e => e.customType === TURN_FAILURE_ENTRY_TYPE).length, 1);
+  assert.equal(entries.filter(e => e.customType === TURN_FAILURE_DIAGNOSTIC_TYPE).length, Number(writeThenThrow));
+  assert.equal(attempts, 1); assert.equal(f.runs(), 1);
+});
+
+for (const [label, thrown] of [["same Error", new Error("PRIVATE_REUSED_ERROR")], ["same primitive", "PRIVATE_REUSED_PRIMITIVE"], ["undefined", undefined]]) {
+  test(`rejected operation provenance does not cache ${label} across runs`, async t => {
+    const f = await fixture(t, { persistent: true, contextMode: "source", retry: { enabled: false },
+      script: (_context, n) => n <= 2 ? [{ type: "toolCall", id: `call-reuse-${n}`, name: "hold", arguments: {} }] : [{ type: "text", text: "done" }] });
+    let failures = 0;
+    f.coor.lifecycle.afterCommit = () => {
+      if (f.manager.getEntries().filter(e => e.message?.role === "toolResult").length > failures) { failures++; throw thrown; }
+    };
+    for (let run = 0; run < 2; run++) {
+      await f.coor.submit(`synthetic run ${run}`); f.held.resolve();
+      await wait(f.coor.waitForIdle(), "failure did not settle");
+    }
+    const diagnostics = sdk.SessionManager.open(f.manager.getSessionFile()).getEntries().filter(e => e.customType === TURN_FAILURE_DIAGNOSTIC_TYPE).map(e => e.data);
+    assert.equal(diagnostics.length, 2); assert.notEqual(diagnostics[0].turnId, diagnostics[1].turnId);
+    assert(diagnostics.every(d => d.origin === "tool_tail_rejection" && d.operation === "after_commit"));
+    assert(diagnostics.every(d => d.errorKind === (label === "same Error" ? "error" : "unknown")));
+    assert(!JSON.stringify(diagnostics).includes("PRIVATE_"));
+    await f.coor.submit("fresh successful request"); await wait(f.coor.waitForIdle(), "fresh request did not settle");
+    assert.equal(f.runs(), 2); assert.equal(f.coor.runFailureDiagnostic, null);
+  });
+}
+
+test("a handled inner rejection cannot mislabel a different escaping operation", async t => {
+  const inner = new RangeError("PRIVATE_HANDLED"), outer = new TypeError("PRIVATE_ESCAPING"); let armed = true;
+  const f = await fixture(t, { persistent: true, contextMode: "source", retry: { enabled: false } });
+  f.coor.lifecycle.afterCommit = async () => {
+    if (!armed || !f.manager.getEntries().some(e => e.message?.role === "toolResult")) return;
+    armed = false;
+    try { await f.coor.failureOperation("context_refresh", () => { throw inner; }); } catch {}
+    throw outer;
+  };
+  await f.coor.submit("synthetic request"); await wait(f.toolStarted.promise, "tool did not start"); f.held.resolve();
+  await wait(f.coor.waitForIdle(), "escaping operation did not settle");
+  const diagnostic = f.manager.getEntries().find(e => e.customType === TURN_FAILURE_DIAGNOSTIC_TYPE).data;
+  assert.equal(diagnostic.operation, "after_commit"); assert.equal(diagnostic.errorKind, "type_error");
+  assert.equal(f.coor.failure, outer); assert.equal(f.runs(), 1);
+});
+
+
+test("handled inner Error reused after successful work belongs to the later escaping operation", async t => {
+  const reused = new TypeError("PRIVATE_REUSED_AFTER_HANDLED"); let armed = true;
+  const f = await fixture(t, { persistent: true, contextMode: "source", retry: { enabled: false } });
+  f.coor.lifecycle.afterCommit = async () => {
+    if (!armed || !f.manager.getEntries().some(e => e.message?.role === "toolResult")) return;
+    armed = false;
+    try { await f.coor.failureOperation("context_refresh", () => { throw reused; }); } catch {}
+    await Promise.resolve(); // Successful opaque work does not expose whether the earlier value was caught.
+    throw reused;
+  };
+  await f.coor.submit("synthetic request"); await wait(f.toolStarted.promise, "tool did not start"); f.held.resolve();
+  await wait(f.coor.waitForIdle(), "escaping operation did not settle");
+  const diagnostic = f.manager.getEntries().find(e => e.customType === TURN_FAILURE_DIAGNOSTIC_TYPE).data;
+  assert.equal(diagnostic.operation, "after_commit"); assert.equal(diagnostic.errorKind, "type_error");
+  assert.equal(f.coor.failure, reused); assert.equal(f.runs(), 1);
+});
