@@ -86,4 +86,40 @@ test("supervisor joins slim core text IDs through prefix rebasing and repeated c
   assert.deepEqual((await visible()).map((row) => row.id), final.map((row) => row.id));
   assert.doesNotMatch(JSON.stringify(events), /textSignature|core-next|msg-A|msg-B/);
   assert(events.filter((event) => event.type === "message_update").every((event) => !("message" in event) && !("partial" in event.assistantMessageEvent)));
+
+  // A committed row that fell outside the bounded read remains a live overlay.
+  // It must not move the canonical page boundary or become canonical membership.
+  await emit({ type: "agent_start" }); await emit({ type: "message_start", message: message("sparse-segment", []) });
+  await update("text_start", 0, { id: "core-sparse" }); await update("text_delta", 0, { delta: "Sparse overlay" });
+  await update("text_end", 0, { content: "Sparse overlay" });
+  await emit({ type: "message_end", message: message("sparse-segment", [text("core-sparse", "Sparse overlay", "msg-sparse")]) });
+  await emit({ type: "agent_settled" });
+  const sparseId = assistantMessageParts(entries.at(-1))[0].id;
+  for (const id of ["page-before", "page-latest"]) {
+    await appendFile(sessionFile, JSON.stringify({ type: "custom", id, parentId: leaf,
+      timestamp: new Date(10).toISOString(), customType: "persistent-harness.progress-v1", data: { summary: "Canonical progress" } }) + "\n");
+    leaf = id;
+  }
+  const canonicalPage = await supervisor.transcriptReader.read({ sessionFile, sessionId, sanitizePresentation: true,
+    maxMessages: 1, before: null, publicView: true, inputProofIds: "page", familyDeliveryOnly: true, allowToolImages: true });
+  const canonicalPageBefore = structuredClone(canonicalPage.historyPage);
+  const latest = await client.request("get_visible_messages", { sessionId, limit: 1 });
+  assert.deepEqual(canonicalPage.historyPage, canonicalPageBefore, "export does not mutate the reader cache's page metadata");
+  assert.deepEqual(latest.history.map(row => row.id), [sparseId, "page-latest"], "legitimate old overlays remain visible");
+  assert.deepEqual(latest.historyPage.canonicalIds, ["page-latest"], "only the bounded canonical page owns its cursor boundary");
+  const older = await client.request("get_visible_messages", { sessionId, limit: 1, before: latest.historyPage.nextCursor });
+  assert.deepEqual(older.history.map(row => row.id), ["page-before"]);
+  assert.deepEqual(older.historyPage.canonicalIds, ["page-before"], "older pages carry the same explicit ownership contract");
+  assert.deepEqual(latest.historyPage.canonicalIds, ["page-latest"], "a later read cannot alter a prior page witness");
+
+  const emptyId = "empty-page-fixture", emptyFile = path.join(directory, "empty.jsonl");
+  await writeFile(emptyFile, JSON.stringify({ type: "session", version: 3, id: emptyId, timestamp: new Date(0).toISOString(), cwd: directory }) + "\n");
+  supervisor.store.createRoot({ sessionId: emptyId, sessionFile: emptyFile, cwd: directory, repositoryRoot: null,
+    name: "Empty canonical page", actorToken: "synthetic", launch: {} }, 1);
+  supervisor.store.createActorInput(emptyId, { inputId: "pending-overlay", message: "Pending", behavior: "auto" });
+  const empty = await client.request("get_visible_messages", { sessionId: emptyId, limit: 1 });
+  assert(empty.messages.some(row => row.id === "pending-overlay"));
+  assert.deepEqual(empty.historyPage.canonicalIds, [], "an empty canonical page is not populated from pending overlays");
+  assert.equal(empty.historyPage.hasMore, false); assert.equal(empty.historyPage.nextCursor, null);
+  assert.equal(workers.length, 1, "passive empty-page reads do not start another actor");
 });

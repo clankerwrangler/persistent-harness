@@ -1056,6 +1056,9 @@ export class HarnessSupervisor {
         sessionId: session.sessionId, sanitizePresentation: session.kind === "root" && session.depth === 0,
         maxMessages: params.limit ?? 100, before: params.before ?? null, publicView: true, inputProofIds: "page", familyDeliveryOnly: true,
         allowToolImages: session.kind === "root" && session.depth === 0 });
+      // The cursor belongs to this canonical page, not to pending or live rows
+      // that can precede it in the augmented timeline.
+      visible.historyPage = { ...visible.historyPage, canonicalIds: visible.history.map(item => item.id) };
       if (params.before) return visible;
       const actor = this.#actors.get(session.sessionId);
       const messages = new Map(visible.messages.map((message) => [message.id, message]));
