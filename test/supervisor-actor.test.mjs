@@ -963,7 +963,10 @@ test("selected-session inference accepts busy changes, persists latest intent an
   assert.deepEqual(first.models[0], { provider: "fake", id: "alpha", name: "Alpha", reasoning: true,
     thinkingLevels: ["off", "minimal", "low", "medium", "high", "xhigh"], contextWindow: 200000, fastModeSupported: false });
   assert.doesNotMatch(JSON.stringify(first), /must-not-leak|authorization|baseUrl|apiKey/);
+  assert.equal(first.busy, false);
+  // Only the session's own response or queued work makes changes wait; a working child does not.
   const actor = targetFamily()[0]; actor.busy = true;
+  assert.equal((await client.request("get_session_inference", { sessionId: id })).busy, true);
   const change = (model, thinkingLevel = "off", expected = first.selection) => client.request("set_session_inference",
     { sessionId: id, provider: "fake", model, thinkingLevel, expected });
   const start = performance.now();
