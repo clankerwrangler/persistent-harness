@@ -1,5 +1,8 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
 import { fixture, delay, eventually } from "./fixtures/notification-supervisor.mjs";
 
 test("fixture close joins concurrent startup retirement before publishing stopped state", { timeout: 10_000 }, async t => {
@@ -62,6 +65,24 @@ test("root-only explicit attention is durable, idempotent, read != resolved, and
   await delay(1010);
   assert.equal((await root.connection.request("resolve_attention", { key: "expiry" })).notification.state, "expired");
   assert.equal((await root.connection.request("request_attention", { ...request, key: "expiry" })).notification.expiresAt, expiring.expiresAt);
+});
+
+test("once Lead is configured, only Lead's family notifies the user", async t => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), "notification-lead-"));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const f = await fixture(t, { leadSessionPath: path.join(dir, "lead.json") });
+  const lead = await f.actor(), room = await f.actor();
+  await writeFile(path.join(dir, "lead.json"), JSON.stringify({ sessionId: lead.session.sessionId }));
+  const list = async () => (await f.client.request("list_notifications")).notifications;
+  const request = { key: "need", title: "Decision", body: "Which one?", expiresIn: 10 };
+  await assert.rejects(room.connection.request("request_attention", request), /only Lead notifies the user/);
+  room.busy(); room.idle();
+  room.emit("event", { type: "extension_ui_request", id: "room-dialog", method: "confirm", title: "Room decision", timeout: 1000 });
+  await delay(130); assert.deepEqual(await list(), [], "other rooms raise no idle or dialog notices");
+  lead.busy(); lead.idle();
+  const notices = await eventually(async () => { const items = await list(); return items.length && items; });
+  assert.deepEqual(notices.map(n => [n.rootId, n.kind]), [[lead.session.sessionId, "idle"]]);
+  assert.equal((await lead.connection.request("request_attention", request)).notification.rootId, lead.session.sessionId);
 });
 
 test("recursive family settlement ignores retained inactive children, waits for live descendants, and notices stable queued stalls", async t => {
