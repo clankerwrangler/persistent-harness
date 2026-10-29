@@ -847,10 +847,12 @@ export class HarnessStore {
       if (reportChildExit && !["resident", "starting", "error"].includes(previous?.lifecycle)) {
         this.#db.exec("COMMIT"); return false;
       }
+      // A session without a worker still delegates while any descendant works.
+      const activity = this.#workingDescendantCount(sessionId) > 0 ? "delegating" : "inactive";
       const result = this.#db.prepare(`UPDATE sessions SET lifecycle = ?, actor_pid = NULL,
-        actor_identity_json = NULL, streaming = 0, activity = 'inactive', stopped_at = ?, quiet_since = NULL,
+        actor_identity_json = NULL, streaming = 0, activity = ?, stopped_at = ?, quiet_since = NULL,
         last_error = ?, updated_at = ? WHERE id = ? AND actor_generation = ? AND lifecycle <> 'deleted'`)
-        .run(lifecycle, now, error, now, sessionId, generation);
+        .run(lifecycle, activity, now, error, now, sessionId, generation);
       if (result.changes !== 1) { this.#db.exec("COMMIT"); return false; }
       if (reportChildExit && lifecycle === "error") this.#queueChildFailure(sessionId, generation, error, now);
       this.#refreshAncestors(sessionId, now);
@@ -934,7 +936,7 @@ export class HarnessStore {
       const row = this.#sessionRow(current);
       if (!row) break;
       const descendants = this.#workingDescendantCount(current);
-      let activity = "inactive";
+      let activity = descendants > 0 ? "delegating" : "inactive";
       if (row.lifecycle === "resident") {
         activity = row.streaming ? "working" : descendants > 0 ? "delegating" : "idle";
       }
