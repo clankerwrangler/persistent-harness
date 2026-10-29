@@ -1,6 +1,6 @@
 ---
 name: agent-message
-description: Inspect the permitted family roster, send durable direct family messages, or create and resolve root-owned human attention requests.
+description: Inspect the permitted family roster, send durable direct family messages, or (Home only) create and resolve human attention requests.
 ---
 
 # Agent Message
@@ -19,14 +19,14 @@ Messages never produce an automatic reply. Send only an intentional, useful resu
 folder `cwd` and sends it `task` as a message from you, so it can reply to you. Only Home may
 call it; other sessions are refused.
 
-## Human attention (root only)
+## Human attention (Home only)
 
-When the human must supply a decision, approval, or missing information, the root can use
+When the human must supply a decision, approval, or missing information, Home can use
 `agent_message.request_attention(key, title, body, expires_in=86400)` alongside its normal
 conversation explanation. Use explicit, concise plain text (title ≤120 characters,
 body ≤1000) and a stable key (≤128 letters, digits, `.`, `_`, `:`, `-`). The expiry is
-1–604800 seconds. Children send the need to their parent; they cannot address the human
-through this API, and ordinary family messaging rules are unchanged.
+1–604800 seconds. Only Home may call it; other sessions are refused. Children send the need to their parent,
+and other rooms send it to Home.
 
 Reuse the same key when retrying the same request. Creation is durable and idempotent:
 retries do not reopen resolved/expired requests or extend deadlines. A genuinely new

@@ -187,7 +187,10 @@ export class NotificationStore {
     });
   }
   openFamilies() { return this.#db.prepare("SELECT root_id FROM notification_families WHERE episode_id IS NOT NULL AND closed_at IS NULL").all().map(r => r.root_id); }
+  // Set by the supervisor: only Home's family notifies Commander once Home is configured.
+  notifiesRoot = () => true;
   #create({ key, rootId, sessionId, episodeId = null, kind, title, body, expiresAt, source }, now) {
+    if (!this.notifiesRoot(rootId)) return null;
     const id = notificationId(key);
     episodeId ??= this.#db.prepare("SELECT episode_id FROM notification_families WHERE root_id=? AND closed_at IS NULL").get(rootId)?.episode_id ?? null;
     this.#db.prepare(`INSERT OR IGNORE INTO notifications(id,source_key,root_id,session_id,episode_id,kind,title,body,

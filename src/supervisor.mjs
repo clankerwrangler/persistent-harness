@@ -558,6 +558,7 @@ export class HarnessSupervisor {
     try {
       this.#cronStore = this.cronStoreFactory(this.databasePath);
       this.#notifications = new NotificationStore(this.databasePath, { idleMs: this.notificationIdleMs });
+      this.#notifications.notifiesRoot = rootId => { const home = this.#homeSessionId(); return !home || rootId === home; };
       this.#notifications.cancelDialogs();
       if (!this.sessionHistoryIndex) {
         try {
@@ -921,6 +922,9 @@ export class HarnessSupervisor {
       const actor = this.#actors.get(state.sessionId);
       if (session.kind !== "root" || session.depth !== 0 || !actor || actor.generation !== state.generation || !actor.worker.isRunning) {
         throw requestFailure("attention_forbidden", "human attention requests require the current root actor; children must route through their parent");
+      }
+      if (type === "request_attention" && !this.#notifications.notifiesRoot(state.sessionId)) {
+        throw requestFailure("attention_forbidden", "only Home notifies Commander; message Home if Commander is needed");
       }
       return { notification: type === "request_attention" ? this.#notifications.request(state.sessionId, params, Date.now(), state.generation)
         : this.#notifications.resolveKey(state.sessionId, params.key) };
