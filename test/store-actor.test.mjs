@@ -15,6 +15,29 @@ const launch = (name, prompt = null) => ({
   skillCatalog: [],
 });
 
+test("an ancestor without a worker shows delegating while a deeper descendant works", async (t) => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), "harness-actor-store-"));
+  const store = new HarnessStore(path.join(dir, "store.sqlite"));
+  t.after(async () => { store.close(); await rm(dir, { recursive: true, force: true }); });
+  store.createRoot({ sessionId: "root-d", sessionFile: "/sessions/root-d.jsonl", cwd: "/workspace",
+    repositoryRoot: "/workspace", name: "root-d", actorToken: "root-token", launch: launch("root-d") }, 1);
+  for (const [id, parent, depth] of [["child-d", "root-d", 1], ["grand-d", "child-d", 2]]) {
+    store.createChild(parent, { sessionId: id, sessionFile: `/sessions/${id}.jsonl`, actorToken: `${id}-token`,
+      policy: { ...launch(id, "work"), cwd: "/workspace", repositoryRoot: "/workspace", depth }, now: 2 });
+  }
+  for (const id of ["root-d", "child-d", "grand-d"]) store.markActorStarted(id, 1, { pid: 1, processIdentity: { startTime: 1 } }, 3);
+  store.setActorActivity("grand-d", 1, true, 4);
+  store.markActorLifecycle("root-d", 1, "passivated", null, 5);
+  assert.equal(store.getSession("root-d").activity, "delegating", "passivating keeps the family's delegation visible");
+  store.markActorLifecycle("child-d", 1, "passivated", null, 6);
+  assert.equal(store.getSession("child-d").activity, "delegating");
+  store.setActorActivity("grand-d", 1, false, 7);
+  assert.equal(store.getSession("root-d").activity, "inactive");
+  assert.equal(store.getSession("child-d").activity, "inactive");
+  store.setActorActivity("grand-d", 1, true, 8);
+  assert.equal(store.getSession("root-d").activity, "delegating", "a deeper descendant starting work refreshes worker-less ancestors");
+});
+
 test("one actor table owns root and child lifecycle, recovery, activity, and routing", async (t) => {
   const dir = await mkdtemp(path.join(os.tmpdir(), "harness-actor-store-"));
   const databasePath = path.join(dir, "store.sqlite");
