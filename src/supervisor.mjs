@@ -1251,7 +1251,7 @@ export class HarnessSupervisor {
     const thinkingLevel = pending ? session.launch?.thinking?.resolved : state?.thinkingLevel;
     validateInferenceEffort(thinkingLevel, current);
     const busy = Boolean(state?.isStreaming || state?.isCompacting || Number(state?.pendingMessageCount) > 0
-      || ["working", "delegating"].includes(session.activity) || this.store.hasPendingSessionWork(sessionId));
+      || session.activity === "working" || this.store.hasPendingSessionWork(sessionId));
     return { selection: { provider: current.provider, model: current.id, thinkingLevel, fastMode: session.launch?.fastMode ?? null },
       pending: session.launch?.pendingInference ?? null,
       fastModeRootSessionId: session.launch?.fastModeRootSessionId ?? null,
