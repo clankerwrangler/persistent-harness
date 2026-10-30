@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { mkdtemp, mkdir, readFile, rm } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { createAgentStartPromptCapture } from "../src/actor-prompt.mjs";
@@ -125,6 +125,23 @@ test("ordinary cold resume, first inference and bookkeeping leave old opaque cus
   f.manager.setSessionFile(f.manager.getSessionFile());
   assert.equal(captured.data.opaque, "independent captured value", "reload cannot revoke an already captured value");
   t.diagnostic(JSON.stringify({ startupOpaqueReads, implicitOpaqueReads, explicitOpaqueReads: reads.filter(id => opaqueIds.has(id)).length }));
+});
+
+test("a run starts with a hidden note when the registered working-state file is over budget", async t => {
+  const f = await fixture(t, { script: () => [{ type: "text", text: "ok" }] });
+  const dir = await mkdtemp(path.join(os.tmpdir(), "working-state-run-")); t.after(() => rm(dir, { recursive: true, force: true }));
+  const state = path.join(dir, "CURRENT.json"), registry = path.join(dir, "working-state.json");
+  await writeFile(state, "x".repeat(30 * 1024));
+  await writeFile(registry, JSON.stringify({ [f.manager.getSessionId()]: state }));
+  const previous = process.env.PI_HARNESS_WORKING_STATE_REGISTRY; process.env.PI_HARNESS_WORKING_STATE_REGISTRY = registry;
+  t.after(() => { if (previous === undefined) delete process.env.PI_HARNESS_WORKING_STATE_REGISTRY; else process.env.PI_HARNESS_WORKING_STATE_REGISTRY = previous; });
+  await f.coor.submit("start", "auto", [], "budget-input"); await wait(f.coor.waitForIdle(), "actor did not settle");
+  const text = f.requests[0].messages.flatMap(m => Array.isArray(m.content) ? m.content : []).map(p => p.text ?? "").join("\n");
+  assert.match(text, /Working state .*CURRENT\.json is 30 KB \(limit 20 KB\)/);
+  assert.equal(f.manager.getEntries().filter(e => e.customType === "persistent-harness-working-state").length, 1);
+  await writeFile(state, "small");
+  await f.coor.submit("again", "auto", [], "budget-input-2"); await wait(f.coor.waitForIdle(), "actor did not settle");
+  assert.equal(f.manager.getEntries().filter(e => e.customType === "persistent-harness-working-state").length, 1, "no note once under budget");
 });
 
 test("ordinary input keeps real result barrier and compatible canonical events", async t => {
