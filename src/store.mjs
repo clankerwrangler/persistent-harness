@@ -512,6 +512,12 @@ export class HarnessStore {
     `).get(sessionId, sessionId).count);
   }
 
+  // The session and its descendants that still have, or may resume, a worker.
+  liveFamilyIds(sessionId) {
+    return this.#db.prepare(`WITH RECURSIVE fam(id) AS (SELECT ? UNION SELECT s.id FROM sessions s JOIN fam f ON s.parent_session_id = f.id)
+      SELECT s.id FROM sessions s WHERE s.id IN fam AND s.lifecycle IN ('starting', 'resident', 'passivated')`).all(sessionId).map(row => row.id);
+  }
+
   #sessionLineage(sessionId) {
     const names = [];
     const seen = new Set();

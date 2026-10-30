@@ -15,7 +15,7 @@ const { sdk, api, core, responsesApi } = await loadExternalPi();
 const deferred = () => Promise.withResolvers();
 const wait = async (promise, message) => Promise.race([promise, new Promise((_, reject) => { const timer = setTimeout(() => reject(new Error(message)), 5000); timer.unref(); })]);
 const usage = () => ({ input: 1, output: 1, cacheRead: 0, cacheWrite: 0, totalTokens: 2, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } });
-async function fixture(t, { persistent = false, sessionFile, contextMode = "array", prepareManager, prepareRequest, script, retry, compaction, compactionDriver, hooks, promptExtensions = [], captureFirst = false, basePromptOptions, automaticCompactionAllowed, model: suppliedModel, streamStallMs, nativeTool = false, beforeClose } = {}) {
+async function fixture(t, { runReminders, persistent = false, sessionFile, contextMode = "array", prepareManager, prepareRequest, script, retry, compaction, compactionDriver, hooks, promptExtensions = [], captureFirst = false, basePromptOptions, automaticCompactionAllowed, model: suppliedModel, streamStallMs, nativeTool = false, beforeClose } = {}) {
   const root = await mkdtemp(path.join(os.tmpdir(), "sc-"));
   const model = suppliedModel ?? { id: "fixture", name: "Fixture", provider: "coordinator-test", api: "coordinator-test-api", reasoning: false,
     input: ["text"], cost: usage().cost, contextWindow: 32000, maxTokens: 1000 };
@@ -67,7 +67,7 @@ async function fixture(t, { persistent = false, sessionFile, contextMode = "arra
   await prepareManager?.(manager);
   const { session } = await sdk.createAgentSession({ cwd: root, agentDir: path.join(root, "agent"), model: models.getModel(model.provider, model.id), modelRuntime: models, settingsManager: settings, sessionManager: manager, contextMode, resourceLoader: empty, tools: [] });
   const loaded = active.getExtensions(); const runner = new sdk.ExtensionRunner(loaded.extensions, loaded.runtime, root, manager, new sdk.ModelRegistry(models));
-  coor = new ActorCoordinator({ session, runner, sdk, api, core, models, contextMode, resources: active, promptCapture, lifecycle: { prepareRequest }, publish: event => events.push(event),
+  coor = new ActorCoordinator({ session, runner, sdk, api, core, models, contextMode, resources: active, promptCapture, lifecycle: { prepareRequest, runReminders }, publish: event => events.push(event),
     basePromptOptions: basePromptOptions ?? { contextFiles: [], cwd: root }, isProjectTrusted: () => false, compactionDriver, automaticCompactionAllowed, ...(streamStallMs ? { streamStallMs } : {}) });
   await coor.start(); await runner.emit({ type: "session_start", reason: "startup" });
   t.after(async () => { held.resolve(); await beforeClose?.(); await coor.close(); await rm(root, { recursive: true, force: true }); });
@@ -127,21 +127,16 @@ test("ordinary cold resume, first inference and bookkeeping leave old opaque cus
   t.diagnostic(JSON.stringify({ startupOpaqueReads, implicitOpaqueReads, explicitOpaqueReads: reads.filter(id => opaqueIds.has(id)).length }));
 });
 
-test("a run starts with a hidden note when the registered working-state file is over budget", async t => {
-  const f = await fixture(t, { script: () => [{ type: "text", text: "ok" }] });
-  const dir = await mkdtemp(path.join(os.tmpdir(), "working-state-run-")); t.after(() => rm(dir, { recursive: true, force: true }));
-  const state = path.join(dir, "CURRENT.json"), registry = path.join(dir, "working-state.json");
-  await writeFile(state, "x".repeat(30 * 1024));
-  await writeFile(registry, JSON.stringify({ [f.manager.getSessionId()]: state }));
-  const previous = process.env.PI_HARNESS_WORKING_STATE_REGISTRY; process.env.PI_HARNESS_WORKING_STATE_REGISTRY = registry;
-  t.after(() => { if (previous === undefined) delete process.env.PI_HARNESS_WORKING_STATE_REGISTRY; else process.env.PI_HARNESS_WORKING_STATE_REGISTRY = previous; });
-  await f.coor.submit("start", "auto", [], "budget-input"); await wait(f.coor.waitForIdle(), "actor did not settle");
+test("run-start reminders from the supervisor become hidden notes before the input", async t => {
+  let notes = ["Working state /x/CURRENT.json is 30 KB (limit 20 KB). Before new work, cut it to the current picture and move history out."];
+  const f = await fixture(t, { script: () => [{ type: "text", text: "ok" }], runReminders: async () => notes });
+  await f.coor.submit("start", "auto", [], "reminder-input"); await wait(f.coor.waitForIdle(), "actor did not settle");
   const text = f.requests[0].messages.flatMap(m => Array.isArray(m.content) ? m.content : []).map(p => p.text ?? "").join("\n");
-  assert.match(text, /Working state .*CURRENT\.json is 30 KB \(limit 20 KB\)/);
-  assert.equal(f.manager.getEntries().filter(e => e.customType === "persistent-harness-working-state").length, 1);
-  await writeFile(state, "small");
-  await f.coor.submit("again", "auto", [], "budget-input-2"); await wait(f.coor.waitForIdle(), "actor did not settle");
-  assert.equal(f.manager.getEntries().filter(e => e.customType === "persistent-harness-working-state").length, 1, "no note once under budget");
+  assert.match(text, /CURRENT\.json is 30 KB/);
+  assert.equal(f.manager.getEntries().filter(e => e.customType === "persistent-harness-reminder").length, 1);
+  notes = [];
+  await f.coor.submit("again", "auto", [], "reminder-input-2"); await wait(f.coor.waitForIdle(), "actor did not settle");
+  assert.equal(f.manager.getEntries().filter(e => e.customType === "persistent-harness-reminder").length, 1, "no note when nothing is due");
 });
 
 test("ordinary input keeps real result barrier and compatible canonical events", async t => {

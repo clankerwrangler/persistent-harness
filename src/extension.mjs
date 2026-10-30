@@ -1285,6 +1285,10 @@ ${catalog.diagnostics.map((item) => item.error).join("\n")}`);
     return { systemPrompt, fastMode: preferences.fastMode };
   };
   if (owner) owner.prepareRequest = prepareRequest;
+  if (owner) owner.runReminders = async () => {
+    if (!client?.isConnected) return [];
+    try { return (await client.request("run_reminders", {})).notes ?? []; } catch { return []; }
+  };
   else pi.on("before_agent_start", prepareRequest);
 
   pi.on("session_info_changed", async (event, ctx) => {

@@ -71,7 +71,7 @@ const requestTypes = new Set([
   "register_actor", "register_client", "heartbeat",
   "set_session_name", "record_actor_turn_failure", "update_activity", "update_progress_heading", "record_progress_entry", "record_agent_message_entry", "record_child_creation_entry", "set_skill_manifest", "record_usage", "record_context_usage",
   "get_actor_input", "accept_actor_input", "record_input_delivery", "flush_actor_inputs",
-  "get_roster", "send_message", "ack_message", "spawn_child", "list_children", "session_history", "cron_job",
+  "get_roster", "run_reminders", "send_message", "ack_message", "spawn_child", "list_children", "session_history", "cron_job",
   "request_attention", "resolve_attention", "list_notifications", "get_notification", "read_notification", "dismiss_notification", "claim_notification_delivery", "record_notification_delivery",
   "stop_child", "revive_child", "delete_child",
   "create_root", "list_sessions", "rename_session", "subscribe_session", "unsubscribe_session", "subscribe_root_output", "unsubscribe_root_output",
