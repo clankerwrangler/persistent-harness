@@ -1,3 +1,4 @@
+import { loadExternalPiSdk } from "../src/external-pi.mjs";
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
 import { mkdir, mkdtemp, rm } from "node:fs/promises";
@@ -61,6 +62,7 @@ test("an inbox message from a registered sender reaches the routed session as a 
   t.after(async () => { await browser?.stop(); await supervisor.stop(); await rm(root, { recursive: true, force: true }); });
   browser = new HarnessClient({ socketPath, heartbeatMs: 0 });
   await browser.start({ registrationType: "register_client", clientInstanceId: "inbox-browser" });
+  await loadExternalPiSdk(); // This fixture measures warm inbox/idle behavior, not cold SDK bootstrap.
   const { sessionId } = (await browser.request("create_root", { cwd: root, repositoryRoot: root, name: "Mail",
     provider: null, model: null, thinkingLevel: null })).admission;
   const actor = await eventually(() => actors.get(sessionId)); await eventually(() => actor.isRunning);
