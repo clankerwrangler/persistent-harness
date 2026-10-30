@@ -22,6 +22,7 @@ import { assistantTextPart, sortVisibleHistory, pendingInputMessage } from "./co
 import { BackgroundCompletionMonitor, defaultBackgroundJobsDirectory } from "./background-notifier.mjs";
 import { normalizeCronLaunch } from "./cron-launch.mjs";
 import { DEFAULT_CRON_TIMEZONE } from "./cron-schedule.mjs";
+import { rootReminders } from "./run-reminders.mjs";
 import { CronScheduler, cronOriginPrompt } from "./cron-scheduler.mjs";
 import { CronStore } from "./cron-store.mjs";
 import { InboxStore, createInboxServer } from "./inbox.mjs";
@@ -930,6 +931,7 @@ export class HarnessSupervisor {
         : this.#notifications.resolveKey(state.sessionId, params.key) };
     }
     if (type === "get_roster") return { agents: this.store.getRoster(state.sessionId) };
+    if (type === "run_reminders") return this.#runReminders(state.sessionId).then(notes => ({ notes }));
     if (type === "session_history") return this.#sessionHistory(state, params);
     if (type === "cron_job") {
       if (params.action === "report") {
@@ -2803,6 +2805,14 @@ export class HarnessSupervisor {
     });
   }
   #childExitDeliveries = new Set();
+  async #runReminders(sessionId) {
+    const session = this.store.getSession(sessionId);
+    if (session?.kind !== "root" || session.depth !== 0) return [];
+    try {
+      return await rootReminders({ rootId: sessionId, registryPath: path.join(path.dirname(this.databasePath), "working-state.json"),
+        liveSessionIds: this.store.liveFamilyIds(sessionId) });
+    } catch { return []; }
+  }
   #homeSessionPath = null;
   #homeSessionId() {
     try { return JSON.parse(readFileSync(this.#homeSessionPath, "utf8")).sessionId ?? null; } catch { return null; }
