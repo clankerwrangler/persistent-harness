@@ -1,3 +1,4 @@
+import { loadExternalPiSdk } from "../src/external-pi.mjs";
 import assert from "node:assert/strict";
 import { DatabaseSync } from "node:sqlite";
 import { randomUUID } from "node:crypto";
@@ -59,6 +60,7 @@ async function fixture(t, options = {}) {
     for (const connection of connections) await connection.stop(); await client.stop(); await supervisor.stop();
     await rm(root, { recursive: true, force: true }); assert.deepEqual(errors, []); });
   await client.start({ registrationType: "register_client", clientInstanceId: "entry-index-fixture" });
+  await loadExternalPiSdk(); // This fixture measures warm inbox/idle behavior, not cold SDK bootstrap.
   const id = (await client.request("create_root", { cwd: root, repositoryRoot: null, name: "Index fixture", provider: null, model: null, thinkingLevel: null })).admission.sessionId;
   await client.request("get_actor_state", { sessionId: id });
   return { root, actors, supervisor, client, id, actor: actors[0], async connectActor(sessionId = id) {

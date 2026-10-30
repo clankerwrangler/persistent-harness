@@ -182,8 +182,12 @@ gate("reopened worker replays a prior location on later ordinary user input with
   const requests = (await f.records()).filter(record => record.type === "provider");
   assert.equal(requests.length, 1);
   assert.equal(textOf(requests[0].messages).split("latitude 12.345678").length - 1, 1);
-  const later = requests[0].messages.find(message => textOf([message]) === next.message);
+  const matching = requests[0].messages.filter(message => Array.isArray(message.content)
+    && message.content.some(part => part.type === "text" && part.text === next.message));
+  assert.equal(matching.length, 1, "one user retains the exact original payload text part");
+  const [later] = matching;
   assert.equal(later.role, "user"); assert.equal(later.location, undefined);
   const canonical = (await f.actor.request("get_entries")).entries.find(entry => entry.message?.id === next.inputId);
   assert.equal(canonical.message.location, undefined);
+  assert.equal(canonical.message.content, next.message);
 });

@@ -132,7 +132,7 @@ async function assertEvaluation(t, observed, { supervisor = false, client = fals
   assert.equal(paths.includes("src/supervisor.mjs"), supervisor, "supervisor evaluation belongs only to the real start process");
   assert.equal(paths.includes("src/client.mjs"), client, "client evaluation belongs only to explicit memory observation");
   if (!supervisor) {
-    const permitted = new Set(["src/control.mjs","src/framing.mjs","src/protocol.mjs","src/conversation-birth.mjs","src/input-images.mjs","src/input-location.mjs",...(client?["src/client.mjs"]:[])]);
+    const permitted = new Set(["src/control.mjs","src/framing.mjs","src/protocol.mjs","src/conversation-birth.mjs","src/message-time.mjs","src/input-images.mjs","src/input-location.mjs",...(client?["src/client.mjs"]:[])]);
     assert(paths.every(file => permitted.has(file)), "unused local service graph must not evaluate indirectly");
   }
 }
