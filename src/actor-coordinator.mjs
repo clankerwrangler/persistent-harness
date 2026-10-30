@@ -2,6 +2,7 @@ import { ConversationBirthClock, conversationBirth } from "./conversation-birth.
 import { PROGRESS_ENTRY_TYPE } from "./progress-projection.mjs";
 import { normalizeInputLocation, renderUserLocations } from "./input-location.mjs";
 import { renderMessageTimes } from "./message-time.mjs";
+import { WORKING_STATE_NOTE_TYPE, workingStateNote } from "./working-state.mjs";
 import { ActorToolDispatch, addToolUsage } from "./actor-tool-dispatch.mjs";
 import { createActorStreamPlanner } from "./actor-stream.mjs";
 import { evaluateInferenceRetry } from "./inference-retry.mjs";
@@ -446,6 +447,7 @@ export class ActorCoordinator {
       this.runFailureDiagnostic = null; this.runResultAppended = false; this.runResultCommitFinished = false;
       const scope = this.failureScopes.getStore(); if (scope) scope.runId = this.runId;
       await this.failureOperation("run_start", () => this.emit({ type: "agent_start" }));
+      await this.noteWorkingState();
       await this.failureOperation("recovery", () => this.recover());
       await this.failureOperation("threshold_preflight", () => this.maybeAutoCompact());
     }
@@ -462,6 +464,15 @@ export class ActorCoordinator {
       await this.failureOperation("settlement", () => this.settle()); return;
     }
     if (!this.tasks.size && !this.failedAttempt) await this.failureOperation("settlement", () => this.settle());
+  }
+
+  // A hidden note at run start when the session's registered working-state file is over budget.
+  async noteWorkingState() {
+    let note = null;
+    try { note = workingStateNote(this.manager.getSessionId()); } catch {}
+    if (!note) return;
+    this.manager.appendCustomMessageEntry(WORKING_STATE_NOTE_TYPE, note, false, {});
+    await this.lifecycle.afterCommit?.();
   }
 
   retryObservation(attempt) {
