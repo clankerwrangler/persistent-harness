@@ -1,4 +1,7 @@
 -------------------- MODULE DependencyLookup --------------------
+\* Sources:
+\*   src/external-pi.mjs sha256:3d0a1636ddbff7bb85ba0dd269debbf47bc52296dc45144d5eead8cd0af7f8ae
+
 EXTENDS Naturals, FiniteSets
 CONSTANTS SkipRoot, AllowEscape, AllowMismatch
 VARIABLES layout, declared, within, identity, versions, sameAi, publicExports,

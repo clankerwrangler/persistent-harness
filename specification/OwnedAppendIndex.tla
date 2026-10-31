@@ -1,4 +1,8 @@
 --------------------- MODULE OwnedAppendIndex ---------------------
+\* Sources:
+\*   src/source-watermark.mjs sha256:5580cdbad3c0283b9c744be4c77b924eddc41124a05fe76686b70241300323eb
+\*   src/session-history-index.mjs sha256:95d926f31220a5f11456c77ae9578ac05fca4cc21d4aeb34ee85a64c0ac839ae
+\*   src/visible-transcript-reader.mjs sha256:244b202937ba51f1c9f06e272fe77ba34cd3316d43cbed956bf6ee98b7fc8061
 EXTENDS Naturals
 CONSTANTS MaxVersion, DurableBit, CheckCursor, ForceStrict, ForceReader
 VARIABLES source, epoch, sequence, hintedEpoch, hintedSequence, hintedVersion,

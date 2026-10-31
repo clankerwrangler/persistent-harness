@@ -1,4 +1,13 @@
 ----------------------- MODULE HarnessDependencies -----------------------
+\* Sources:
+\*   bin/install.mjs sha256:3c72f6cc373f7ffd971ba1fd8e57bb03f34fffaf2aaf221215170e3c41f505ff
+\*   bin/package-load-smoke.mjs sha256:653a20972aacd8adacdee429bce3769145b41b7faa464627121ca3d9eccb3800
+\*   src/external-pi.mjs sha256:3d0a1636ddbff7bb85ba0dd269debbf47bc52296dc45144d5eead8cd0af7f8ae
+\*   src/supervisor.mjs sha256:baf857f5899941d16f22baf6d3b3a26b357f33ff502d22aaf305e779f141ebc2
+\*   src/sdk-worker.mjs sha256:3833d63ee43d0b2ee6cdb2f8e82d5cb1f4435cc29dad97c45f1e399a8aba45c5
+\*   src/actor-compaction.mjs sha256:043eb1861c7490795a5b2fd582848d14bb8e157d4361844d1e23c851f0a6e12e
+\*   src/actor-coordinator.mjs sha256:2b0c8be0e148c47dccb3a0ae141c6b63966c22aaef24f43fc787a34f746ec7fb
+
 EXTENDS Sequences, FiniteSets, Naturals
 VARIABLES operation, stage, extras, loaded, hook, owner, summarySource,
           summaryWrites, externalFiles, localConfig, projection, installed, requestScope, requestMode, sourceData, resultData, runtimeIdentity
@@ -34,8 +43,9 @@ Start == /\ stage = "new" /\ operation = "start"
          /\ loaded' = IF runtimeIdentity = "accepted" THEN <<"harness">> \o Normalize(extras) ELSE <<>>
          /\ UNCHANGED <<operation, extras, hook, owner, summarySource,
                         summaryWrites, externalFiles, localConfig, projection, installed, requestScope, requestMode, sourceData, resultData, runtimeIdentity>>
+\* Package smoke imports support files/modules without loading the external SDK.
 Smoke == /\ stage = "new" /\ operation = "smoke"
-         /\ stage' = IF runtimeIdentity = "accepted" THEN "passed" ELSE "rejected"
+         /\ stage' = "passed"
          /\ UNCHANGED <<operation, extras, loaded, hook, owner, summarySource,
                         summaryWrites, externalFiles, localConfig, projection, installed, requestScope, requestMode, sourceData, resultData, runtimeIdentity>>
 Compact == /\ stage = "ready" /\ stage' = "compacting" /\ owner' = "coordinator"
@@ -70,7 +80,8 @@ ProjectionScope == projection = "returned" => requestScope = "current" /\ reques
 ProjectionUsesCanonical == projection = "returned" => resultData = sourceData
 ProjectionReadOnly == sourceData = <<"real-call", "real-result", "signature">>
 RejectedHasNoResult == projection = "rejected" => resultData = <<>>
-ExactStockGraph == stage \in {"ready", "passed", "compacting", "settled"} => runtimeIdentity = "accepted"
+ExactStockGraph == stage \in {"ready", "compacting", "settled"} => runtimeIdentity = "accepted"
+SmokeIndependentOfRuntime == operation = "smoke" /\ stage # "new" => stage = "passed"
 RejectedRuntimeNotLoaded == stage = "rejected" => loaded = <<>>
 Spec == Init /\ [][Next]_vars
 =============================================================================

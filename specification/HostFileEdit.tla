@@ -1,4 +1,7 @@
 ----------------------------- MODULE HostFileEdit -----------------------------
+\* Sources:
+\*   src/host-handlers.mjs sha256:44894a7a47cf1577ae46af26fdc6fbc990d481dd0891d4cfa37fe5a6256d18d0
+
 EXTENDS Integers, Sequences, TLC
 CONSTANT Fault
 VARIABLES inputs, call, phase, parts, scans, retained, built, results

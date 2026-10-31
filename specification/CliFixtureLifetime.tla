@@ -1,4 +1,7 @@
 ------------------------- MODULE CliFixtureLifetime -------------------------
+\* Sources:
+\*   test/supervisor-cli-loading.test.mjs sha256:c39b738ce83bf3f747d229a383540c0d75690464226c701b0656df317b070462
+
 EXTENDS Naturals
 CONSTANT JoinExit
 VARIABLES kind, helper, service, acknowledged, cleanup, removed, lateWrite, recreated

@@ -1,4 +1,9 @@
 --------------------------- MODULE VisibleOutputImages ---------------------------
+\* Sources:
+\*   src/visible-transcript-reader.mjs sha256:244b202937ba51f1c9f06e272fe77ba34cd3316d43cbed956bf6ee98b7fc8061
+\*   src/conversation-projection.mjs sha256:9ccd97f1657710f009ea425590b99a791e5c7ba4b1a9367e96d9da67787cabed
+\*   src/input-images.mjs sha256:6325106ac1c28778a2f1ec2db7efbd13b72718990634894eb8e03ea2ba429076
+\*   src/supervisor.mjs sha256:baf857f5899941d16f22baf6d3b3a26b357f33ff502d22aaf305e779f141ebc2
 EXTENDS Naturals, Sequences
 CONSTANT Bug
 \* Request-time image authorization. Branch changes between requests are independent;

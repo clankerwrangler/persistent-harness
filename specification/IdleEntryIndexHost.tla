@@ -1,4 +1,8 @@
 -------------------- MODULE IdleEntryIndexHost --------------------
+\* Sources:
+\*   src/supervisor.mjs sha256:baf857f5899941d16f22baf6d3b3a26b357f33ff502d22aaf305e779f141ebc2
+\*   src/sdk-worker.mjs sha256:3833d63ee43d0b2ee6cdb2f8e82d5cb1f4435cc29dad97c45f1e399a8aba45c5
+
 EXTENDS Naturals, FiniteSets
 CONSTANTS AwaitAdmission, AwaitClose, DropWakeCancel, CancelWrongToken,
           AdmitBusy, PerGenerationPath, CanonicalWrite, LateClear, DispatchStale, DrainNormalEarly

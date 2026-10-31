@@ -1,4 +1,6 @@
 ------------------------ MODULE NamespaceRecoveryLatch ------------------------
+\* Sources:
+\*   src/extension.mjs sha256:b7e3c99b2fc52d58d7d051eb9b7cda86334f0d577716d8608d0dac9a50da5d60
 EXTENDS Naturals
 CONSTANT Bug
 VARIABLES kernel, recoveryKernel, epoch, visible, reference, proven, step, last

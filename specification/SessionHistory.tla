@@ -1,4 +1,8 @@
 ------------------------- MODULE SessionHistory -------------------------
+\* Sources:
+\*   src/session-history-index.mjs sha256:95d926f31220a5f11456c77ae9578ac05fca4cc21d4aeb34ee85a64c0ac839ae
+\*   src/visible-transcript-reader.mjs sha256:244b202937ba51f1c9f06e272fe77ba34cd3316d43cbed956bf6ee98b7fc8061
+\*   src/supervisor.mjs sha256:baf857f5899941d16f22baf6d3b3a26b357f33ff502d22aaf305e779f141ebc2
 EXTENDS Naturals, FiniteSets
 CONSTANTS Callers, CheckPrefix, CheckStable, RespectAbort, Drain, MaxVersion
 VARIABLES source, prefix, pending, branch, cache, rows, phase, owner, selected,

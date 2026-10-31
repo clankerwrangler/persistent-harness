@@ -1,4 +1,8 @@
 -------------------------- MODULE KernelCompletion ---------------------------
+\* Sources:
+\*   src/kernel.mjs sha256:8a14e4dcff43fa5f24ed4beab60ebf66073224de6001726fd4b80bccde0a9071
+\*   python-runtime/kernel.py sha256:d4aa99006f90d531b546686f6208dc48f77609f4faa00dabb91e7a81f80bc361
+
 EXTENDS Naturals
 VARIABLES process, execution, terminal, checkpoint, failure
 vars == <<process, execution, terminal, checkpoint, failure>>

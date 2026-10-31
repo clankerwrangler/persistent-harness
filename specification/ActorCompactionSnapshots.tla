@@ -1,4 +1,8 @@
 ---------------------- MODULE ActorCompactionSnapshots ----------------------
+\* Sources:
+\*   src/actor-compaction.mjs sha256:043eb1861c7490795a5b2fd582848d14bb8e157d4361844d1e23c851f0a6e12e
+\*   src/canonical-context.mjs sha256:a28e31cb1d639c43d9212b50c450d75802ac5a8cfe964e490cac9b60a18d54f7
+
 EXTENDS Naturals, FiniteSets
 CONSTANTS Entries, Active, Pending
 \* Companion to ActorCompaction: each owner has distinct nested containers.

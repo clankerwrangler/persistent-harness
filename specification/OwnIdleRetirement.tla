@@ -1,4 +1,7 @@
 ---------------------- MODULE OwnIdleRetirement ----------------------
+\* Sources:
+\*   src/supervisor.mjs sha256:baf857f5899941d16f22baf6d3b3a26b357f33ff502d22aaf305e779f141ebc2
+\*   src/store.mjs sha256:8bbee365fc6a8e99060fd908b9ac20eb9084a2ad6faa6680c7a0980c9539fcc3
 EXTENDS Integers, TLC
 CONSTANTS ConflateFamily, ResetFamilyAge, IgnoreOwnWork, StaleTimer,
           SkipWake, BlockPreparation, RetireChild

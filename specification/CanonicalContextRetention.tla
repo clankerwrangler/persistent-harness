@@ -1,4 +1,7 @@
 -------------------- MODULE CanonicalContextRetention --------------------
+\* Sources:
+\*   src/canonical-context.mjs sha256:a28e31cb1d639c43d9212b50c450d75802ac5a8cfe964e490cac9b60a18d54f7
+
 EXTENDS Naturals, Integers, Sequences, FiniteSets, TLC
 CONSTANTS MaxChanges, BadIgnoreLeafChanges, BadDropColdFacts, BadIgnoreGeneration, BadHydrateEmpty, BadEagerSource, BadProfileStamp, BadColdReread, BadColdPayload, BadPhysicalFold
 VARIABLES count, leaf, revision, generation, changes, keep, signatureConflict, rawNative, factNative, factGeneration,

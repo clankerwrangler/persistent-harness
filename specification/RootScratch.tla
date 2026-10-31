@@ -1,4 +1,10 @@
 -------------------------- MODULE RootScratch --------------------------
+\* Sources:
+\*   src/session-scratch.mjs sha256:a2a94a3dfd9c3e476cd845ac9cab3b3026a8d5c6e42ebe935a0f28218495cfe9
+\*   src/store.mjs sha256:8bbee365fc6a8e99060fd908b9ac20eb9084a2ad6faa6680c7a0980c9539fcc3
+\*   src/supervisor.mjs sha256:baf857f5899941d16f22baf6d3b3a26b357f33ff502d22aaf305e779f141ebc2
+\*   src/process-ownership.mjs sha256:efa41d00c5b4c1bf61ca2eeff513d9c97b2ca9b794a376a32ed12a41f6d4b9d8
+\*   src/background-notifier.mjs sha256:f00c5e7a11b5db1e695106b24cc2aa684a173904409dede8a45055cedd02a771
 EXTENDS FiniteSets, TLC
 CONSTANT Fault, ServiceMarked
 Nodes == {"root", "child", "grandchild", "other"}

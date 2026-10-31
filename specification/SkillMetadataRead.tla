@@ -1,4 +1,6 @@
 -------------------------- MODULE SkillMetadataRead --------------------------
+\* Sources:
+\*   src/skills.mjs sha256:551248176ce363178846a1aa0df86d7ce7630c1194a4875f30c2af395ac68348
 EXTENDS Naturals, Sequences, TLC
 
 CONSTANT Fault

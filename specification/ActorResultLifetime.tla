@@ -1,4 +1,7 @@
 ----------------------- MODULE ActorResultLifetime -----------------------
+\* Sources:
+\*   src/actor-coordinator.mjs sha256:2b0c8be0e148c47dccb3a0ae141c6b63966c22aaef24f43fc787a34f746ec7fb
+
 EXTENDS Naturals, FiniteSets, Sequences
 CONSTANTS Runs, Calls, Flights
 VARIABLES phase, run, flight, attempts, states, canonical, published,

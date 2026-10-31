@@ -1,4 +1,7 @@
 ------------------------- MODULE CanonicalDigestSegments -------------------------
+\* Sources:
+\*   src/canonical-context.mjs sha256:a28e31cb1d639c43d9212b50c450d75802ac5a8cfe964e490cac9b60a18d54f7
+
 EXTENDS Integers, Sequences, TLC
 CONSTANT Fault
 (* The unchanged recursive walk emits typed primitive frames and literal container

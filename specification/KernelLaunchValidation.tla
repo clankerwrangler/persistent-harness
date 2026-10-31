@@ -1,4 +1,11 @@
 -------------------- MODULE KernelLaunchValidation --------------------
+\* Sources:
+\*   src/python-runtime.mjs sha256:f13ca412dfc1da25618787844020af39a65f0bf03bfd5fc465dc3d4229dbc129
+\*   src/python-runtime-errors.mjs sha256:98e700190c3f8498d3d6e11d04a1b52904313a59b10f9b04556091fe9482b4d2
+\*   src/kernel.mjs sha256:8a14e4dcff43fa5f24ed4beab60ebf66073224de6001726fd4b80bccde0a9071
+\*   python-runtime/kernel.py sha256:d4aa99006f90d531b546686f6208dc48f77609f4faa00dabb91e7a81f80bc361
+\*   python-runtime/_persistent_harness.py sha256:f9ebcac6faa03c86d2f6a0c8f54a5b41eaa269d53ad27ae95fa82decc57791b7
+
 EXTENDS Naturals, FiniteSets, TLC
 CONSTANT Fault
 VARIABLE s

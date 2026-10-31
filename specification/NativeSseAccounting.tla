@@ -1,4 +1,6 @@
 ---------------------- MODULE NativeSseAccounting ----------------------
+\* Sources:
+\*   src/native-provider.mjs sha256:610fd46197e8d65960b26a7a4f2a6d1bccad7754d7724dd296ccb81819ce8ffa
 EXTENDS Naturals, Sequences, TLC
 CONSTANT Fault
 VARIABLES phase, request, chunks, pos, buffer, data, bufferBytes, dataBytes,

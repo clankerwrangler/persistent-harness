@@ -1,4 +1,6 @@
 ------------------------ MODULE MimeHistoryOwnership ------------------------
+\* Sources:
+\*   python-runtime/_mime_history.py sha256:2ece55ad1696ee969d6dd3866e29c99b7d396dacd5137ef2d1bc0807557d92e8
 EXTENDS Naturals, FiniteSets, TLC
 CONSTANTS Owners, Collide, Share, Validate, TrackAll, Release
 VARIABLES used, live, bundles, index, digests, preserved, shared, registered

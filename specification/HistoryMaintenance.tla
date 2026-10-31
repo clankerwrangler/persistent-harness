@@ -1,4 +1,8 @@
 --------------------- MODULE HistoryMaintenance ---------------------
+\* Sources:
+\*   src/supervisor.mjs sha256:baf857f5899941d16f22baf6d3b3a26b357f33ff502d22aaf305e779f141ebc2
+\*   src/session-history-index.mjs sha256:95d926f31220a5f11456c77ae9578ac05fca4cc21d4aeb34ee85a64c0ac839ae
+
 EXTENDS Naturals
 CONSTANTS MaxVersion, DeferBusy, CancelOnResume
 VARIABLES source, indexed, busy, pending, queued, writer, captured, cancelled,

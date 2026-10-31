@@ -1,4 +1,6 @@
 ---------------------- MODULE PublicRosterProjection ----------------------
+\* Sources:
+\*   src/store.mjs sha256:8bbee365fc6a8e99060fd908b9ac20eb9084a2ad6faa6680c7a0980c9539fcc3
 EXTENDS Naturals, FiniteSets, Sequences
 CONSTANTS KeepPayload, DropParent, FilterFamily
 VARIABLES fixture, caller, version, phase, sampled, actual, expected, payloadReads

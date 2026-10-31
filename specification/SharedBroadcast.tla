@@ -1,4 +1,6 @@
 ----------------------- MODULE SharedBroadcast -----------------------
+\* Sources:
+\*   src/supervisor.mjs sha256:baf857f5899941d16f22baf6d3b3a26b357f33ff502d22aaf305e779f141ebc2
 EXTENDS Naturals, Sequences, FiniteSets, TLC
 CONSTANT Fault
 Clients == {1, 2}

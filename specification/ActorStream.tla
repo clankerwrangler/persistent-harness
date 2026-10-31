@@ -1,4 +1,7 @@
 --------------------------- MODULE ActorStream ---------------------------
+\* Sources:
+\*   src/actor-stream.mjs sha256:f3ce76796b51558c7894a1b0c0dbfa6cf6e4532df7e669267b8787dbf722520e
+
 EXTENDS Naturals, Sequences, FiniteSets, TLC
 VARIABLES native, closed, proved, terminal, canceled, cursor, planned,
           committed, admitted, frozen, amendment, conflict, textIds, nativeStored

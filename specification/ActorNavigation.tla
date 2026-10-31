@@ -1,4 +1,9 @@
 ------------------------- MODULE ActorNavigation -------------------------
+\* Sources:
+\*   src/actor-navigation.mjs sha256:b591d67edd33547f1be9403f1130c6b617994acb48f49fbe279b09f5584c2e46
+\*   src/actor-coordinator.mjs sha256:2b0c8be0e148c47dccb3a0ae141c6b63966c22aaef24f43fc787a34f746ec7fb
+\*   src/canonical-context.mjs sha256:a28e31cb1d639c43d9212b50c450d75802ac5a8cfe964e490cac9b60a18d54f7
+
 EXTENDS Naturals
 CONSTANT BadRawRefresh
 VARIABLES phase, lease, summaryFlight, cancelled, stale, writes, before, after,

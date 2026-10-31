@@ -1,4 +1,7 @@
 ------------------------ MODULE KernelStreamAccounting ------------------------
+\* Sources:
+\*   src/kernel.mjs sha256:8a14e4dcff43fa5f24ed4beab60ebf66073224de6001726fd4b80bccde0a9071
+
 EXTENDS Integers, Sequences, TLC
 CONSTANT Fault
 VARIABLES reference, candidate, limit, depth, work

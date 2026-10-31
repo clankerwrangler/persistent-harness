@@ -1,4 +1,7 @@
 -------------------- MODULE CanonicalFactStorage --------------------
+\* Sources:
+\*   src/canonical-context.mjs sha256:a28e31cb1d639c43d9212b50c450d75802ac5a8cfe964e490cac9b60a18d54f7
+
 EXTENDS Naturals, FiniteSets, TLC
 CONSTANTS BadRetainEmpty, BadDropFacts
 VARIABLES inventory, selected, generation, stored, published, rejected

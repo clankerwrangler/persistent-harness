@@ -1,4 +1,7 @@
 ----------------------- MODULE StockCoordinator -----------------------
+\* Sources:
+\*   src/actor-coordinator.mjs sha256:2b0c8be0e148c47dccb3a0ae141c6b63966c22aaef24f43fc787a34f746ec7fb
+\*   src/actor-prompt.mjs sha256:7bb25b06ea306ced57d134c3118a82c3fdd698dd07fc3414646d845b37b79da6
 EXTENDS Naturals, FiniteSets, Sequences
 CONSTANT Calls, PrepareCustomPrompt
 VARIABLES life, mode, flight, requests, states, results, anchored, effects,

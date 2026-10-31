@@ -1,4 +1,9 @@
 --------------------- MODULE ActorInputReconciliation ---------------------
+\* Sources:
+\*   src/extension.mjs sha256:b7e3c99b2fc52d58d7d051eb9b7cda86334f0d577716d8608d0dac9a50da5d60
+\*   src/supervisor.mjs sha256:baf857f5899941d16f22baf6d3b3a26b357f33ff502d22aaf305e779f141ebc2
+\*   src/visible-transcript-reader.mjs sha256:244b202937ba51f1c9f06e272fe77ba34cd3316d43cbed956bf6ee98b7fc8061
+
 EXTENDS Naturals, FiniteSets
 CONSTANTS ReconcileHistory, SingleFlightReports
 VARIABLES ready, generation, pending, proof, accepted, writes, delivered,

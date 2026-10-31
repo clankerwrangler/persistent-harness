@@ -1,4 +1,8 @@
 ------------------------ MODULE CanonicalContext ------------------------
+\* Sources:
+\*   src/canonical-context.mjs sha256:a28e31cb1d639c43d9212b50c450d75802ac5a8cfe964e490cac9b60a18d54f7
+\*   src/actor-coordinator.mjs sha256:2b0c8be0e148c47dccb3a0ae141c6b63966c22aaef24f43fc787a34f746ec7fb
+
 EXTENDS Naturals, Sequences, FiniteSets, TLC
 \* Read-only projection/recovery model. Tokens stand for immutable messages,
 \* including all content/usage/provenance bytes. The injected STOCK helper owns

@@ -1,4 +1,8 @@
 ------------------------- MODULE FixtureActorClose -------------------------
+\* Sources:
+\*   test/fixtures/notification-supervisor.mjs sha256:52e314c9f65c4f1ed12d8b663968131a77b34f0d829bdc18b7485503981f5d6b
+\*   src/supervisor.mjs sha256:baf857f5899941d16f22baf6d3b3a26b357f33ff502d22aaf305e779f141ebc2
+
 EXTENDS Naturals, TLC
 CONSTANT JoinClose
 VARIABLES running, tracked, lifecycle, stopPhase, cleanupPhase, exited

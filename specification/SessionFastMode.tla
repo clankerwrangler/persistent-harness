@@ -1,4 +1,9 @@
 ---------------------------- MODULE SessionFastMode ----------------------------
+\* Sources:
+\*   src/fast-mode.mjs sha256:497e7699c395663ebff315b0244e14f06b43b46885823a8d0c42cccc63d71554
+\*   src/extension.mjs sha256:b7e3c99b2fc52d58d7d051eb9b7cda86334f0d577716d8608d0dac9a50da5d60
+\*   src/actor-coordinator.mjs sha256:2b0c8be0e148c47dccb3a0ae141c6b63966c22aaef24f43fc787a34f746ec7fb
+\*   src/store.mjs sha256:8bbee365fc6a8e99060fd908b9ac20eb9084a2ad6faa6680c7a0980c9539fcc3
 EXTENDS Naturals
 CONSTANT Sessions
 VARIABLES durable, supported, phase, sampled, tier, costTier, activeTier, view, readOK, route

@@ -1,4 +1,9 @@
 ----------------------------- MODULE LivenessScope -----------------------------
+\* Sources:
+\*   bin/harness-supervisor.mjs sha256:c73cad51ff3f97a4c246d4249eba273e86ce3142536270496c304c850bfa3eec
+\*   src/control.mjs sha256:9139e88413fbf3ba2421b630234f50d340f15f49a7b220443930366fe213f2e9
+\*   src/supervisor.mjs sha256:baf857f5899941d16f22baf6d3b3a26b357f33ff502d22aaf305e779f141ebc2
+
 EXTENDS Naturals
 CONSTANTS EagerSupervisor, EagerClient, MissingStartImport
 VARIABLES operation, peer, phase, audits, launches, available, registered, heartbeatOK,

@@ -1,4 +1,7 @@
 ---------------- MODULE FirstInputSnapshot ----------------
+\* Sources:
+\*   src/actor-coordinator.mjs sha256:2b0c8be0e148c47dccb3a0ae141c6b63966c22aaef24f43fc787a34f746ec7fb
+
 EXTENDS Integers, Sequences, FiniteSets
 CONSTANT StaleInitial
 VARIABLES queue, delivered, rev, sent, snapshots, active, flight, accepted, prepared, promptInput, preparedInput, requestPrompts

@@ -1,4 +1,6 @@
 ---------------------- MODULE TranscriptCacheResidency ----------------------
+\* Sources:
+\*   src/visible-transcript-reader.mjs sha256:244b202937ba51f1c9f06e272fe77ba34cd3316d43cbed956bf6ee98b7fc8061
 EXTENDS Naturals, Sequences, FiniteSets
 CONSTANTS Files, Readers, Budget, MaxSessions, Fault
 VARIABLES order, weights, charged, phase, selected, localWeight, valid, blocked,

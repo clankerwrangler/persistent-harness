@@ -1,4 +1,6 @@
 -------------------- MODULE OperationsMemory --------------------
+\* Sources:
+\*   python-runtime/_linux_memory.py sha256:3469a8a6525b3866e780e501af805f8bdaaa9f34c0bdd088023f61712a2516db
 EXTENDS Integers, TLC
 CONSTANT Bug
 VARIABLES sample, host, parentCurrent, parentMax, parentHigh, known, phase, usable, available

@@ -1,4 +1,6 @@
 ------------------------ MODULE SnapshotRootAliases ------------------------
+\* Sources:
+\*   python-runtime/kernel.py sha256:d4aa99006f90d531b546686f6208dc48f77609f4faa00dabb91e7a81f80bc361
 EXTENDS Naturals, Sequences, FiniteSets, TLC
 \* Three saved candidates, two source identities. Admission, protection, byte
 \* health, group shape, and decode success vary independently for every entry.
