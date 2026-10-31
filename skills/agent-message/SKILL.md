@@ -19,6 +19,10 @@ Messages never produce an automatic reply. Send only an intentional, useful resu
 folder `cwd` and sends it `task` as a message from you, so it can reply to you. Only Lead may
 call it; other sessions are refused.
 
+## Changing the default model (Lead only)
+
+When the user asks to change models, call `agent_message.set_default_model(model, apply=False)` to preview, then with `apply=True`. `model` is a short name such as `terra`, which picks the newest match from the default provider, or an exact id. It moves the default and every session following it, including sleeping and stopped ones, without waking them. Busy sessions move at the end of their turn. Deliberately picked models, and children inheriting them, stay. To switch back, run it again with the earlier model. Report the moved count and anything left in `pinned`, `pending`, or `otherModels`.
+
 ## Human attention (Lead only)
 
 When the human must supply a decision, approval, or missing information, Lead can use

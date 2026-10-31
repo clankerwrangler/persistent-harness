@@ -1132,6 +1132,15 @@ export function createHostHandlers({ cwd, scratch = null, getClient, getContext 
       return { sessionId: admission.sessionId, shortId: admission.shortId, name: admission.name, message: sent.message };
     },
 
+    async "agent_message.set_default_model"(payload) {
+      const client = getClient();
+      if (!client?.isConnected) throw new Error("harness is offline");
+      const value = requireRecord(payload, "agent_message.set_default_model payload");
+      for (const key of Object.keys(value)) if (!["model", "apply"].includes(key)) throw new Error(`unsupported set_default_model option: ${key}`);
+      if (typeof value.apply !== "boolean") throw new Error("apply must be boolean");
+      return client.request("set_default_inference", { target: requireString(value.model, "model", { maxBytes: 256 }), apply: value.apply });
+    },
+
     async "rlm.spawn"(payload) {
       const client = getClient();
       const context = getContext();

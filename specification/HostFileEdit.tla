@@ -1,6 +1,6 @@
 ----------------------------- MODULE HostFileEdit -----------------------------
 \* Sources:
-\*   src/host-handlers.mjs sha256:44894a7a47cf1577ae46af26fdc6fbc990d481dd0891d4cfa37fe5a6256d18d0
+\*   src/host-handlers.mjs sha256:adff19ccf9f042327bec3dbc8789d4716149242d48b6e6927490f35062a212e1
 
 EXTENDS Integers, Sequences, TLC
 CONSTANT Fault

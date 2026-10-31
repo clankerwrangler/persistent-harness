@@ -3,8 +3,8 @@
 \*   src/kernel.mjs sha256:8a14e4dcff43fa5f24ed4beab60ebf66073224de6001726fd4b80bccde0a9071
 \*   src/extension.mjs sha256:b7e3c99b2fc52d58d7d051eb9b7cda86334f0d577716d8608d0dac9a50da5d60
 \*   src/sdk-worker.mjs sha256:3833d63ee43d0b2ee6cdb2f8e82d5cb1f4435cc29dad97c45f1e399a8aba45c5
-\*   src/supervisor.mjs sha256:baf857f5899941d16f22baf6d3b3a26b357f33ff502d22aaf305e779f141ebc2
-\*   src/protocol.mjs sha256:3f88727424ea5a29f6fc8d35f7a1b37e62c8d2b216f49e484522e499e98689c6
+\*   src/supervisor.mjs sha256:8205605adf9af30fc23b9ddc0bb8b52fe865c761830b183f5d6e0e5f62923327
+\*   src/protocol.mjs sha256:f19f3f025a9c8e60d6a3241d9a0c7b0283f56b5de283560028579b24a9d6a446
 EXTENDS Naturals, TLC
 CONSTANT IgnoreBusy, StartMissing, SkipReserve, MutateRead, BypassAuth
 VARIABLES worker, kernel, queued, draining, phase, allowed, sends, unsafe,

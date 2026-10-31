@@ -1,8 +1,8 @@
 ------------------------ MODULE MessageLocation ------------------------
 \* Sources:
-\*   src/store.mjs sha256:8bbee365fc6a8e99060fd908b9ac20eb9084a2ad6faa6680c7a0980c9539fcc3
+\*   src/store.mjs sha256:321247cfd4fcdff36e33af0670e59a501ab67e19328b29387b64a78dc37553a2
 \*   src/actor-coordinator.mjs sha256:2b0c8be0e148c47dccb3a0ae141c6b63966c22aaef24f43fc787a34f746ec7fb
-\*   src/supervisor.mjs sha256:baf857f5899941d16f22baf6d3b3a26b357f33ff502d22aaf305e779f141ebc2
+\*   src/supervisor.mjs sha256:8205605adf9af30fc23b9ddc0bb8b52fe865c761830b183f5d6e0e5f62923327
 \*   src/visible-transcript-reader.mjs sha256:244b202937ba51f1c9f06e272fe77ba34cd3316d43cbed956bf6ee98b7fc8061
 \*   src/input-location.mjs sha256:a6267b63c81f85e71d0483c166e0a6480d5d37dfba5929ee9eb203eec2428781
 \*   src/conversation-projection.mjs sha256:9ccd97f1657710f009ea425590b99a791e5c7ba4b1a9367e96d9da67787cabed

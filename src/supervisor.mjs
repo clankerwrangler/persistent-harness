@@ -1,3 +1,4 @@
+import { closestThinkingLevel, readDefaultModel, resolveDefaultTarget, writeDefaultModel } from "./default-inference.mjs";
 import { IDLE_MEMORY_DELAY_MS } from "./idle-memory.mjs";
 import { quiescentScratchProcessRoots } from "./process-ownership.mjs";
 import { DEFAULT_SCRATCH_DIRECTORY, ensureSessionScratch, reclaimSessionScratch } from "./session-scratch.mjs";
@@ -860,6 +861,10 @@ export class HarnessSupervisor {
       if (state.sessionId !== this.#leadSessionId()) throw requestFailure("create_root_forbidden", "only Lead can start a new root session");
       return this.#createRoot(params);
     }
+    if (type === "set_default_inference") {
+      if (state.sessionId !== this.#leadSessionId()) throw requestFailure("default_inference_forbidden", "only Lead can change the default model");
+      return this.#setDefaultInference(state, params);
+    }
     if (["spawn_child", "send_message", "revive_child"].includes(type)) this.store.assertSessionAvailable(state.sessionId);
     if (type === "set_session_name") { const session = this.store.setSessionName(state.sessionId, params.name); this.#broadcastNavigator("name_changed"); return { session }; }
     if (type === "record_actor_turn_failure") {
@@ -1322,6 +1327,29 @@ export class HarnessSupervisor {
     this.#broadcastNavigator("inference_pending");
     await this.#sendPendingInference(params.sessionId, actor, pending);
     return { ...await this.#inferenceSnapshot(params.sessionId, actor, false), changed: true };
+  }
+
+  // The store commits first, so an interrupted change can be repeated and still
+  // finds any session that has not moved; settings name the new default last.
+  async #setDefaultInference(state, params) {
+    const settingsPath = this.settingsPath ?? path.join(path.dirname(this.databasePath), "..", "settings.json");
+    const from = readDefaultModel(settingsPath);
+    const available = await this.#actors.get(state.sessionId).worker.request("get_available_models", { refresh: false });
+    let target;
+    try { target = resolveDefaultTarget(params.target, available?.models ?? [], from.provider); }
+    catch (error) { throw requestFailure("unsupported_inference", error.message); }
+    const to = { provider: target.provider, id: target.id, fastModeSupported: projectAvailableModels([target])[0]?.fastModeSupported === true };
+    const liveSessionIds = new Set(this.#actors.keys());
+    const outcome = this.store.retargetDefaultInference({ from, to, liveSessionIds, apply: params.apply,
+      thinkingFor: (level) => (level ? closestThinkingLevel(level, target) : level) });
+    if (params.apply) {
+      writeDefaultModel(settingsPath, target.provider, target.id);
+      for (const { sessionId, live } of outcome.moved) {
+        if (live && this.#actors.has(sessionId)) await this.#sendPendingInference(sessionId, this.#actors.get(sessionId));
+      }
+      this.#broadcastNavigator("inference_pending");
+    }
+    return { applied: params.apply, from, to: { provider: target.provider, model: target.id }, ...outcome };
   }
 
   async #sendPendingInference(sessionId, actor, pending = this.store.getSession(sessionId)?.launch?.pendingInference) {

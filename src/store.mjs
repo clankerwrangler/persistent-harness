@@ -782,12 +782,53 @@ export class HarnessStore {
     return launch.pendingInference;
   }
 
+  // Move sessions following the default to a new model. Deliberate picks, and
+  // children inheriting one, keep theirs. Stopped and passivated actors read
+  // launch policy at startup; live ones apply the queued selection between turns.
+  retargetDefaultInference({ from, to, liveSessionIds = new Set(), thinkingFor = (level) => level, apply = false }, now = Date.now()) {
+    if (apply) this.#db.exec("BEGIN IMMEDIATE");
+    try {
+      const rows = this.#db.prepare("SELECT id, parent_session_id, display_name, launch_json FROM sessions WHERE deleted_at IS NULL AND lifecycle != 'deleted'").all()
+        .map((row) => ({ id: row.id, parent: row.parent_session_id, name: row.display_name, launch: parseJson(row.launch_json, {}) }));
+      const byId = new Map(rows.map((row) => [row.id, row]));
+      const follows = (row, depth = 0) => {
+        const source = row?.launch.model?.source;
+        if (source === "settings") return true;
+        return source === "parent" && depth < 64 && follows(byId.get(row.parent), depth + 1);
+      };
+      const result = { moved: [], pinned: [], pending: [], otherModels: [] };
+      for (const row of rows) {
+        const { launch } = row;
+        const resolved = launch.model?.resolved;
+        const current = resolved?.provider === from.provider && resolved?.id === from.model;
+        const entry = { sessionId: row.id, name: row.name };
+        if (!follows(row)) { if (current) result.pinned.push(entry); continue; }
+        if (!current) { if (resolved) result.otherModels.push({ ...entry, model: resolved.id }); continue; }
+        if (launch.pendingInference) { result.pending.push(entry); continue; }
+        const live = liveSessionIds.has(row.id);
+        result.moved.push({ ...entry, live });
+        if (!apply) continue;
+        const thinkingLevel = thinkingFor(launch.thinking?.resolved);
+        if (live) {
+          launch.pendingInference = { requestId: randomUUID(), provider: to.provider, model: to.id, thinkingLevel, followDefault: true };
+        } else {
+          launch.model = { ...launch.model, resolved: { provider: to.provider, id: to.id } };
+          if (thinkingLevel) launch.thinking = { ...launch.thinking, resolved: thinkingLevel };
+          launch.fastModeSupported = to.fastModeSupported === true;
+        }
+        this.#db.prepare("UPDATE sessions SET launch_json = ?, updated_at = ? WHERE id = ?").run(JSON.stringify(launch), now, row.id);
+      }
+      if (apply) this.#db.exec("COMMIT");
+      return result;
+    } catch (error) { if (apply) this.#db.exec("ROLLBACK"); throw error; }
+  }
+
   recordSessionInferenceResult(sessionId, generation, result) {
     const row = this.#sessionRow(sessionId);
     if (!row || row.lifecycle === "deleted" || Number(row.actor_generation) !== generation) return false;
     let launch = parseJson(row.launch_json, {});
     if (result.error) {
-      if (result.selection) launch = this.updateSessionInference(sessionId, result.selection, launch).launch;
+      if (result.selection && !launch.pendingInference?.followDefault) launch = this.updateSessionInference(sessionId, result.selection, launch).launch;
       if (launch.pendingInference?.requestId !== result.requestId) return false;
       launch.pendingInference.error = "Selection could not be applied. Choose again or retry after reconnecting.";
       this.#db.prepare("UPDATE sessions SET launch_json = ?, updated_at = ? WHERE id = ?")
@@ -807,8 +848,14 @@ export class HarnessStore {
       if (expectedLaunch !== undefined && JSON.stringify(launch) !== JSON.stringify(expectedLaunch)) {
         throw new Error("session inference policy changed concurrently");
       }
-      launch.model = { requested: `${selection.provider}/${selection.model}`, resolved: { provider: selection.provider, id: selection.model }, source: "explicit" };
-      launch.thinking = { requested: selection.thinkingLevel, resolved: selection.thinkingLevel, source: "explicit" };
+      // A default move leaves the session following the default.
+      if (requestId && launch.pendingInference?.requestId === requestId && launch.pendingInference.followDefault) {
+        launch.model = { ...launch.model, resolved: { provider: selection.provider, id: selection.model } };
+        launch.thinking = { ...launch.thinking, resolved: selection.thinkingLevel };
+      } else {
+        launch.model = { requested: `${selection.provider}/${selection.model}`, resolved: { provider: selection.provider, id: selection.model }, source: "explicit" };
+        launch.thinking = { requested: selection.thinkingLevel, resolved: selection.thinkingLevel, source: "explicit" };
+      }
       launch.fastModeSupported = selection.fastModeSupported === true;
       if (requestId && launch.pendingInference?.requestId === requestId) delete launch.pendingInference;
       this.#db.prepare("UPDATE sessions SET launch_json = ?, updated_at = ? WHERE id = ?")
