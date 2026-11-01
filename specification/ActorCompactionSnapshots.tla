@@ -1,7 +1,7 @@
 ---------------------- MODULE ActorCompactionSnapshots ----------------------
 \* Sources:
 \*   src/actor-compaction.mjs sha256:043eb1861c7490795a5b2fd582848d14bb8e157d4361844d1e23c851f0a6e12e
-\*   src/canonical-context.mjs sha256:4968f9083b9cafda0ddc1a5c1fbb35f6c518d9e5cf3361a8e7c206b2e38ac9e9
+\*   src/canonical-context.mjs sha256:95fa4c4c0ef154aa53f5ab90923d3693fa341b4f78e5c60969ad55e7a6fe8fc6
 
 EXTENDS Naturals, FiniteSets
 CONSTANTS Entries, Active, Pending

@@ -1125,8 +1125,9 @@ export function releaseColdHeaders(manager) {
   for (const [id, record] of facts.calls) {
     const result = facts.results.get(id);
     if (!result || record.order > coldOrder || result.order > coldOrder) continue;
-    facts.calls.delete(id); facts.results.delete(id); state.settledCallsDropped = true;
+    facts.calls.delete(id); facts.results.delete(id);
   }
+  state.released = true;
   return released;
 }
 
@@ -1141,8 +1142,11 @@ function selectedContextHeaders(state) {
 
 function projectManagedSource(manager, mode, stringCodeUnits, allowCold = true) {
   requireThat(mode === "native" || mode === "ordinary", "ERR_CONTEXT_MODE");
-  const state = managedState(manager), facts = state.facts;
+  let state = managedState(manager);
   const cold = allowCold && mode === "native" ? coldBoundary(manager, state) : null;
+  // The full path needs every card and call back.
+  if (!cold && state.released) { snapshotManagers.get(manager).state = null; state = managedState(manager); }
+  const facts = state.facts;
   const selected = cold ? state.selected.slice(cold.end) : selectedContextHeaders(state);
   let sdkSource;
   try { sdkSource = manager.buildSessionSource(); }
@@ -1267,11 +1271,7 @@ function projectManagedSource(manager, mode, stringCodeUnits, allowCold = true) 
   const keys = new Set(descriptors.map(item => item.key));
   for (const key of state.profiles.keys()) if (!keys.has(key)) state.profiles.delete(key);
   let full;
-  const fullSource = () => {
-    // Settled calls left the facts, and a complete projection needs every one back.
-    if (!full && state.settledCallsDropped && snapshotManagers.get(manager).state === state) snapshotManagers.get(manager).state = null;
-    return full ??= projectManagedSource(manager, mode, stringCodeUnits, false).source;
-  };
+  const fullSource = () => full ??= projectManagedSource(manager, mode, stringCodeUnits, false).source;
   const source = cold ? createColdSource(sdkSource, createProjectedSource(manager, sdkSource, descriptors, stringCodeUnits,
     snapshotManagers.get(manager).estimateContextTokens, state.profiles), firstHeld, fullSource)
     : createProjectedSource(manager, sdkSource, descriptors, stringCodeUnits, snapshotManagers.get(manager).estimateContextTokens, state.profiles);

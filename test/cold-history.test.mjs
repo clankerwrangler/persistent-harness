@@ -82,3 +82,11 @@ test("ordinary mode never stays cold", () => {
   source.read(0);
   assert.deepEqual(session.reads, [0]);
 });
+
+test("after cards shrink, the full path still works", () => {
+  const { session, manager, project } = fixture(["a", "b", "c"].map(user));
+  session.bookmark("e1", 2);
+  assert.equal(releaseColdHeaders(manager), 2);
+  assert.deepEqual(project("ordinary").readAll(), ["a", "b", "c"].map(user));
+  assert.deepEqual(project().readAll(), ["a", "b", "c"].map(user));
+});

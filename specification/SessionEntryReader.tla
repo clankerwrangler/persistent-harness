@@ -1,6 +1,6 @@
 -------------------- MODULE SessionEntryReader --------------------
 \* Sources:
-\*   src/canonical-context.mjs sha256:4968f9083b9cafda0ddc1a5c1fbb35f6c518d9e5cf3361a8e7c206b2e38ac9e9
+\*   src/canonical-context.mjs sha256:95fa4c4c0ef154aa53f5ab90923d3693fa341b4f78e5c60969ad55e7a6fe8fc6
 \*   test/canonical-retention.test.mjs sha256:14852afa346eea175e6bbd666f43e38ba4d9d55a950a76185ff41bb3eb6e7d28
 EXTENDS Naturals, Sequences, TLC
 CONSTANTS Fault, MaxMutations
