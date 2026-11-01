@@ -1,7 +1,7 @@
 ------------------------- MODULE KernelColdStatus -------------------------
 \* Sources:
-\*   src/host-handlers.mjs sha256:adff19ccf9f042327bec3dbc8789d4716149242d48b6e6927490f35062a212e1
-\*   src/kernel.mjs sha256:8a14e4dcff43fa5f24ed4beab60ebf66073224de6001726fd4b80bccde0a9071
+\*   src/host-handlers.mjs sha256:6abd3cc578f921707bcb619e1a6672570121a1426e97cefe2105c38475895d9d
+\*   src/kernel.mjs sha256:feb1bec8dc4e3d47d0f11956acacea17cdfac0d91fa853c785f0f050754d06e2
 
 EXTENDS Naturals
 CONSTANT Fault

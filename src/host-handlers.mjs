@@ -7,6 +7,7 @@ import { link, lstat, mkdir, open, readFile, readdir, rename, stat, unlink } fro
 import path from "node:path";
 import { findModels, supportedThinkingLevels } from "./child-policy.mjs";
 import { readRecentEvents } from "./event-log-reader.mjs";
+import { preferAsOomVictim } from "./oom-victim.mjs";
 
 const MAX_READ_BYTES = 50 * 1024;
 const MAX_WRITE_BYTES = 1024 * 1024;
@@ -733,6 +734,7 @@ async function runShell(payload, { cwd, scratch, signal, onProgress = () => {} }
       stdio: ["ignore", "pipe", "pipe"],
       detached: false,
     });
+    preferAsOomVictim(child.pid);
     const startedAt = Date.now();
     const markerBytes = Buffer.byteLength(SHELL_TRUNCATION_MARKER);
     const dataBudget = MAX_SHELL_CAPTURE_BYTES - markerBytes;

@@ -7,6 +7,7 @@ import { JsonLineDecoder, encodeFrame } from "./framing.mjs";
 import { dispatchExtensionTool } from "./extension-tool-host.mjs";
 import { historyMemoryDiagnostics } from "./memory-diagnostics.mjs";
 import { PythonRuntimeRejection } from "./python-runtime-errors.mjs";
+import { preferAsOomVictim } from "./oom-victim.mjs";
 
 const KERNEL_FRAME_BYTES = 1024 * 1024;
 
@@ -279,6 +280,7 @@ export class PythonKernel {
       },
       stdio: ["ignore", "pipe", "pipe", "pipe"],
     });
+    preferAsOomVictim(child.pid);
     this.#process = child;
     this.#control = child.stdio[3];
     this.#decoder = new JsonLineDecoder({ maxFrameBytes: KERNEL_FRAME_BYTES });

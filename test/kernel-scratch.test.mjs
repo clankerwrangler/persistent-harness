@@ -26,6 +26,10 @@ test("managed kernel and host shell receive canonical scratch; restored names ca
   const shell = await first.execute(`from _persistent_harness import host_request\nhost_request("shell.run", {"command": "printf '%s' \\\"$PI_HARNESS_ROOT_SESSION_ID\\\"", "timeout": 5})["stdout"]`);
   assert.equal(shell.ok, true);
   assert.equal(shell.mime["text/plain"], `'${scratch.rootSessionId}'`);
+  const shellScore = await first.execute(`from _persistent_harness import host_request\nhost_request("shell.run", {"command": "printf '%s' \\\"$(cat /proc/self/oom_score_adj)\\\"", "timeout": 5})["stdout"]`);
+  assert.equal(shellScore.mime["text/plain"], "'500'");
+  const kernelScore = await first.execute("open('/proc/self/oom_score_adj').read().strip()");
+  assert.equal(kernelScore.mime["text/plain"], "'500'");
   await first.execute("scratch_dir = 'caller-value-must-not-restore'\nretained_value = 42");
   await first.close();
   const second = new PythonKernel(options); kernels.push(second);

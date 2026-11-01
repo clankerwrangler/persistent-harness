@@ -1,4 +1,5 @@
 import { spawn } from "node:child_process";
+import { preferAsOomVictim } from "./oom-victim.mjs";
 
 export const DEFAULT_CRON_CHECK_TIMEOUT_SECONDS = 30;
 export const MAX_CRON_CHECK_TIMEOUT_SECONDS = 120;
@@ -32,6 +33,7 @@ export function runCronCheck({ command, timeoutSeconds }, { cwd, env = process.e
     let child;
     try { child = spawn("/bin/bash", ["-lc", command], { cwd, env, detached: true, stdio: ["ignore", "pipe", "pipe"] }); }
     catch (error) { resolve({ ok: false, error: `could not start: ${error.message}` }); return; }
+    preferAsOomVictim(child.pid);
     const timer = setTimeout(() => {
       timedOut = true;
       try { process.kill(-child.pid, "SIGKILL"); } catch { child.kill("SIGKILL"); }
