@@ -823,6 +823,7 @@ function sourceHeader(descriptor, position, state) {
 function readManagedEntry(manager, state, id) {
   const header = state.byId.get(id);
   requireThat(header !== undefined, "ERR_CONTEXT_BRANCH_MISSING");
+  if (header.cold) return restoreColdHeader(manager, state, header);
   if (header.sourceKey === undefined) {
     const entry = manager.getEntry(id);
     requireThat(entry?.id === id && entry.type === header.type && entry.parentId === header.parentId
@@ -848,6 +849,15 @@ function readManagedEntry(manager, state, id) {
     state.nodes = budget.nodes;
   } else requireThat(valueDigest(entry) === header.sourceDigest, "ERR_CONTEXT_SOURCE_PROJECTION");
   source.validate();
+  return entry;
+}
+
+function restoreColdHeader(manager, state, header) {
+  const source = state.entrySource, descriptor = state.entryReader ? source.getEntryHeader(header.position) : source.entries[header.position];
+  const nodes = state.nodes;
+  header.sourceKey = descriptor.key; header.metadataNodes = 0; delete header.cold;
+  const entry = readManagedEntry(manager, state, header.id);
+  state.nodes = nodes;
   return entry;
 }
 
@@ -990,6 +1000,8 @@ function managedState(manager, factsRequired = true) {
   }
   const facts = extendsBranch ? state.facts : { calls: new Map(), results: new Map(), aliases: new Map(),
     observedAliases: new Map(), nonAdmissions: new Set(), signatures: new Map(), signatureBlocks: new Map(), signatureDiagnostics: [], positions: new Map() };
+  if (!extendsBranch) state.structural = false;
+  for (let i = selectedStart; i < selected.length; i++) if (["compaction", "context_edit"].includes(selected[i].type)) state.structural = true;
   for (let i = selectedStart; i < selected.length; i++) addSelectedFacts(manager, state, facts, selected[i], i, owner.estimateContextTokens);
   validate();
   state.selected = selected; state.facts = facts; state.stamp = { ...stamp }; state.factCount = count; state.leaf = leaf;
@@ -1074,7 +1086,52 @@ export function projectCanonicalSource(input = {}) {
   }) };
 }
 
+const LIVE_CONTEXT_STATE_TYPE = "live-context-state";
+
+/** The live-context bookmark on this branch, when messages before it can stay cold. */
+function coldBoundary(manager, state) {
+  if (state.structural) return null;
+  const at = state.selected.findLastIndex(header => header.type === "custom" && header.customType === LIVE_CONTEXT_STATE_TYPE);
+  if (at < 0) return null;
+  const data = manager.getEntry(state.selected[at].id)?.data, entryId = data?.checkpoint?.sourceEntryId;
+  const count = data?.checkpoint?.sourceMessageCount;
+  if (data?.enabled !== true || typeof entryId !== "string" || !Number.isSafeInteger(count)) return null;
+  const end = state.selected.findLastIndex(header => header.id === entryId);
+  return end < 0 ? null : { entryId, count, end: end + 1 };
+}
+
+const COLD_HEADER_DROPPED = new Set(["message", "profile", "sourceDigest", "sourceKey", "selectedFacts", "units",
+  "metadataNodes", "edit", "systemDigest"]);
+
+/** Reduce cards before the bookmark to their identity. Reading an entry restores its card. */
+export function releaseColdHeaders(manager) {
+  if (!snapshotManagers.has(manager)) return 0;
+  const state = managedState(manager), facts = state.facts, cold = coldBoundary(manager, state);
+  if (!cold) return 0;
+  const roles = new Map();
+  let released = 0;
+  for (let index = 0; index < cold.end; index++) {
+    const header = state.selected[index];
+    if (header.cold) continue;
+    const tiny = { cold: true };
+    for (const [key, value] of Object.entries(header)) if (value !== undefined && !COLD_HEADER_DROPPED.has(key)) tiny[key] = value;
+    const shape = tiny.contributionRoles.join();
+    tiny.contributionRoles = roles.get(shape) ?? tiny.contributionRoles; roles.set(shape, tiny.contributionRoles);
+    state.selected[index] = tiny; state.headers[header.position] = tiny; state.byId.set(header.id, tiny);
+    released++;
+  }
+  // A finished call before the bookmark has no effect on anything after it.
+  const coldOrder = facts.positions.get(cold.entryId);
+  for (const [id, record] of facts.calls) {
+    const result = facts.results.get(id);
+    if (!result || record.order > coldOrder || result.order > coldOrder) continue;
+    facts.calls.delete(id); facts.results.delete(id); state.settledCallsDropped = true;
+  }
+  return released;
+}
+
 function selectedContextHeaders(state) {
+  if (!state.structural) return state.selected;
   const checkpoint = state.selected.findLastIndex(entry => entry.type === "compaction");
   if (checkpoint < 0) return state.selected;
   const entry = state.selected[checkpoint], kept = state.selected.findIndex(item => item.id === entry.firstKeptEntryId);
@@ -1082,29 +1139,38 @@ function selectedContextHeaders(state) {
     ...state.selected.slice(checkpoint + 1)];
 }
 
-function projectManagedSource(manager, mode, stringCodeUnits) {
+function projectManagedSource(manager, mode, stringCodeUnits, allowCold = true) {
   requireThat(mode === "native" || mode === "ordinary", "ERR_CONTEXT_MODE");
-  const state = managedState(manager), facts = state.facts, selected = selectedContextHeaders(state);
+  const state = managedState(manager), facts = state.facts;
+  const cold = allowCold && mode === "native" ? coldBoundary(manager, state) : null;
+  const selected = cold ? state.selected.slice(cold.end) : selectedContextHeaders(state);
   let sdkSource;
   try { sdkSource = manager.buildSessionSource(); }
   catch { throw new CanonicalContextError("ERR_CONTEXT_HELPER_FAILED"); }
-  requireThat(isDeepStrictEqual(copyData(sdkSource.contextEntryIds), selected.map(entry => entry.id)), "ERR_CONTEXT_SOURCE_PROJECTION");
+  requireThat(Array.isArray(sdkSource.contextEntryIds), "ERR_CONTEXT_SOURCE_PROJECTION");
+  requireThat(isDeepStrictEqual(copyData(cold ? sdkSource.contextEntryIds.slice(cold.end) : sdkSource.contextEntryIds),
+    selected.map(entry => entry.id)), "ERR_CONTEXT_SOURCE_PROJECTION");
   const selectedIds = new Set(selected.map(entry => entry.id)), edits = new Map();
   for (const header of selected) if (header.type === "context_edit") edits.set(header.editTargetId, header);
   const expected = selected.flatMap((header, position) => edits.get(header.id)?.edit?.omitted
     || header.type === "compaction" && position > 0 ? [] : header.contributionRoles.map((role, messageIndex) => ({
       sourceEntryId: header.id, messageIndex, role, ...(edits.has(header.id) ? { editEntryId: edits.get(header.id).id } : {}),
     })));
-  requireThat(Array.isArray(sdkSource.contributions) && sdkSource.contributions.length === expected.length,
+  const firstHeld = cold ? cold.count : 0;
+  // The bookmark's message count is a claim about this branch; any disagreement takes the full path.
+  if (cold && sdkSource.contributions?.length - firstHeld !== expected.length) return projectManagedSource(manager, mode, stringCodeUnits, false);
+  const held = cold ? sdkSource.contributions.slice(firstHeld) : sdkSource.contributions;
+  requireThat(Array.isArray(held) && held.length === expected.length,
     "ERR_CONTEXT_SOURCE_PROJECTION");
-  sdkSource.contributions.forEach((item, index) => {
+  held.forEach((item, index) => {
     const { sourceEntryId, messageIndex, role, editEntryId } = item;
     requireThat(isDeepStrictEqual({ sourceEntryId, messageIndex, role, ...(editEntryId === undefined ? {} : { editEntryId }) }, expected[index]),
       "ERR_CONTEXT_SOURCE_PROJECTION");
   });
   const diagnostics = facts.signatureDiagnostics.map(item => ({ ...item }));
   const retainedCalls = new Map(), retainedResults = new Map(), seen = new Set();
-  let descriptors = sdkSource.contributions.map((contribution, index) => {
+  let descriptors = held.map((contribution, heldIndex) => {
+    const index = firstHeld + heldIndex;
     const header = state.byId.get(contribution.sourceEntryId), edit = edits.get(contribution.sourceEntryId);
     requireThat(header && selectedIds.has(header.id) && typeof contribution.key === "string"
       && Number.isSafeInteger(contribution.messageIndex) && contribution.messageIndex >= 0
@@ -1164,14 +1230,16 @@ function projectManagedSource(manager, mode, stringCodeUnits) {
     if (call) requireThat(call.order < resultIndex, "ERR_CONTEXT_RESULT_BEFORE_CALL");
   }
   const outstanding = [];
+  const coldOrder = cold ? facts.positions.get(cold.entryId) : -1;
+  const callHeld = (id, record) => retainedCalls.has(id) || facts.positions.get(record.entryId) <= coldOrder;
   for (const [id, record] of facts.calls) {
-    if (record.call.async === true && !facts.results.has(id)) outstanding.push(identity(record, retainedCalls.has(id)));
+    if (record.call.async === true && !facts.results.has(id)) outstanding.push(identity(record, callHeld(id, record)));
     if (retainedCalls.has(id) && facts.results.has(id) && !retainedResults.has(id)) diagnostics.push({
       code: "RESULT_PRUNED", severity: mode === "ordinary" ? "blocking" : "info", ...identity(record, true) });
   }
   for (const [id, record] of facts.results) {
     if (!facts.calls.has(id)) diagnostics.push({ code: "ORPHAN_RESULT", severity: "info", toolCallId: id, messageEntryId: record.entryId });
-    else if (retainedResults.has(id) && !retainedCalls.has(id)) diagnostics.push({ code: "CALL_PRUNED", severity: "info", toolCallId: id, messageEntryId: record.entryId });
+    else if (retainedResults.has(id) && !callHeld(id, facts.calls.get(id))) diagnostics.push({ code: "CALL_PRUNED", severity: "info", toolCallId: id, messageEntryId: record.entryId });
   }
   if (mode === "ordinary") {
     const movable = new Map(descriptors.filter(item => item.role === "toolResult"
@@ -1198,9 +1266,25 @@ function projectManagedSource(manager, mode, stringCodeUnits) {
   }
   const keys = new Set(descriptors.map(item => item.key));
   for (const key of state.profiles.keys()) if (!keys.has(key)) state.profiles.delete(key);
-  const source = createProjectedSource(manager, sdkSource, descriptors, stringCodeUnits,
-    snapshotManagers.get(manager).estimateContextTokens, state.profiles);
+  let full;
+  const fullSource = () => {
+    // Settled calls left the facts, and a complete projection needs every one back.
+    if (!full && state.settledCallsDropped && snapshotManagers.get(manager).state === state) snapshotManagers.get(manager).state = null;
+    return full ??= projectManagedSource(manager, mode, stringCodeUnits, false).source;
+  };
+  const source = cold ? createColdSource(sdkSource, createProjectedSource(manager, sdkSource, descriptors, stringCodeUnits,
+    snapshotManagers.get(manager).estimateContextTokens, state.profiles), firstHeld, fullSource)
+    : createProjectedSource(manager, sdkSource, descriptors, stringCodeUnits, snapshotManagers.get(manager).estimateContextTokens, state.profiles);
   return { source, ...copyData({ outstanding, diagnostics }, { stringCodeUnits }) };
+}
+
+/** Keeps every position. Messages after the bookmark come from `held`; anything older takes the full path. */
+function createColdSource(sdkSource, held, firstHeld, fullSource) {
+  const prefix = sdkSource.contributions.slice(0, firstHeld).map(item => Object.freeze({ key: item.key, role: item.role, sourceEntryId: item.sourceEntryId }));
+  return Object.freeze({ ...held, length: firstHeld + held.length, contributions: Object.freeze([...prefix, ...held.contributions]),
+    read: index => index >= firstHeld ? held.read(index - firstHeld) : fullSource().read(index),
+    readAll: () => fullSource().readAll(),
+    estimateContextTokens: held.estimateContextTokens && (() => fullSource().estimateContextTokens()) });
 }
 
 function createProjectedSource(manager, sdkSource, descriptors, stringCodeUnits, estimator, profiles) {

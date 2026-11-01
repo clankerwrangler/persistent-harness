@@ -13,7 +13,7 @@ import { createAutomaticCompactionPermission } from "./automatic-compaction-perm
 import { createAgentStartPromptCapture } from "./actor-prompt.mjs";
 import { loadExternalPi } from "./external-pi.mjs";
 import { PiRpcLineDecoder } from "./session-actor.mjs";
-import { CanonicalContextError, registerCanonicalSessionManager, sessionContextInput, sessionEntryHeaders } from "./canonical-context.mjs";
+import { CanonicalContextError, registerCanonicalSessionManager, releaseColdHeaders, sessionContextInput, sessionEntryHeaders } from "./canonical-context.mjs";
 
 const PACKAGE_ROOT = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 export const MAX_WORKER_FRAME_BYTES = 256 * 1024 * 1024;
@@ -222,7 +222,10 @@ export class SDKWorker {
       && !this.coordinator.pendingMessageCount && !this.session.pendingMessageCount;
     if (!eligible()) return false;
     this.#idleMemoryReduction = current;
-    try { return await this.reduceMemory(eligible); }
+    try {
+      releaseColdHeaders(this.session.sessionManager);
+      return await this.reduceMemory(eligible);
+    }
     finally { if (this.#idleMemoryReduction === current) this.#idleMemoryReduction = undefined; }
   }
   cancelEntryIndex(token) {
