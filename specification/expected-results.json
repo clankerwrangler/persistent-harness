@@ -454,5 +454,9 @@
   "WorkerResultWire.compactFull.cfg": "violation",
   "WorkerResultWire.dropImage.cfg": "violation",
   "WorkerResultWire.leak.cfg": "violation",
-  "WorkerResultWire.mutateCanonical.cfg": "violation"
+  "WorkerResultWire.mutateCanonical.cfg": "violation",
+  "ColdHistoryAnchor.cfg": "pass",
+  "ColdHistoryAnchorBadBookmark.cfg": "violation",
+  "ColdHistoryAnchorBadOffBranch.cfg": "violation",
+  "ColdHistoryAnchorBadPartial.cfg": "violation"
 }
