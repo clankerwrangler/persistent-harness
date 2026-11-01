@@ -638,10 +638,10 @@ function finishContext({ messages, canonical, selected, diagnostics, mode, strin
 // opting a literal SessionManager into committed-value snapshots. A revision
 // method alone never makes default/custom managers immutable.
 const snapshotManagers = new WeakMap();
-export function registerCanonicalSessionManager(manager, { estimateContextTokens } = {}) {
+export function registerCanonicalSessionManager(manager, { estimateContextTokens, coldCards = null } = {}) {
   requireThat(typeof manager.getRevision === "function" && typeof manager.getEntriesRange === "function",
     "ERR_CONTEXT_MANAGER");
-  snapshotManagers.set(manager, { state: null, estimateContextTokens });
+  snapshotManagers.set(manager, { state: null, estimateContextTokens, coldCards, savedBoundary: coldCards?.entryId ?? null });
 }
 
 export function sessionContextInput(manager, buildSessionProjection, mode) {
@@ -943,7 +943,7 @@ function managedState(manager, factsRequired = true) {
   }
   // Never publish partially validated facts after an append/reload failure.
   owner.state = null;
-  const start = state.headers.length;
+  let start = state.headers.length;
   const entryReader = typeof manager.buildSessionEntryReader === "function";
   const buildEntrySource = entryReader ? manager.buildSessionEntryReader : manager.buildSessionEntrySource;
   if (typeof buildEntrySource === "function" && (!state.entrySource || start < count)) {
@@ -955,6 +955,7 @@ function managedState(manager, factsRequired = true) {
       && source.leafId === leaf && (entryReader ? source.length === count && typeof source.getEntryHeader === "function"
         : Array.isArray(source.entries) && source.entries.length === count), "ERR_CONTEXT_SOURCE_PROJECTION");
     state.entrySource = source; state.entryReader = entryReader;
+    if (start === 0 && resumeColdCards(owner, state, count, stamp, source, entryReader)) start = state.headers.length;
   }
   for (let i = start; i < count; i++) {
     if (state.entrySource) {
@@ -986,10 +987,14 @@ function managedState(manager, factsRequired = true) {
   };
   if (!factsRequired) { validate(); owner.state = state; return state; }
   const suffix = state.headers.slice(state.factCount);
-  const extendsBranch = state === old && state.facts && old.stamp?.generation === stamp.generation
-    && stamp.revision - old.stamp.revision === count - state.factCount
-    && suffix.every((entry, i) => entry.parentId === (i ? suffix[i - 1].id : old.leaf))
-    && leaf === (suffix.at(-1)?.id ?? old.leaf);
+  const continues = state.resumed || (state === old && state.facts && old.stamp?.generation === stamp.generation
+    && stamp.revision - old.stamp.revision === count - state.factCount);
+  const from = state.resumed ? state.leaf : old?.leaf;
+  const extendsBranch = continues && suffix.every((entry, i) => entry.parentId === (i ? suffix[i - 1].id : from))
+    && leaf === (suffix.at(-1)?.id ?? from);
+  // Saved cards end on the bookmark; if this branch doesn't continue from it, read everything.
+  if (state.resumed && !extendsBranch) { owner.state = null; return managedState(manager, factsRequired); }
+  delete state.resumed;
   const selectedStart = extendsBranch ? state.selected.length : 0;
   const selected = extendsBranch ? state.selected : selectBranch(state.headers, leaf);
   if (extendsBranch) for (const header of suffix) selected.push(header);
@@ -1110,16 +1115,18 @@ export function releaseColdHeaders(manager) {
   if (!cold) return 0;
   const roles = new Map();
   let released = 0;
-  for (let index = 0; index < cold.end; index++) {
-    const header = state.selected[index];
+  const count = state.byId.get(cold.entryId).position + 1;
+  for (let index = 0; index < count; index++) {
+    const header = state.headers[index];
     if (header.cold) continue;
     const tiny = { cold: true };
     for (const [key, value] of Object.entries(header)) if (value !== undefined && !COLD_HEADER_DROPPED.has(key)) tiny[key] = value;
     const shape = tiny.contributionRoles.join();
     tiny.contributionRoles = roles.get(shape) ?? tiny.contributionRoles; roles.set(shape, tiny.contributionRoles);
-    state.selected[index] = tiny; state.headers[header.position] = tiny; state.byId.set(header.id, tiny);
+    state.headers[index] = tiny; state.byId.set(header.id, tiny);
     released++;
   }
+  for (let index = 0; index < cold.end; index++) state.selected[index] = state.byId.get(state.selected[index].id);
   // A finished call before the bookmark has no effect on anything after it.
   const coldOrder = facts.positions.get(cold.entryId);
   for (const [id, record] of facts.calls) {
@@ -1129,6 +1136,35 @@ export function releaseColdHeaders(manager) {
   }
   state.released = true;
   return released;
+}
+
+/** What a later start needs instead of reading everything before the bookmark. Null when nothing is new. */
+export function exportColdCards(manager) {
+  const owner = snapshotManagers.get(manager), state = owner?.state;
+  if (!state?.released) return null;
+  const cold = coldBoundary(manager, state);
+  if (!cold || owner.savedBoundary === cold.entryId) return null;
+  const order = state.facts.positions.get(cold.entryId), facts = { ...state.facts };
+  const upTo = map => new Map([...map].filter(([, record]) => record.order <= order));
+  facts.calls = upTo(state.facts.calls); facts.results = upTo(state.facts.results);
+  facts.positions = new Map([...state.facts.positions].filter(([, value]) => value <= order));
+  owner.savedBoundary = cold.entryId;
+  return { version: 1, entryId: cold.entryId, count: state.byId.get(cold.entryId).position + 1, nodes: state.nodes,
+    headers: state.headers.slice(0, state.byId.get(cold.entryId).position + 1), facts };
+}
+
+/** Saved cards count only if the file still has the bookmark entry at the same place. */
+function resumeColdCards(owner, state, count, stamp, source, entryReader) {
+  const saved = owner.coldCards;
+  owner.coldCards = null;
+  if (!saved || saved.count > count || !entryReader) return false;
+  if (source.getEntryHeader(saved.count - 1)?.id !== saved.headers.at(-1)?.id) return false;
+  state.headers = saved.headers; state.byId = new Map(saved.headers.map(header => [header.id, header]));
+  try { state.selected = selectBranch(saved.headers, saved.entryId); }
+  catch { state.headers = []; state.byId = new Map(); state.selected = []; return false; }
+  state.facts = saved.facts; state.nodes = saved.nodes; state.factCount = saved.count; state.leaf = saved.entryId;
+  state.released = true; state.resumed = true; state.structural = false;
+  return true;
 }
 
 function selectedContextHeaders(state) {

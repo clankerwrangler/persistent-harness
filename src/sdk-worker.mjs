@@ -1,3 +1,4 @@
+import { readColdCards, writeColdCards } from "./cold-cards.mjs";
 import { reduceIdleMemory } from "./idle-memory.mjs";
 import { nodeMemoryDiagnostics } from "./memory-diagnostics.mjs";
 import { projectAvailableModels, validateInferenceEffort } from "./inference-options.mjs";
@@ -13,7 +14,7 @@ import { createAutomaticCompactionPermission } from "./automatic-compaction-perm
 import { createAgentStartPromptCapture } from "./actor-prompt.mjs";
 import { loadExternalPi } from "./external-pi.mjs";
 import { PiRpcLineDecoder } from "./session-actor.mjs";
-import { CanonicalContextError, registerCanonicalSessionManager, releaseColdHeaders, sessionContextInput, sessionEntryHeaders } from "./canonical-context.mjs";
+import { CanonicalContextError, registerCanonicalSessionManager, exportColdCards, releaseColdHeaders, sessionContextInput, sessionEntryHeaders } from "./canonical-context.mjs";
 
 const PACKAGE_ROOT = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 export const MAX_WORKER_FRAME_BYTES = 256 * 1024 * 1024;
@@ -200,8 +201,8 @@ export class SDKWorker {
   #closed;
   #entryIndexPreparation;
   #idleMemoryReduction;
-  constructor({ session, coordinator, runner, resources, sdk, models, projectContext, broker, publish, lifecycle, entryIndexCachePath, publishSourceWatermark, reduceMemory = reduceIdleMemory }) {
-    Object.assign(this, { session, coordinator, runner, resources, sdk, models, projectContext, broker, publish, lifecycle, entryIndexCachePath, reduceMemory });
+  constructor({ session, coordinator, runner, resources, sdk, models, projectContext, broker, publish, lifecycle, entryIndexCachePath, coldCardsPath, publishSourceWatermark, reduceMemory = reduceIdleMemory }) {
+    Object.assign(this, { session, coordinator, runner, resources, sdk, models, projectContext, broker, publish, lifecycle, entryIndexCachePath, coldCardsPath, reduceMemory });
     this.unsubscribeService = session.subscribe((event) => {
       if (["session_info_changed", "thinking_level_changed"].includes(event.type)) publish(event);
     });
@@ -223,7 +224,10 @@ export class SDKWorker {
     if (!eligible()) return false;
     this.#idleMemoryReduction = current;
     try {
-      releaseColdHeaders(this.session.sessionManager);
+      const manager = this.session.sessionManager;
+      releaseColdHeaders(manager);
+      const cards = this.coldCardsPath ? exportColdCards(manager) : null;
+      if (cards) await writeColdCards(this.coldCardsPath, cards).catch(() => {});
       return await this.reduceMemory(eligible);
     }
     finally { if (this.#idleMemoryReduction === current) this.#idleMemoryReduction = undefined; }
@@ -499,7 +503,10 @@ export async function bootstrapSDKWorker({ argv = [], cwd = process.cwd(), env =
   const manager = options.noSession ? sdk.SessionManager.inMemory(cwd)
     : options.session ? sdk.SessionManager.open(explicitSession, sessionDir, cwd, retention)
     : options.continue ? sdk.SessionManager.continueRecent(cwd, sessionDir, retention) : sdk.SessionManager.create(cwd, sessionDir, retention);
-  if (bounded) registerCanonicalSessionManager(manager, { estimateContextTokens: core.estimateContextTokens });
+  const coldCardsPath = bounded && explicitSession
+    ? path.join(agentDir, "harness", "cold-cards", `${createHash("sha256").update(explicitSession).digest("hex")}.cards`) : undefined;
+  if (bounded) registerCanonicalSessionManager(manager, { estimateContextTokens: core.estimateContextTokens,
+    coldCards: coldCardsPath ? readColdCards(coldCardsPath) : null });
   const runner = new sdk.ExtensionRunner(active.extensions, active.runtime, cwd, manager, new sdk.ModelRegistry(models));
   const startupErrors = [];
   let ready = false, worker, session;
@@ -548,7 +555,7 @@ export async function bootstrapSDKWorker({ argv = [], cwd = process.cwd(), env =
       runner, resources, promptCapture, publish: emit, basePromptOptions, onTiming,
       automaticCompactionAllowed: createAutomaticCompactionPermission(eventBus),
       isProjectTrusted: () => settings.isProjectTrusted() });
-    worker = new SDKWorker({ session, coordinator, runner, resources, sdk, models, projectContext, broker, publish: emit, lifecycle, entryIndexCachePath,
+    worker = new SDKWorker({ session, coordinator, runner, resources, sdk, models, projectContext, broker, publish: emit, lifecycle, entryIndexCachePath, coldCardsPath,
       publishSourceWatermark: watermark => publish({ type: "source_watermark", watermark }) });
     await coordinator.start();
     if (options.name !== undefined) session.setSessionName(options.name);

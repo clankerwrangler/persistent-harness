@@ -3,7 +3,7 @@
 \*   src/kernel.mjs sha256:feb1bec8dc4e3d47d0f11956acacea17cdfac0d91fa853c785f0f050754d06e2
 \*   src/extension-tool-host.mjs sha256:aa5ade4839378b6752209864c6c895d85546c609b92f75c66bef8d4ac0982d0d
 \*   src/actor-tool-dispatch.mjs sha256:dc9841f42794e8d659b0d777c13c4432b2753d693d0402ebff5d398bf247329d
-\*   src/sdk-worker.mjs sha256:46a27a7b8b91f987efe25acee04e34a204c6c8f3cf66772f3d50727a40878e85
+\*   src/sdk-worker.mjs sha256:0bab6c32d41896821acbc9d8ff3e7509f8ecd341b6f282afbabec504463174b2
 
 EXTENDS Naturals, FiniteSets
 CONSTANTS Cells, Tools, Callable, Granted, RecordLimit, BadSourceReload

@@ -1,6 +1,6 @@
 ------------------------- MODULE WorkerOwnership -------------------------
 \* Sources:
-\*   src/sdk-worker.mjs sha256:46a27a7b8b91f987efe25acee04e34a204c6c8f3cf66772f3d50727a40878e85
+\*   src/sdk-worker.mjs sha256:0bab6c32d41896821acbc9d8ff3e7509f8ecd341b6f282afbabec504463174b2
 \*   src/external-pi.mjs sha256:3d0a1636ddbff7bb85ba0dd269debbf47bc52296dc45144d5eead8cd0af7f8ae
 \*   src/actor-coordinator.mjs sha256:2b0c8be0e148c47dccb3a0ae141c6b63966c22aaef24f43fc787a34f746ec7fb
 EXTENDS Naturals, FiniteSets

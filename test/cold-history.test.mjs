@@ -1,10 +1,10 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { projectCanonicalSource, registerCanonicalSessionManager, releaseColdHeaders } from "../src/canonical-context.mjs";
+import { exportColdCards, projectCanonicalSource, registerCanonicalSessionManager, releaseColdHeaders } from "../src/canonical-context.mjs";
 
 const user = content => ({ role: "user", content, timestamp: 1 });
 
-function fixture(messages) {
+function fixture(messages, coldCards = null) {
   const entries = messages.map((message, index) => ({ type: "message", id: `e${index}`,
     parentId: index ? `e${index - 1}` : null, message }));
   const session = { reads: [], revision: 0 };
@@ -28,7 +28,12 @@ function fixture(messages) {
     entries.push({ type: "message", id: `e${entries.length}`, parentId: entries.at(-1).id, message });
     session.revision++;
   };
-  registerCanonicalSessionManager(manager, { estimateContextTokens: () =>
+  manager.buildSessionEntryReader = () => ({ revision: manager.getRevision(), leafId: manager.getLeafId(), length: entries.length, validate() {},
+    getEntryHeader: index => { session.headerReads.push(index); const { id, type, parentId, customType } = entries[index];
+      return { id, type, parentId, customType, role: entries[index].message?.role, key: id }; },
+    read: index => { session.entryReads.push(index); return structuredClone(entries[index]); } });
+  session.headerReads = []; session.entryReads = [];
+  registerCanonicalSessionManager(manager, { coldCards, estimateContextTokens: () =>
     ({ tokens: 0, usageTokens: 0, trailingTokens: 0, lastUsageIndex: null }) });
   return { manager, session, project: (mode = "native") => projectCanonicalSource({ sessionManager: manager, mode }).source };
 }
@@ -89,4 +94,37 @@ test("after cards shrink, the full path still works", () => {
   assert.equal(releaseColdHeaders(manager), 2);
   assert.deepEqual(project("ordinary").readAll(), ["a", "b", "c"].map(user));
   assert.deepEqual(project().readAll(), ["a", "b", "c"].map(user));
+});
+
+test("saved cards start a session without reading anything before the bookmark", () => {
+  const messages = ["a", "b", "c", "d"].map(user);
+  const first = fixture(messages);
+  first.project();
+  first.session.bookmark("e2", 3);
+  first.project();
+  releaseColdHeaders(first.manager);
+  const cards = structuredClone(exportColdCards(first.manager));
+  assert.equal(exportColdCards(first.manager), null, "an unchanged bookmark isn't saved twice");
+
+  const next = fixture(messages, cards);
+  next.session.bookmark("e2", 3);
+  const source = next.project();
+  assert.equal(source.length, 4);
+  assert.deepEqual(next.session.entryReads.filter(position => position < 3), [], "nothing before the bookmark was read");
+  assert.deepEqual(source.read(3), user("d"));
+  next.session.append(user("e"));
+  assert.deepEqual(next.project().read(4), user("e"));
+  assert.deepEqual(next.project().readAll(), [...messages, user("e")], "the full path rebuilds everything");
+});
+
+test("saved cards that don't match the file are ignored", () => {
+  const messages = ["a", "b", "c"].map(user);
+  const first = fixture(messages);
+  first.project(); first.session.bookmark("e1", 2); first.project();
+  releaseColdHeaders(first.manager);
+  const cards = structuredClone(exportColdCards(first.manager));
+  for (const bad of [{ ...cards, count: 99 }, { ...cards, headers: cards.headers.map(header => ({ ...header, id: `x${header.id}` })) }]) {
+    const next = fixture(messages, bad);
+    assert.deepEqual(next.project().readAll(), messages);
+  }
 });

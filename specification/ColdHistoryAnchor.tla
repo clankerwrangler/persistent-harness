@@ -1,6 +1,6 @@
 ------------------------- MODULE ColdHistoryAnchor -------------------------
 \* Sources:
-\*   src/canonical-context.mjs sha256:95fa4c4c0ef154aa53f5ab90923d3693fa341b4f78e5c60969ad55e7a6fe8fc6
+\*   src/canonical-context.mjs sha256:eaaf0595488743d7be3f9d2c9413082b0849e99cb2c333e868e53e1e07646174
 EXTENDS Naturals, Sequences, FiniteSets
 
 \* A session keeps state only after its live-context bookmark. Older facts come

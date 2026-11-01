@@ -1,7 +1,7 @@
 -------------------- MODULE IdleMemoryReduction --------------------
 \* Sources:
 \*   src/supervisor.mjs sha256:b1adb2c43e0cc03644b770e2ac9710541f936b7890cfa05efc3e9f0d6fd08df3
-\*   src/sdk-worker.mjs sha256:46a27a7b8b91f987efe25acee04e34a204c6c8f3cf66772f3d50727a40878e85
+\*   src/sdk-worker.mjs sha256:0bab6c32d41896821acbc9d8ff3e7509f8ecd341b6f282afbabec504463174b2
 \*   src/idle-memory.mjs sha256:22f406794c28a77232e5c4c6359831b3d38a2a7d7f747d59162a26bb3d7539a3
 
 EXTENDS Integers, FiniteSets, TLC
