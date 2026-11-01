@@ -1236,7 +1236,7 @@ function createProjectedSource(manager, sdkSource, descriptors, stringCodeUnits,
     if (estimator && !profiles.has(item.key)) profiles.set(item.key, copyData(estimator([message])));
     return copyData(message, { stringCodeUnits, budget });
   };
-  const contributions = Object.freeze(descriptors.map(item => Object.freeze({ key: item.key, role: item.role })));
+  const contributions = Object.freeze(descriptors.map(item => Object.freeze({ key: item.key, role: item.role, sourceEntryId: item.sourceEntryId })));
   const source = Object.freeze({ length: descriptors.length, contributions, read: index => read(index),
     readAll: () => {
       sdkSource.validate();
