@@ -2,7 +2,7 @@
 \* Sources:
 \*   bin/harness-supervisor.mjs sha256:c73cad51ff3f97a4c246d4249eba273e86ce3142536270496c304c850bfa3eec
 \*   src/control.mjs sha256:9139e88413fbf3ba2421b630234f50d340f15f49a7b220443930366fe213f2e9
-\*   src/supervisor.mjs sha256:8205605adf9af30fc23b9ddc0bb8b52fe865c761830b183f5d6e0e5f62923327
+\*   src/supervisor.mjs sha256:b1adb2c43e0cc03644b770e2ac9710541f936b7890cfa05efc3e9f0d6fd08df3
 
 EXTENDS Naturals
 CONSTANTS EagerSupervisor, EagerClient, MissingStartImport

@@ -360,6 +360,8 @@ async function acquireInstanceLock(lockPath, ownerToken) {
         // link() publishes the complete record atomically and fails if any owner exists.
         await link(temporaryPath, lockPath);
         heldInstanceLocks.set(lockPath, ownerToken);
+        // Dropping the second name changes the file's ctime, so record identity after it.
+        await unlink(temporaryPath);
         return fileIdentity(await lstat(lockPath), content);
       } catch (error) {
         if (error?.code !== "EEXIST") throw error;
