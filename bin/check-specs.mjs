@@ -12,6 +12,7 @@ import { spawn } from "node:child_process";
 import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { outcomeOf } from "./model-sources.mjs";
 
 const root = path.resolve(import.meta.dirname, "..", "specification");
 const expectedPath = path.join(root, "expected-results.json");
@@ -25,13 +26,6 @@ const prefixes = args.filter((arg) => !arg.startsWith("--"));
 if (!existsSync(jar)) {
   console.log(`skipped: TLA+ tools not found at ${jar} (set TLA2TOOLS)`);
   process.exit(0);
-}
-
-function outcomeOf(output, code, timedOut) {
-  if (timedOut) return "timeout";
-  if (/Model checking completed\. No error has been found\./.test(output)) return "pass";
-  if (/is violated|Deadlock reached|Temporal properties were violated|Assumption .* is false/.test(output)) return "violation";
-  return code === 0 ? "pass" : "error";
 }
 
 // Configurations are named Model.cfg, Model.variant.cfg, ModelVariant.cfg or Model-variant.cfg;
