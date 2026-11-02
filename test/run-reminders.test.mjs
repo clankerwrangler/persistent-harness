@@ -41,3 +41,28 @@ test("only worktrees and branches without a live claimant are reported", async t
   assert.deepEqual(await rootReminders({ rootId: "root", registryPath, liveSessionIds: ["root", "child"] }), []);
   assert.deepEqual(await rootReminders({ rootId: "unregistered", registryPath, liveSessionIds: [] }), []);
 });
+
+
+test("live multi-repository owners claim additional worktrees and retained branches", async t => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), "reminders-multi-"));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const registryPath = path.join(dir, "working-state.json");
+  const repo = name => path.join(dir, name);
+  const states = {
+    [repo("harness")]: { worktrees: [{ path: repo("harness"), branch: "main" }], branches: ["main", "load-proof"] },
+    [repo("sdk")]: { worktrees: [{ path: repo("sdk"), branch: "main" }, { path: repo("sdk-work"), branch: "repair" }], branches: ["main", "repair", "port-tests"] },
+    [repo("clm")]: { worktrees: [{ path: repo("clm"), branch: "main" }, { path: repo("clm-work"), branch: "repair" }, { path: repo("old-work"), branch: "orphan" }], branches: ["main", "repair", "orphan"] },
+  };
+  await writeFile(registryPath, JSON.stringify({
+    root: { repos: Object.keys(states), worktree: repo("harness"),
+      worktrees: [{ worktree: repo("sdk") }, { worktree: repo("clm") }], branches: ["load-proof", "port-tests", null] },
+    child: { worktrees: [{ worktree: repo("sdk-work"), branch: "repair" }, { worktree: repo("clm-work"), branch: "repair" }, null] },
+    finished: { worktrees: [{ worktree: repo("old-work"), branch: "orphan" }] },
+  }));
+  const args = { rootId: "root", registryPath, git: async name => states[name] };
+  const notes = await rootReminders({ ...args, liveSessionIds: ["root", "child"] });
+  assert.equal(notes.length, 1);
+  assert.match(notes[0], /clm: 1 worktree, 1 branch/);
+  assert.match(notes[0], /old-work, orphan/);
+  assert.deepEqual(await rootReminders({ ...args, liveSessionIds: ["root", "child", "finished"] }), []);
+});

@@ -4,6 +4,8 @@
 //   repos    the Git repositories a root owns
 //   worktree the checkout a session works in (a root names its main checkout)
 //   branch   that session's branch
+//   worktrees optional additional { worktree, branch } claims for multi-repository work
+//   branches optional additional branch names retained by that session
 // A worktree or branch no live session in the root's family claims is reported unassigned.
 import { execFile } from "node:child_process";
 import { readFileSync, realpathSync, statSync } from "node:fs";
@@ -48,8 +50,11 @@ async function gitTrees(repo) {
 }
 
 export async function worktreeNotes({ repos, claims, git = gitTrees }) {
-  const claimedTrees = new Set(claims.map(c => c.worktree).filter(p => typeof p === "string").map(resolved));
-  const claimedBranches = new Set(claims.map(c => c.branch).filter(b => typeof b === "string"));
+  const expandedClaims = claims.flatMap(claim => [claim,
+    ...(Array.isArray(claim?.worktrees) ? claim.worktrees : []),
+    ...(Array.isArray(claim?.branches) ? claim.branches.map(branch => ({ branch })) : [])]);
+  const claimedTrees = new Set(expandedClaims.map(c => c?.worktree).filter(p => typeof p === "string").map(resolved));
+  const claimedBranches = new Set(expandedClaims.map(c => c?.branch).filter(b => typeof b === "string"));
   const notes = [];
   for (const repo of repos.filter(r => typeof r === "string" && path.isAbsolute(r))) {
     let state;
