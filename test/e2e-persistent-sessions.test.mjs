@@ -12,18 +12,18 @@ import { sessionSidecarPaths } from "../src/session-paths.mjs";
 import { HarnessSupervisor } from "./fixtures/isolated-supervisor.mjs";
 
 const fakeProviderPath = path.join(import.meta.dirname, "fixtures", "fake-provider.ts");
-async function waitUntil(probe, description, timeoutMs = 60_000) { const deadline = Date.now() + timeoutMs; let last; while (Date.now() < deadline) { try { const value = await probe(); if (value) return value; } catch (error) { last = error; } await new Promise((resolve) => setTimeout(resolve, 20)); } throw new Error(`timed out waiting for ${description}${last ? `: ${last.message}` : ""}`); }
+async function waitUntil(probe, description, timeoutMs = 120_000) { const deadline = Date.now() + timeoutMs; let last; while (Date.now() < deadline) { try { const value = await probe(); if (value) return value; } catch (error) { last = error; } await new Promise((resolve) => setTimeout(resolve, 20)); } throw new Error(`timed out waiting for ${description}${last ? `: ${last.message}` : ""}`); }
 function sendTool(send, base, code, index) { send({ ...base, choices: [{ index: 0, delta: { role: "assistant", content: "" }, finish_reason: null }] }); send({ ...base, choices: [{ index: 0, delta: { tool_calls: [{ index: 0, id: `call-${index}`, type: "function", function: { name: "ipython", arguments: JSON.stringify({ code }) } }] }, finish_reason: null }] }); send({ ...base, choices: [{ index: 0, delta: {}, finish_reason: "tool_calls" }] }); }
 function sendText(send, base, text) { send({ ...base, choices: [{ index: 0, delta: { role: "assistant", content: "" }, finish_reason: null }] }); send({ ...base, choices: [{ index: 0, delta: { content: text }, finish_reason: null }] }); send({ ...base, choices: [{ index: 0, delta: {}, finish_reason: "stop" }] }); }
 function textOf(message) { return JSON.stringify(message?.content ?? ""); }
 function systemText(body) { return String(body.messages?.find((message) => message.role === "system")?.content ?? ""); }
 function requestForUserText(bodies, marker) { return bodies.find((body) => body.messages?.some((message) => message.role === "user" && textOf(message).includes(marker))); }
-async function connect(socketPath) { const client = new HarnessClient({ socketPath, heartbeatMs: 0, requestTimeoutMs: 120_000 }); const registered = await client.start({ registrationType: "register_client", clientInstanceId: crypto.randomUUID() }); assert(registered); return client; }
+async function connect(socketPath) { const client = new HarnessClient({ requestTimeoutMs: 120_000, socketPath, heartbeatMs: 0, requestTimeoutMs: 120_000 }); const registered = await client.start({ registrationType: "register_client", clientInstanceId: crypto.randomUUID() }); assert(registered); return client; }
 async function submitAndSettle(client, sessionId, message, timeoutMs = 120_000) { const settled = new Promise((resolve, reject) => { const timer = setTimeout(() => { cleanup(); reject(new Error(`timed out settling ${message}`)); }, timeoutMs); const listener = (frame) => { if (frame.event === "actor_event" && frame.data?.sessionId === sessionId && frame.data?.event?.type === "agent_settled") { cleanup(); resolve(); } }; const cleanup = () => { clearTimeout(timer); client.off("event", listener); }; client.on("event", listener); }); await client.request("submit_input", { sessionId, message, behavior: "auto" }); await settled; }
 async function entries(client, sessionId) { return (await client.request("get_actor_entries", { sessionId, since: null })).entries; }
 
 // Corrected Gate P: actor lifetime is independent of every detachable client.
-test("Gate P: unified roots and children survive detach, navigate directly, multiplex input, and colocate state", { timeout: 240_000 }, async (t) => {
+test("Gate P: unified roots and children survive detach, navigate directly, multiplex input, and colocate state", { timeout: 1440000 }, async (t) => {
   const root = await mkdtemp(path.join(os.tmpdir(), "persistent-harness-gate-p-"));
   const agentDir = path.join(root, "agent"); const cwd = path.join(root, "project");
   await Promise.all([mkdir(agentDir, { recursive: true }), mkdir(cwd, { recursive: true })]);

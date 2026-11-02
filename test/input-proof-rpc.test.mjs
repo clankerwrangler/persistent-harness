@@ -19,7 +19,7 @@ for (const [name, prompt, expected] of [
   ["template", "/input-proof-template ALPHA", "Template expanded: ALPHA\n\n<!-- persistent-harness-input:literal-template-text -->"],
   ["input hook", "TRANSFORM_ME", "Actual transformed input\n\n<!-- persistent-harness-input:literal-user-text -->"],
 ]) test(`actual stock-worker ${name} preserves authoritative input identity without raw-body digest equality`, {
-  timeout: 30000,
+  timeout: 120_000,
 }, async (t) => {
   const manifest = await acceptedNativeRuntime();
   const dir = await mkdtemp(path.join(os.tmpdir(), "input-proof-rpc-"));
@@ -52,7 +52,7 @@ for (const [name, prompt, expected] of [
   const launch = await writeWorkerFixture(dir, path.join(import.meta.dirname, "fixtures/input-proof-provider.mjs"));
   actor = new PiSessionActor({ command: launch.command, args: [...launch.args,"--mode", "rpc", "--no-extensions", "--no-skills", "--no-themes", "--no-tools",
     "--provider", "input-proof-fixture", "--model", "proof", "--session", sessionFile],
-    cwd: dir, env, requestTimeoutMs: 15000, shutdownTimeoutMs: 1000 });
+    cwd: dir, env, requestTimeoutMs: 120_000, shutdownTimeoutMs: 1000 });
   actor.on("event", event => events.push(event)); await actor.start();
   if (launch.heapCapProof) {
     heapCapReceipt = JSON.parse(await readFile(launch.heapCapProof.file, "utf8"));

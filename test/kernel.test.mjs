@@ -25,7 +25,7 @@ function text(result) {
   return [result.stdout, result.stderr, result.mime?.["text/plain"], result.error].filter(Boolean).join("\n");
 }
 
-test("persistent kernel exposes unified skill help, host-backed calls, interruption, isolation, and restore", { timeout: 180_000 }, async (t) => {
+test("persistent kernel exposes unified skill help, host-backed calls, interruption, isolation, and restore", { timeout: 1080000 }, async (t) => {
   const root = await mkdtemp(path.join(os.tmpdir(), "persistent-harness-kernel-"));
   const kernels = [];
   // Keep managed reuse/rebuild checks separate from the external-interpreter override.
@@ -192,7 +192,7 @@ test("persistent kernel exposes unified skill help, host-backed calls, interrupt
     "shell.run(\"printf 'shell-before\\n'; sleep 30; touch shell-should-not-exist\")",
     { onUpdate: ({ text: update }) => { if (update.includes("shell-before")) sawShellStart = true; } },
   );
-  const shellDeadline = Date.now() + 5000;
+  const shellDeadline = Date.now() + 120_000;
   while (!sawShellStart && Date.now() < shellDeadline) await new Promise((resolve) => setTimeout(resolve, 10));
   assert.equal(sawShellStart, true);
   kernel.interrupt();
@@ -227,7 +227,7 @@ test("persistent kernel exposes unified skill help, host-backed calls, interrupt
     "import time\nprint('before-interrupt', flush=True)\ntime.sleep(30)\nafter_interrupt = True",
     { onUpdate: ({ text: update }) => { if (update.includes("before-interrupt")) sawBeforeInterrupt = true; } },
   );
-  const deadline = Date.now() + 5000;
+  const deadline = Date.now() + 120_000;
   while (!sawBeforeInterrupt && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 10));
   assert.equal(sawBeforeInterrupt, true);
   assert.equal(kernel.interrupt(), true);

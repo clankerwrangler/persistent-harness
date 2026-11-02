@@ -22,7 +22,7 @@ test("operations usage succeeds through host RPC with bounded sanitized recent a
   supervisor.store.recordUsage("usage-root", usage("private-old-entry", "old-model", 100, 10, 5), Date.now() - 8 * 24 * 60 * 60_000);
   supervisor.store.recordUsage("usage-root", usage("private-recent-entry", "recent-model", 12, 3, 0.25), Date.now() - 1_000);
 
-  const client = new HarnessClient({ socketPath, heartbeatMs: 0 });
+  const client = new HarnessClient({ requestTimeoutMs: 120_000, socketPath, heartbeatMs: 0 });
   await client.start({ registrationType: "register_client", clientInstanceId: "usage-observer" });
   t.after(() => client.stop());
   const handlers = createHostHandlers({ cwd: root, getClient: () => client });
@@ -54,7 +54,7 @@ test("operations.status exposes supervisor child capacity", async (t) => {
   });
   await supervisor.start();
   t.after(async () => { await supervisor.stop(); await rm(root, { recursive: true, force: true }); });
-  const client = new HarnessClient({ socketPath, heartbeatMs: 0 });
+  const client = new HarnessClient({ requestTimeoutMs: 120_000, socketPath, heartbeatMs: 0 });
   await client.start({ registrationType: "register_client", clientInstanceId: "capacity-observer" });
   t.after(() => client.stop());
   const handlers = createHostHandlers({ cwd: root, getClient: () => client });

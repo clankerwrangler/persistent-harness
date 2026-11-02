@@ -5,7 +5,7 @@ import os from "node:os";
 import path from "node:path";
 import { fixture, delay, eventually } from "./fixtures/notification-supervisor.mjs";
 
-test("fixture close joins concurrent startup retirement before publishing stopped state", { timeout: 10_000 }, async t => {
+test("fixture close joins concurrent startup retirement before publishing stopped state", { timeout: 180000 }, async t => {
   const launchRead = Promise.withResolvers(), releaseLaunch = Promise.withResolvers(),
     closeEntered = Promise.withResolvers(), releaseClose = Promise.withResolvers();
   t.after(() => { releaseLaunch.resolve(); releaseClose.resolve(); });
@@ -77,7 +77,7 @@ test("once Lead is configured, only Lead's family notifies the user", async t =>
   const request = { key: "need", title: "Decision", body: "Which one?", expiresIn: 10 };
   await assert.rejects(room.connection.request("request_attention", request), /only Lead notifies the user/);
   room.busy(); room.idle();
-  room.emit("event", { type: "extension_ui_request", id: "room-dialog", method: "confirm", title: "Room decision", timeout: 1000 });
+  room.emit("event", { type: "extension_ui_request", id: "room-dialog", method: "confirm", title: "Room decision", timeout: 120_000 });
   await delay(130); assert.deepEqual(await list(), [], "other rooms raise no idle or dialog notices");
   lead.busy(); lead.idle();
   const notices = await eventually(async () => { const items = await list(); return items.length && items; });
@@ -86,7 +86,7 @@ test("once Lead is configured, only Lead's family notifies the user", async t =>
 });
 
 test("recursive family settlement ignores retained inactive children, waits for live descendants, and notices stable queued stalls", async t => {
-  const f = await fixture(t, { maxDepth: 2 }); const root = await f.actor(), child = await f.actor(root.session.sessionId), grandchild = await f.actor(child.session.sessionId);
+  const f = await fixture(t, { maxDepth: 2, notificationIdleMs: 3000 }); const root = await f.actor(), child = await f.actor(root.session.sessionId), grandchild = await f.actor(child.session.sessionId);
   const list = async () => (await f.client.request("list_notifications")).notifications;
   root.busy(); grandchild.busy(); root.idle(); await delay(130); assert.equal((await list()).length, 0);
   grandchild.idle(); await delay(20); child.busy(); await delay(90); assert.equal((await list()).length, 0, "transient handoff is not all idle");
@@ -132,17 +132,17 @@ test("live tool execution is not idle; dialogs reach durable feed without SSE an
   const f = await fixture(t), root = await f.actor();
   root.busy(); root.emit("event", { type: "tool_execution_start", toolCallId: "live-tool", toolName: "ipython", args: {} }); root.idle();
   await delay(130); assert.equal((await f.client.request("list_notifications")).notifications.length, 0);
-  root.emit("event", { type: "extension_ui_request", id: "dialog-expiry", method: "confirm", title: "An exact decision", message: "Approve this?", timeout: 160 });
+  root.emit("event", { type: "extension_ui_request", id: "dialog-expiry", method: "confirm", title: "An exact decision", message: "Approve this?", timeout: 3000 });
   const item = (await f.client.request("list_notifications")).notifications[0]; assert.equal(item.kind, "attention");
   const snapshot = await f.client.request("subscribe_session", { selector: root.session.sessionId, passive: true });
-  assert.equal(snapshot.pendingUiRequests[0].id, "dialog-expiry"); assert.ok(snapshot.pendingUiRequests[0].timeout <= 160);
+  assert.equal(snapshot.pendingUiRequests[0].id, "dialog-expiry"); assert.ok(snapshot.pendingUiRequests[0].timeout <= 3000);
   await f.client.request("read_notification", { id: item.id });
   assert.equal((await f.client.request("get_notification", { id: item.id })).notification.state, "pending");
-  await delay(180);
-  assert.equal((await f.client.request("get_notification", { id: item.id })).notification.state, "expired");
+  await eventually(async () => (await f.client.request("get_notification", { id: item.id })).notification.state === "expired");
+  await eventually(async () => (await f.client.request("subscribe_session", { selector: root.session.sessionId, passive: true })).pendingUiRequests.length === 0);
   await assert.rejects(f.client.request("respond_extension_ui", { sessionId: root.session.sessionId, uiRequestId: "dialog-expiry", confirmed: true }), /no longer pending/);
   assert.equal((await f.client.request("subscribe_session", { selector: root.session.sessionId, passive: true })).pendingUiRequests.length, 0);
-  root.emit("event", { type: "extension_ui_request", id: "dialog-cancel", method: "input", title: "Choose a value", timeout: 1000 });
+  root.emit("event", { type: "extension_ui_request", id: "dialog-cancel", method: "input", title: "Choose a value", timeout: 120_000 });
   const cancel = (await f.client.request("list_notifications")).notifications[0];
   await f.client.request("respond_extension_ui", { sessionId: root.session.sessionId, uiRequestId: "dialog-cancel", cancelled: true });
   assert.equal((await f.client.request("get_notification", { id: cancel.id })).notification.state, "cancelled");

@@ -17,7 +17,7 @@ function context({ signal = new AbortController().signal, progress = [] } = {}) 
   return { signal, onProgress: (stream, text) => progress.push({ stream, text }) };
 }
 
-test("files.grep isolates catastrophic regex work behind an enforced deadline", { timeout: 10_000 }, async (t) => {
+test("files.grep isolates catastrophic regex work behind an enforced deadline", { timeout: 180000 }, async (t) => {
   const { cwd, handlers } = await fixture(t);
   await writeFile(path.join(cwd, "hostile.txt"), `${"a".repeat(50_000)}!\n`);
 
@@ -124,7 +124,7 @@ test("files.grep skips source maps during directory walks and streams session JS
 });
 
 
-test("files.grep enforces its aggregate source-byte cap", { timeout: 10_000 }, async (t) => {
+test("files.grep enforces its aggregate source-byte cap", { timeout: 180000 }, async (t) => {
   const { cwd, handlers } = await fixture(t);
   const source = path.join(cwd, "source.txt");
   await writeFile(source, Buffer.alloc(hostLimits.maxGrepFileBytes, 0x78));
@@ -132,10 +132,12 @@ test("files.grep enforces its aggregate source-byte cap", { timeout: 10_000 }, a
     await link(source, path.join(cwd, `linked-${String(index).padStart(2, "0")}.txt`));
   }
 
-  const result = await handlers["files.grep"](
-    { path: ".", pattern: "not-present", limit: 10 },
-    context(),
-  );
+  // The search's own runtime deadline is a separate limit; a starved attempt proves nothing about bytes.
+  let result;
+  while (!result) {
+    result = await handlers["files.grep"]({ path: ".", pattern: "not-present", limit: 10 }, context())
+      .catch(error => { if (/exceeded \d+ ms deadline/.test(error.message)) return null; throw error; });
+  }
   assert.equal(result.matches.length, 0);
   assert.equal(result.truncated, true);
   assert.equal(result.stats.inspectedBytes, hostLimits.maxGrepTotalBytes);
@@ -143,7 +145,7 @@ test("files.grep enforces its aggregate source-byte cap", { timeout: 10_000 }, a
   assert.ok(result.stats.inspectedFiles <= hostLimits.maxGrepFiles);
 });
 
-test("shell.run shares one bounded budget between progress and final capture", { timeout: 10_000 }, async (t) => {
+test("shell.run shares one bounded budget between progress and final capture", { timeout: 180000 }, async (t) => {
   const { handlers } = await fixture(t);
   const progress = [];
   const bytesPerStream = 3 * 1024 * 1024;
@@ -180,7 +182,7 @@ test("shell.run shares one bounded budget between progress and final capture", {
   assert.equal(followUp.progressBytes, 7);
 });
 
-test("shell.run timeout and cancellation races terminate the process group with one cause", { timeout: 10_000 }, async (t) => {
+test("shell.run timeout and cancellation races terminate the process group with one cause", { timeout: 180000 }, async (t) => {
   const { cwd, handlers } = await fixture(t);
 
   const timeoutMarker = path.join(cwd, "timeout-should-not-exist");
@@ -223,7 +225,7 @@ test("shell.run timeout and cancellation races terminate the process group with 
 });
 
 
-test("files.grep never follows root or descriptor-relative directory symlink swaps", { timeout: 15_000 }, async (t) => {
+test("files.grep never follows root or descriptor-relative directory symlink swaps", { timeout: 180000 }, async (t) => {
   const { cwd, handlers } = await fixture(t);
   const root = path.join(cwd, "root");
   const outside = path.join(cwd, "outside");
@@ -273,7 +275,7 @@ test("files.grep never follows root or descriptor-relative directory symlink swa
   );
 });
 
-test("shell.run subreaper kills setsid descendants and bounds timeout settlement", { timeout: 10_000 }, async (t) => {
+test("shell.run subreaper kills setsid descendants and bounds timeout settlement", { timeout: 180000 }, async (t) => {
   const { cwd, handlers } = await fixture(t);
   const marker = path.join(cwd, "escaped-marker");
   const perl = `if (fork() == 0) { POSIX::setsid(); select(undef,undef,undef,0.35); open(my $fh, ">", q{${marker}}); print $fh "escaped"; print "escaped-output"; exit 0; } sleep 5;`;

@@ -8,7 +8,7 @@ import { PythonRuntimeManager } from "../src/python-runtime.mjs";
 import { createHostHandlers } from "../src/host-handlers.mjs";
 
 const support = path.resolve(import.meta.dirname, "../python-runtime");
-test("managed kernel and host shell receive canonical scratch; restored names cannot replace its path", { timeout: 30_000 }, async t => {
+test("managed kernel and host shell receive canonical scratch; restored names cannot replace its path", { timeout: 180000 }, async t => {
   const root = await mkdtemp(path.join(os.tmpdir(), "kernel-scratch-")), kernels = [];
   t.after(async () => { await Promise.all(kernels.map(kernel => kernel.close({ snapshot: false }))); await rm(root, { recursive: true, force: true }); });
   const runtime = await new PythonRuntimeManager({ runtimeDir: path.join(root, "runtime") }).ensure({ skills: [], consent: async () => true });

@@ -194,7 +194,7 @@ for (const outcome of ["output", "empty", "archived_empty", "deliver", "no_findi
   await eventually(() => current().status === (empty ? "failed" : "completed"));
   if (empty) {
     assert.equal(current().error, "scheduled agent returned no visible response");
-    await assert.rejects(actor.connection.request("cron_job", { action: "report", runId: run.runId, disposition: "deliver", body: "Too late" }), /no longer evaluating/);
+    assert.throws(() => cron.reportNotification(run.runId, sessionId, { disposition: "deliver", body: "Too late" }), /no longer evaluating/);
     assert.equal(current().notificationDisposition, null);
   }
   if (outcome === "output") assert.equal(current().output, "The scheduled answer");

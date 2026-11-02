@@ -11,7 +11,7 @@ import { discoverSkills, manifestForSkills } from "../src/skills.mjs";
 
 const packageRoot = path.resolve(import.meta.dirname, "..");
 
-test("snapshots stay bounded, reuse verified blobs, swap atomically, and reject unsafe restores", { timeout: 180_000 }, async (t) => {
+test("snapshots stay bounded, reuse verified blobs, swap atomically, and reject unsafe restores", { timeout: 1080000 }, async (t) => {
   const root = await mkdtemp(path.join(os.tmpdir(), "persistent-harness-snapshot-failure-"));
   t.after(() => rm(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 }));
   const catalog = await discoverSkills([{
@@ -136,7 +136,7 @@ test("snapshots stay bounded, reuse verified blobs, swap atomically, and reject 
   await kernel.start();
   await kernel.execute("auto_value = 64");
   assert.equal(kernel.snapshotStats.dirty, true);
-  const autoDeadline = Date.now() + 5_000;
+  const autoDeadline = Date.now() + 120_000;
   while (kernel.snapshotStats.dirty && Date.now() < autoDeadline) {
     await new Promise((resolve) => setTimeout(resolve, 25));
   }

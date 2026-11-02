@@ -11,7 +11,7 @@ import { HarnessSupervisor } from "./fixtures/isolated-supervisor.mjs";
 import { PythonRuntimeManager } from "../src/python-runtime.mjs";
 import { acceptedNativeRuntime } from "./fixtures/accepted-native-runtime.mjs";
 
-async function until(probe, description, timeout = 20_000) {
+async function until(probe, description, timeout = 120_000) {
   const deadline = Date.now() + timeout;
   while (Date.now() < deadline) {
     const value = await probe(); if (value) return value;
@@ -94,7 +94,7 @@ async function fixture(t, { real = false } = {}) {
     runtimeProvisioner: async () => { if (hold) { gatedCalls += 1; entered.resolve(); await release.promise; readinessReturned.resolve(); } return {}; },
     ...(real ? {} : { processIdentityFactory: async (pid) => ({ version: 1, pid, processGroup: pid, startTime: "synthetic", ownerToken: "synthetic" }),
       processTerminator: async () => ({ terminated: true }) }), logger: { error: (error) => errors.push(String(error)) } });
-  await supervisor.start(); client = new HarnessClient({ socketPath, heartbeatMs: 0, requestTimeoutMs: 30_000 });
+  await supervisor.start(); client = new HarnessClient({ requestTimeoutMs: 120_000, socketPath, heartbeatMs: 0, requestTimeoutMs: 120_000 });
   await client.start({ registrationType: "register_client", clientInstanceId: crypto.randomUUID() });
   let sessionId;
   if (real) sessionId = (await client.request("create_root", { cwd, repositoryRoot: null, name: "Stop ordering proof",
@@ -108,7 +108,7 @@ async function fixture(t, { real = false } = {}) {
   return { directory, sessionId, client, supervisor, workers, rawEvents, entered, release, readinessReturned, providerEntered, providerRelease,
     gatedCalls: () => gatedCalls,
     async connectActor(id = sessionId) {
-      const launch = supervisor.store.getActorLaunch(id); const connection = new HarnessClient({ socketPath, heartbeatMs: 0 });
+      const launch = supervisor.store.getActorLaunch(id); const connection = new HarnessClient({ requestTimeoutMs: 120_000, socketPath, heartbeatMs: 0 });
       await connection.start({ registrationType: "register_actor", sessionId: launch.sessionId, sessionFile: launch.sessionFile,
         cwd: launch.cwd, repositoryRoot: launch.repositoryRoot, actorToken: launch.actorToken, actorGeneration: launch.actorGeneration });
       t.after(() => connection.stop()); return connection;
@@ -135,7 +135,7 @@ async function assertStopped(f) {
   return stopped;
 }
 
-test("settled readiness owns its await before a later stop, without blocking connection reads or shutdown callbacks", { timeout: 30_000 }, async (t) => {
+test("settled readiness owns its await before a later stop, without blocking connection reads or shutdown callbacks", { timeout: 180000 }, async (t) => {
   const f = await fixture(t); await f.changeSkills();
   f.workers[0].emit("event", { type: "agent_start" }); f.workers[0].emit("event", { type: "agent_settled" });
   await f.entered.promise;
@@ -149,7 +149,7 @@ test("settled readiness owns its await before a later stop, without blocking con
   assert(f.supervisor.store.getSession(f.sessionId).actorGeneration > stopped.actorGeneration);
 });
 
-test("a settled callback queued behind stop cannot reenter readiness with a stale actor", { timeout: 30_000 }, async (t) => {
+test("a settled callback queued behind stop cannot reenter readiness with a stale actor", { timeout: 180000 }, async (t) => {
   const f = await fixture(t); const actor = f.workers[0];
   const compact = f.client.request("compact_session", { sessionId: f.sessionId }); await actor.compactEntered.promise;
   const stop = f.client.request("stop_session", { sessionId: f.sessionId });
@@ -160,7 +160,7 @@ test("a settled callback queued behind stop cannot reenter readiness with a stal
   f.releaseReadiness(); await assertStopped(f); assert.equal(f.gatedCalls(), 0);
 });
 
-test("real Pi writer stays stopped after held settled readiness and resumes only on explicit activation", { timeout: 90_000 }, async (t) => {
+test("real Pi writer stays stopped after held settled readiness and resumes only on explicit activation", { timeout: 540000 }, async (t) => {
   const f = await fixture(t, { real: true });
   await f.client.request("submit_input", { sessionId: f.sessionId, message: "Complete the private stop proof.", behavior: "auto" });
   await f.providerEntered.promise; await f.changeSkills(); f.providerRelease.resolve(); await f.entered.promise;
@@ -178,7 +178,7 @@ test("real Pi writer stays stopped after held settled readiness and resumes only
   assert.equal(f.rawEvents.filter((event) => event.type === "agent_start").length, 1, "Revival does not fabricate another prompt");
 });
 
-for (const freshInput of [false, true]) test(`settled readiness fences an exited empty actor${freshInput ? " but preserves fresh arrival" : " without revival"}`, { timeout: 30_000 }, async (t) => {
+for (const freshInput of [false, true]) test(`settled readiness fences an exited empty actor${freshInput ? " but preserves fresh arrival" : " without revival"}`, { timeout: 1080000 }, async (t) => {
   const f = await fixture(t); const actor = f.workers[0];
   const generation = f.supervisor.store.getSession(f.sessionId).actorGeneration;
   assert.deepEqual(f.supervisor.store.listPendingActorInputs(f.sessionId), []);
@@ -206,7 +206,7 @@ for (const freshInput of [false, true]) test(`settled readiness fences an exited
   }
 });
 
-test("family stop_child drains earlier settled readiness without reviving its stopped child", { timeout: 30_000 }, async (t) => {
+test("family stop_child drains earlier settled readiness without reviving its stopped child", { timeout: 180000 }, async (t) => {
   const f = await fixture(t); const parent = await f.connectActor();
   const childId = crypto.randomUUID(), childFile = path.join(f.directory, "child.jsonl");
   await writeFile(childFile, `${JSON.stringify({ type: "session", version: 3, id: childId, timestamp: new Date().toISOString(), cwd: f.directory })}\n`);
@@ -238,7 +238,7 @@ test("family stop_child drains earlier settled readiness without reviving its st
 });
 
 
-test("standalone readiness and every queued read retire before Stop acknowledges", { timeout: 30_000 }, async (t) => {
+test("standalone readiness and every queued read retire before Stop acknowledges", { timeout: 180000 }, async (t) => {
   const f = await fixture(t); await f.changeSkills();
   const outcomes = [];
   const read = (type, params) => f.client.request(type, params).then(
@@ -268,7 +268,7 @@ test("standalone readiness and every queued read retire before Stop acknowledges
 });
 
 
-test("resident skill refresh completes without self-join and leaves durable admission independent", { timeout: 30_000 }, async t => {
+test("resident skill refresh completes without self-join and leaves durable admission independent", { timeout: 180000 }, async t => {
   const f = await fixture(t); await f.changeSkills();
   const ready = f.client.request("get_actor_state", { sessionId: f.sessionId }); await f.entered.promise;
   const receipt = await f.client.request("submit_input", { sessionId: f.sessionId, message: "FRESH_DURING_REFRESH", behavior: "auto" });

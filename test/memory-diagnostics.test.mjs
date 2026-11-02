@@ -200,7 +200,7 @@ test("operator diagnostics skip absent actors, preserve state and bypass held mu
     actorFactory:o=>{const a=new MemoryActor(o);actors.push(a);return a;},
     processIdentityFactory:async pid=>({version:1,pid,processGroup:pid,startTime:"fake",ownerToken:"fake"}),processTerminator:async()=>({}),logger:{error(){}}});
   await supervisor.start();
-  const client=new HarnessClient({socketPath:supervisor.socketPath,heartbeatMs:0});
+  const client=new HarnessClient({requestTimeoutMs:120_000,socketPath:supervisor.socketPath,heartbeatMs:0});
   t.after(async()=>{held?.resolve();await client.stop();await supervisor.stop();await rm(root,{recursive:true,force:true});});
   supervisor.store.createRoot({sessionId:"memory-root",sessionFile:file,cwd:root,repositoryRoot:null,name:"Memory",actorToken:"fixture",launch:{}});
   await client.start({registrationType:"register_client",clientInstanceId:"memory-test"});
@@ -215,7 +215,7 @@ test("operator diagnostics skip absent actors, preserve state and bypass held mu
   assert.deepEqual(supervisor.store.getSession("memory-root"),before);
   await client.request("subscribe_session",{selector:"memory-root"});
   const actor=actors[0];
-  const actorClient=new HarnessClient({socketPath:supervisor.socketPath,heartbeatMs:0});
+  const actorClient=new HarnessClient({requestTimeoutMs:120_000,socketPath:supervisor.socketPath,heartbeatMs:0});
   try {
     const current=supervisor.store.getSession("memory-root");
     await actorClient.start({registrationType:"register_actor",sessionId:"memory-root",sessionFile:file,cwd:root,repositoryRoot:null,actorToken:"fixture",actorGeneration:current.actorGeneration});

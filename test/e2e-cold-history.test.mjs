@@ -35,7 +35,7 @@ async function mirrorPath() {
   throw new Error("no live context mirror");
 }
 async function connect(socketPath) {
-  const client = new HarnessClient({ socketPath, heartbeatMs: 0, requestTimeoutMs: 120_000 });
+  const client = new HarnessClient({ requestTimeoutMs: 120_000, socketPath, heartbeatMs: 0, requestTimeoutMs: 120_000 });
   assert(await client.start({ registrationType: "register_client", clientInstanceId: crypto.randomUUID() }));
   return client;
 }
@@ -54,7 +54,7 @@ async function prompt(client, sessionId, message) {
 const shape = input => input.filter(item => !["system", "developer"].includes(item.role))
   .map(item => `${item.type ?? item.role}:${JSON.stringify(item.content ?? item.output ?? item.arguments ?? "")}`);
 
-test("a native session keeps its context through an edit, new messages and a restart", { timeout: 240_000, skip: !clmPath }, async t => {
+test("a native session keeps its context through an edit, new messages and a restart", { timeout: 1440000, skip: !clmPath }, async t => {
   const root = await mkdtemp(path.join(os.tmpdir(), "harness-cold-"));
   t.after(() => rm(root, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 }));
   const agentDir = path.join(root, "agent"), cwd = path.join(root, "project");

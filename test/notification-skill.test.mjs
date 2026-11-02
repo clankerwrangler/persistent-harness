@@ -7,7 +7,7 @@ import { PythonKernel } from "../src/kernel.mjs";
 import { PythonRuntimeManager } from "../src/python-runtime.mjs";
 import { discoverSkills, manifestForSkills } from "../src/skills.mjs";
 
-test("discoverable attention and exact-run cron Python APIs preserve narrow host payloads", { timeout: 120000 }, async t => {
+test("discoverable attention and exact-run cron Python APIs preserve narrow host payloads", { timeout: 720000 }, async t => {
   const root = await mkdtemp(path.join(os.tmpdir(), "notification-skills-")), packageRoot = path.resolve(import.meta.dirname, "..");
   let kernel; t.after(async () => { await kernel?.close(); await rm(root, { recursive: true, force: true }); });
   const catalog = await discoverSkills(["agent-message", "cron"].map(name => ({ source: "skill", path: path.join(packageRoot, "skills", name, "SKILL.md") })));

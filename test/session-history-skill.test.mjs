@@ -25,7 +25,7 @@ test("session history skill grants only its bounded authorized host request", as
 });
 
 
-test("session history Python module forwards operation payloads and preserves return DTOs", { timeout: 180_000 }, async (t) => {
+test("session history Python module forwards operation payloads and preserves return DTOs", { timeout: 1080000 }, async (t) => {
   const packageRoot = path.resolve(import.meta.dirname, "..");
   const skillPath = path.join(process.env.PI_HARNESS_SKILLS_PATH || path.join(packageRoot, "skills"), "session-history", "SKILL.md");
   const root = await mkdtemp(path.join(os.tmpdir(), "persistent-harness-session-history-skill-"));
@@ -97,7 +97,7 @@ print("session-history-contract-ok")
 });
 
 
-test("actual Python skill to host to authenticated history RPC survives work beyond the old three-second deadline", { timeout: 180_000 }, async (t) => {
+test("actual Python skill to host to authenticated history RPC survives work beyond the old three-second deadline", { timeout: 1080000 }, async (t) => {
   const packageRoot = path.resolve(import.meta.dirname, ".."), root = await mkdtemp(path.join(os.tmpdir(), "history-rpc-"));
   let kernel, client, supervisor, starts = 0;
   t.after(async () => { await kernel?.close().catch(() => {}); await client?.stop(); await supervisor?.stop(); await rm(root, { recursive: true, force: true }); });

@@ -450,6 +450,7 @@ export class HarnessSupervisor {
   #inboxStore;
   #inboxServer;
   #backgroundCompletionMonitor;
+  get backgroundScans() { return this.#backgroundCompletionMonitor?.completedScans ?? 0; }
   #autoTitleInflight = new Map();
   #notifications;
   #notificationTimer;
@@ -740,7 +741,7 @@ export class HarnessSupervisor {
       if (!state.subscriptions.has(params.sessionId)) throw requestFailure("stale_ui_request", "client is not subscribed to the pending action request");
       const key = `${params.sessionId}\0${params.uiRequestId}`; const pending = this.#extensionUiRequests.get(key);
       const actor = this.#actors.get(params.sessionId);
-      if (!pending || !actor || !actor.worker.isRunning || actor.generation !== pending.generation) {
+      if (!pending || pending.expiresAt <= Date.now() || !actor || !actor.worker.isRunning || actor.generation !== pending.generation) {
         throw requestFailure("stale_ui_request", "the action request is no longer pending on this actor generation");
       }
       return { continuationOwner: pending, run: () => {
@@ -1169,13 +1170,14 @@ export class HarnessSupervisor {
   }
 
   async #tryScratchCleanup(rootId, processRoots) {
-    if (!processRoots.has(rootId)) return;
     try {
       const record = this.store.getRootScratch(rootId);
       if (record?.state !== "deleting") return;
       const family = this.store.getSessionSubtree(rootId);
       if (family.some(session => session.lifecycle !== "deleted" || this.#actors.get(session.sessionId)?.worker.isRunning)) return;
+      // Runs even without a process proof: it also pins job identities, which must not wait for a clean /proc sample.
       if (!await this.#backgroundCompletionMonitor?.areSessionsQuiescent(family.map(session => session.sessionId))) return;
+      if (!processRoots.has(rootId)) return;
       reclaimSessionScratch(this.store, rootId, this.scratchDirectory);
     } catch {
       // The tombstone and durable intent survive path changes, I/O errors, and restarts.

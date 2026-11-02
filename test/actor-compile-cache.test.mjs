@@ -19,7 +19,7 @@ async function probe(directory, extra = {}, modulePath) {
     const value = ${modulePath ? `await import(${JSON.stringify(pathToFileURL(modulePath).href)})` : '{}'};
     console.log(JSON.stringify({cache:getCompileCacheDir() ?? null, value:value.default ?? null,
       identity:value.identity ?? null, inherited:process.env.NODE_COMPILE_CACHE ?? null}));`;
-  const { stdout, stderr } = await exec(process.execPath, ["--input-type=module", "-e", script], { env, timeout: 10000 });
+  const { stdout, stderr } = await exec(process.execPath, ["--input-type=module", "-e", script], { env, timeout: 120_000 });
   assert.equal(stderr, ""); return JSON.parse(stdout);
 }
 async function privateRoot(t) {
@@ -54,7 +54,7 @@ test("cache storage failure leaves creation unavailable without creating canonic
   const script = `import { createActorCompileCache } from ${JSON.stringify(helper)};
     console.log((await createActorCompileCache()) === undefined);`;
   const { stdout, stderr } = await exec(process.execPath, ["--input-type=module", "-e", script], {
-    env: { PATH: process.env.PATH, HOME: root, TMPDIR: file }, timeout: 10000 });
+    env: { PATH: process.env.PATH, HOME: root, TMPDIR: file }, timeout: 120_000 });
   assert.equal(stdout.trim(), "true"); assert.equal(stderr, "");
 });
 

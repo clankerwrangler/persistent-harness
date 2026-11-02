@@ -8,7 +8,7 @@ import { CronScheduler, cronOriginPrompt } from "../src/cron-scheduler.mjs";
 import { CronStore } from "../src/cron-store.mjs";
 import { HarnessStore } from "../src/store.mjs";
 
-async function eventually(predicate, timeout = 2000) {
+async function eventually(predicate, timeout = 120_000) {
   const deadline = Date.now() + timeout;
   while (Date.now() < deadline) { const value = predicate(); if (value) return value; await new Promise((resolve) => setTimeout(resolve, 10)); }
   throw new Error("condition not reached");

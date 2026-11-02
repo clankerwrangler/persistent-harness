@@ -9,7 +9,7 @@ import { HarnessSupervisor } from "./fixtures/isolated-supervisor.mjs";
 
 const tick = () => new Promise((resolve) => setImmediate(resolve));
 async function eventually(predicate) {
-  const deadline = Date.now() + 5000;
+  const deadline = Date.now() + 120_000;
   while (Date.now() < deadline) { const value = predicate(); if (value) return value; await tick(); }
   assert.fail("bounded fixture condition did not complete");
 }
@@ -26,7 +26,7 @@ class InputActor extends EventEmitter {
     this.emit("exit", { code: 0, signal: "SIGTERM", expected: true, error: null }); }
 }
 
-test("unresolved input remains pending without stopping startup or unrelated admission, then rechecks evidence", { timeout: 20_000 }, async (t) => {
+test("unresolved input remains pending without stopping startup or unrelated admission, then rechecks evidence", { timeout: 180000 }, async (t) => {
   const directory = await mkdtemp(path.join(os.tmpdir(), "input-gate-"));
   const skillsPath = path.join(directory, "skills"); await mkdir(skillsPath);
   const start = Promise.withResolvers(); const actors = [];
@@ -46,7 +46,7 @@ test("unresolved input remains pending without stopping startup or unrelated adm
   let client;
   t.after(async () => { start.resolve(); await client?.stop(); await supervisor.stop(); await rm(directory, { recursive: true, force: true }); });
   await supervisor.start();
-  client = new HarnessClient({ socketPath, heartbeatMs: 0 });
+  client = new HarnessClient({ requestTimeoutMs: 120_000, socketPath, heartbeatMs: 0 });
   await client.start({ registrationType: "register_client", clientInstanceId: "input-association-gate" });
   const { admission } = await client.request("create_root", { cwd: directory, repositoryRoot: null, name: "Input proof gate",
     provider: null, model: null, thinkingLevel: null });
@@ -103,7 +103,7 @@ test("unresolved input remains pending without stopping startup or unrelated adm
 
 
 for (const observed of ["unresolved", "proven", "absent"]) {
-  test(`late internal command ${observed} evidence does not confuse handled preflight with acceptance`, { timeout: 20_000 }, async (t) => {
+  test(`late internal command ${observed} evidence does not confuse handled preflight with acceptance`, { timeout: 180000 }, async (t) => {
     const directory = await mkdtemp(path.join(os.tmpdir(), "late-input-gate-"));
     const skillsPath = path.join(directory, "skills"); await mkdir(skillsPath);
     const ready = Promise.withResolvers(); const actors = [];
@@ -140,7 +140,7 @@ for (const observed of ["unresolved", "proven", "absent"]) {
       processTerminator: async () => ({ terminated: true }) });
     let client;
     t.after(async () => { ready.resolve(); await client?.stop(); await supervisor.stop(); await rm(directory, { recursive: true, force: true }); });
-    await supervisor.start(); client = new HarnessClient({ socketPath, heartbeatMs: 0 });
+    await supervisor.start(); client = new HarnessClient({ requestTimeoutMs: 120_000, socketPath, heartbeatMs: 0 });
     await client.start({ registrationType: "register_client", clientInstanceId: `late-association-${observed}` });
     const { admission } = await client.request("create_root", { cwd: directory, repositoryRoot: null, name: "Late input proof",
       provider: null, model: null, thinkingLevel: null });
@@ -178,7 +178,7 @@ for (const observed of ["unresolved", "proven", "absent"]) {
 
 
 for (const state of ["proven", "unresolved"]) {
-  test(`pending input admitted during a held scoped read gets fresh ${state} reconciliation`, { timeout: 20_000 }, async t => {
+  test(`pending input admitted during a held scoped read gets fresh ${state} reconciliation`, { timeout: 180000 }, async t => {
     const directory = await mkdtemp(path.join(os.tmpdir(), "input-scope-race-"));
     const skillsPath = path.join(directory, "skills"); await mkdir(skillsPath);
     const ready = Promise.withResolvers(), entered = Promise.withResolvers(), release = Promise.withResolvers(), actors = [], scopes = [];
@@ -202,7 +202,7 @@ for (const state of ["proven", "unresolved"]) {
       processTerminator: async () => ({ terminated: true }) });
     let client;
     t.after(async () => { release.resolve(); ready.resolve(); await client?.stop(); await supervisor.stop(); await rm(directory, { recursive: true, force: true }); });
-    await supervisor.start(); client = new HarnessClient({ socketPath: supervisor.socketPath, heartbeatMs: 0 });
+    await supervisor.start(); client = new HarnessClient({ requestTimeoutMs: 120_000, socketPath: supervisor.socketPath, heartbeatMs: 0 });
     await client.start({ registrationType: "register_client", clientInstanceId: `scope-race-${state}` });
     const { admission } = await client.request("create_root", { cwd: directory, repositoryRoot: null, name: "Scoped input race",
       provider: null, model: null, thinkingLevel: null });

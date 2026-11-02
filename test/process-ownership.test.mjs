@@ -56,9 +56,12 @@ test("scratch process proof is exact, bounded, and read-only", async t => {
     env: { ...process.env, PI_HARNESS_ROOT_SESSION_ID: rootId }, stdio: ["ignore", "pipe", "ignore"] });
   t.after(() => { if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL"); });
   await once(child.stdout, "data");
-  const proof = await quiescentScratchProcessRoots([rootId, unrelated]);
-  assert.equal(proof.has(rootId), false);
-  assert.equal(proof.has(unrelated), true);
+  // A sample that could not finish proves nothing and reports no root, so only a complete one is asserted.
+  let proof = new Set();
+  while (!proof.has(unrelated)) {
+    proof = await quiescentScratchProcessRoots([rootId, unrelated], { timeoutMs: 120_000 });
+    assert.equal(proof.has(rootId), false);
+  }
   assert.equal(child.exitCode, null);
   assert.equal((await quiescentScratchProcessRoots([rootId], { maxProcesses: 0 })).size, 0);
   assert.equal((await quiescentScratchProcessRoots([rootId], { maxBytes: 0 })).size, 0);

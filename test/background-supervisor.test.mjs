@@ -15,7 +15,7 @@ import { actorInputCustomPayload } from "../src/extension.mjs";
 class FakeActor extends EventEmitter {
   constructor(options) { super(); this.session = options.session; this.env = options.env; this.pid = process.pid; this.isRunning = false; this.submits = []; this.connection = null; }
   async start() {
-    this.connection = new HarnessClient({ socketPath: this.env.PI_HARNESS_SOCKET, heartbeatMs: 0 });
+    this.connection = new HarnessClient({ requestTimeoutMs: 120_000, socketPath: this.env.PI_HARNESS_SOCKET, heartbeatMs: 0 });
     await this.connection.start({ registrationType: "register_actor", sessionId: this.session.sessionId, sessionFile: this.session.sessionFile,
       cwd: this.session.cwd, repositoryRoot: this.session.repositoryRoot, actorToken: this.session.actorToken, actorGeneration: this.session.actorGeneration });
     this.isRunning = true;
@@ -41,7 +41,7 @@ class FakeActor extends EventEmitter {
   async close() { this.isRunning = false; await this.connection?.stop(); }
 }
 
-async function eventually(fn, timeoutMs = 3000) {
+async function eventually(fn, timeoutMs = 120_000) {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) { if (await fn()) return; await new Promise((resolve) => setTimeout(resolve, 10)); }
   throw new Error("condition did not become true");
@@ -73,7 +73,7 @@ test("Python background launch reaches the owning actor as one durable automatic
   await writeFile(sessionFile, `${JSON.stringify({ type: "session", version: 3, id: "owner", timestamp: new Date().toISOString(), cwd: root })}\n`);
   supervisor.store.createRoot({ sessionId: "owner", sessionFile, cwd: root, repositoryRoot: null,
     name: "Owner", actorToken: "owner-token", launch: {} }, 1);
-  const client = new HarnessClient({ socketPath, heartbeatMs: 0 });
+  const client = new HarnessClient({ requestTimeoutMs: 120_000, socketPath, heartbeatMs: 0 });
   await client.start({ registrationType: "register_client", clientInstanceId: "background-presentation" });
   t.after(() => client.stop());
   const waiting = [];
@@ -97,7 +97,7 @@ print(json.dumps(asyncio.run(harness_background.run(
       PYTHONPATH: path.join(process.env.PI_HARNESS_SKILLS_PATH || path.resolve(import.meta.dirname, "../skills"), "background", "src"),
       PYTHONDONTWRITEBYTECODE: "1",
     },
-    timeout: 10_000,
+    timeout: 120_000,
     maxBuffer: 64 * 1024,
   });
   const launched = JSON.parse(stdout);
@@ -171,7 +171,7 @@ test("cold background owners do not block completion enqueue, publication, or st
   });
   await mkdir(path.join(root, "skills")); await supervisor.start();
   t.after(async () => { gate.resolve(); await supervisor.stop(); await rm(root, { recursive: true, force: true }); });
-  const client = new HarnessClient({ socketPath: supervisor.socketPath, heartbeatMs: 0 });
+  const client = new HarnessClient({ requestTimeoutMs: 120_000, socketPath: supervisor.socketPath, heartbeatMs: 0 });
   await client.start({ registrationType: "register_client", clientInstanceId: "background-cold-owners" }); t.after(() => client.stop());
   client.on("event", frame => {
     const message = frame.event === "input_state" ? frame.data.message : frame.data?.event?.type === "input_state" ? frame.data.event.message : null;

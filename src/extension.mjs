@@ -943,6 +943,7 @@ ${catalog.diagnostics.map((item) => item.error).join("\n")}`);
   function waitForActorRegistration(activeClient, signal) {
     signal?.throwIfAborted();
     if (activeClient.isConnected && activeClient.connectedSession) return Promise.resolve();
+    if (activeClient.terminalState) return Promise.reject(new Error(`actor input delivery registration ${activeClient.terminalState}`));
     return new Promise((resolve, reject) => {
       let settled = false;
       const finish = (error) => {

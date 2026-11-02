@@ -148,6 +148,7 @@ test("the installed Pi SDK generates through a configured provider without creat
   } } }));
   const calls = [];
   const generate = createRootTitleGenerator({
+    timeoutMs: 120_000,
     modelRuntimeFactory: (options) => createPiModelRuntime({ ...options, authPath, modelsPath }),
     fetchImpl: async (url, options) => {
       calls.push({ url: String(url), body: JSON.parse(options.body) });

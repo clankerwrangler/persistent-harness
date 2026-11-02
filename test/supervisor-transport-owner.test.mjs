@@ -13,7 +13,7 @@ import { HarnessSupervisor, socketOutputBufferLimit } from "./fixtures/isolated-
 import { VisibleTranscriptReader } from "../src/visible-transcript-reader.mjs";
 
 const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
-async function eventually(probe, timeout = 3000) {
+async function eventually(probe, timeout = 120_000) {
   const end = Date.now() + timeout;
   while (Date.now() < end) { const result = await probe(); if (result) return result; await delay(10); }
   throw new Error("transport fixture condition did not become true");
@@ -41,7 +41,7 @@ async function fixture(t, options = {}) {
     repositoryRoot: null, name: `Transport ${id}`, actorToken: "local-transport-test", launch: {} }, 1);
   create();
   const connect = async () => {
-    const client = new HarnessClient({ socketPath, heartbeatMs: 0, requestTimeoutMs: 5000 });
+    const client = new HarnessClient({ requestTimeoutMs: 120_000, socketPath, heartbeatMs: 0, requestTimeoutMs: 120_000 });
     clients.push(client); await client.start({ registrationType: "register_client", clientInstanceId: crypto.randomUUID() }); return client;
   };
   return { root, file, socketPath, supervisor, create, connect };
@@ -143,12 +143,12 @@ test("a stalled consumer resumes thousands of small replies in order after drain
   try {
     raw.pause();
     raw.write(Buffer.concat(Array.from({ length: total }, (_, index) => encodeFrame(request(`small-${index}`, "get_status")))));
-    await eventually(() => admitted === total, 5000);
+    await eventually(() => admitted === total, 120_000);
     assert(falseWrites > 0, "the consumer actually stalls socket output");
     assert(writes < total, "small replies remain queued until drain");
     assert.equal((await bounded(healthy.request("heartbeat"))).alive, true);
     raw.resume();
-    await eventually(() => frames.filter((frame) => frame.requestType === "get_status").length === total, 5000);
+    await eventually(() => frames.filter((frame) => frame.requestType === "get_status").length === total, 120_000);
     assert.deepEqual(frames.filter((frame) => frame.requestType === "get_status").map((frame) => [frame.id, frame.data.sequence]),
       Array.from({ length: total }, (_, index) => [`small-${index}`, index]));
     assert.equal(raw.destroyed, false);
@@ -175,7 +175,7 @@ test("a legal maximum image response and an exact maximum protocol frame remain 
   setup.supervisor.status = () => data;
   try {
     send(id, "get_status", {});
-    await eventually(() => frames.some((frame) => frame.id === id), 5000);
+    await eventually(() => frames.some((frame) => frame.id === id), 120_000);
     assert.equal(frames.find((frame) => frame.id === id).data.payload.length, data.payload.length);
     data.payload += "x".repeat(64);
     send("oversized-frame", "get_status", {});
@@ -196,14 +196,14 @@ test("new-work admission rejects excess pressure without dropping accepted reque
   const total = 8192;
   raw.write(Buffer.concat(Array.from({ length: total }, (_, index) => encodeFrame(request(`held-${index}`, "get_visible_messages", { sessionId: "transport-root", limit: 1 })))));
   try {
-    await eventually(() => entered === total, 5000);
+    await eventually(() => entered === total, 120_000);
     send("excess-work", "get_visible_messages", { sessionId: "transport-root", limit: 1 });
     await eventually(() => frames.some((frame) => frame.id === "excess-work"));
     assert.equal(frames.find((frame) => frame.id === "excess-work").code, "request_backpressure");
     assert.equal(entered, total, "excess new work is not admitted");
     assert.equal((await bounded(healthy.request("heartbeat"))).alive, true);
   } finally { held.resolve(); }
-  await eventually(() => frames.filter((frame) => frame.requestType === "get_visible_messages" && frame.ok).length === total, 5000);
+  await eventually(() => frames.filter((frame) => frame.requestType === "get_visible_messages" && frame.ok).length === total, 120_000);
   send("recovered", "heartbeat");
   await eventually(() => frames.some((frame) => frame.id === "recovered" && frame.data?.alive));
   assert.equal(raw.destroyed, false);

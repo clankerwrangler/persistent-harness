@@ -34,7 +34,7 @@ test("session history is actor-only, family-scoped, and never starts a transcrip
     supervisor.store.createRoot({ sessionId, sessionFile: path.join(root, `${sessionId}.jsonl`), cwd: root,
       repositoryRoot: null, name: sessionId, actorToken: token, launch }, now);
   }
-  const actor = new HarnessClient({ socketPath: supervisor.socketPath, heartbeatMs: 0 });
+  const actor = new HarnessClient({ requestTimeoutMs: 120_000, socketPath: supervisor.socketPath, heartbeatMs: 0 });
   await actor.start({ registrationType: "register_actor", sessionId: "root-a", sessionFile: path.join(root, "root-a.jsonl"),
     cwd: root, repositoryRoot: null, actorToken: "token-a", actorGeneration: 1 });
   t.after(() => actor.stop());
@@ -63,7 +63,7 @@ test("session history is actor-only, family-scoped, and never starts a transcrip
     sessionId: "child-a", sessionFile: path.join(root, "child-a.jsonl"), actorToken: "token-c",
     policy: { ...launch, name: "child-a", prompt: "task", cwd: root, repositoryRoot: null, depth: 1 }, now: 25,
   });
-  const child = new HarnessClient({ socketPath: supervisor.socketPath, heartbeatMs: 0 });
+  const child = new HarnessClient({ requestTimeoutMs: 120_000, socketPath: supervisor.socketPath, heartbeatMs: 0 });
   await child.start({ registrationType: "register_actor", sessionId: "child-a", sessionFile: path.join(root, "child-a.jsonl"),
     cwd: root, repositoryRoot: null, actorToken: "token-c", actorGeneration: 1 });
   t.after(() => child.stop());
@@ -83,7 +83,7 @@ test("session history is actor-only, family-scoped, and never starts a transcrip
     includeDeleted: true, includeCurrent: false, limit: 20 });
   assert.equal(deleted.results[0].deleted, true); assert.equal(deleted.results[0].name, "root-b");
 
-  const browser = new HarnessClient({ socketPath: supervisor.socketPath, heartbeatMs: 0 });
+  const browser = new HarnessClient({ requestTimeoutMs: 120_000, socketPath: supervisor.socketPath, heartbeatMs: 0 });
   await browser.start({ registrationType: "register_client", clientInstanceId: "browser" }); t.after(() => browser.stop());
   await assert.rejects(browser.request("session_history", { operation: "list", kind: "any",
     includeDeleted: false, includeCurrent: false, limit: 20 }), /not available to clients/);
@@ -115,7 +115,7 @@ test("real actor history search finds and opens retained canonical JSONL without
     name: "root-a", actorToken: "token-a", launch }, 1);
   supervisor.store.createRoot({ sessionId: "root-b", sessionFile: fileB, cwd: root, repositoryRoot: null,
     name: "Past rollback", actorToken: "token-b", launch }, 2);
-  const actor = new HarnessClient({ socketPath, heartbeatMs: 0 });
+  const actor = new HarnessClient({ requestTimeoutMs: 120_000, socketPath, heartbeatMs: 0 });
   await actor.start({ registrationType: "register_actor", sessionId: "root-a", sessionFile: fileA, cwd: root,
     repositoryRoot: null, actorToken: "token-a", actorGeneration: 1 }); t.after(() => actor.stop());
 
@@ -155,7 +155,7 @@ test("a derived search-index startup failure degrades only session history", asy
   assert.equal(started.running, true);
   assert(started.diagnostics.some((item) => item.code === "session_history_unavailable"));
   assert.match(errors[0], /injected derived failure/);
-  const client = new HarnessClient({ socketPath: supervisor.socketPath, heartbeatMs: 0 });
+  const client = new HarnessClient({ requestTimeoutMs: 120_000, socketPath: supervisor.socketPath, heartbeatMs: 0 });
   await client.start({ registrationType: "register_client", clientInstanceId: "healthy" }); t.after(() => client.stop());
   assert.equal((await client.request("get_status")).running, true);
 });
@@ -177,7 +177,7 @@ test("derived runtime and close failures are generic to agents and never mask co
     supervisor.store.createRoot({ sessionId, sessionFile: path.join(root, `${sessionId}.jsonl`), cwd: root,
       repositoryRoot: null, name: sessionId, actorToken: token, launch }, now);
   }
-  const actor = new HarnessClient({ socketPath: supervisor.socketPath, heartbeatMs: 0 });
+  const actor = new HarnessClient({ requestTimeoutMs: 120_000, socketPath: supervisor.socketPath, heartbeatMs: 0 });
   await actor.start({ registrationType: "register_actor", sessionId: "root-a", sessionFile: path.join(root, "root-a.jsonl"),
     cwd: root, repositoryRoot: null, actorToken: "token-a", actorGeneration: 1 }); t.after(() => actor.stop());
   await assert.rejects(actor.request("session_history", { operation: "search", refresh: true, query: "anything", kind: "any",
@@ -204,7 +204,7 @@ async function ownedHistoryFixture(t, index, options = {}) {
   for (const id of ["caller-a", "caller-b", "target"]) supervisor.store.createRoot({ sessionId: id, sessionFile: path.join(root, `${id}.jsonl`),
     cwd: root, repositoryRoot: null, name: id, actorToken: `token-${id}`, launch }, 1);
   for (const id of ["caller-a", "caller-b"]) {
-    const client = new HarnessClient({ socketPath: supervisor.socketPath, heartbeatMs: 0 }); clients.push(client);
+    const client = new HarnessClient({ requestTimeoutMs: 120_000, socketPath: supervisor.socketPath, heartbeatMs: 0 }); clients.push(client);
     await client.start({ registrationType: "register_actor", sessionId: id, sessionFile: path.join(root, `${id}.jsonl`),
       cwd: root, repositoryRoot: null, actorToken: `token-${id}`, actorGeneration: 1 });
   }
@@ -619,10 +619,10 @@ test("the shared supervisor reader preserves UI, indexed citations and refresh u
     await writeFile(observerFile, JSON.stringify({ type: "session", id: "observer", version: 3 }) + "\n");
     for (const [sessionId, sessionFile] of [["past", file], ["observer", observerFile]]) supervisor.store.createRoot({
       sessionId, sessionFile, cwd: root, repositoryRoot: null, name: sessionId, actorToken: `token-${sessionId}`, launch }, 1);
-    const actor = new HarnessClient({ socketPath: supervisor.socketPath, heartbeatMs: 0 });
+    const actor = new HarnessClient({ requestTimeoutMs: 120_000, socketPath: supervisor.socketPath, heartbeatMs: 0 });
     await actor.start({ registrationType: "register_actor", sessionId: "observer", sessionFile: observerFile,
       cwd: root, repositoryRoot: null, actorToken: "token-observer", actorGeneration: 1 }); t.after(() => actor.stop());
-    const browser = new HarnessClient({ socketPath: supervisor.socketPath, heartbeatMs: 0 });
+    const browser = new HarnessClient({ requestTimeoutMs: 120_000, socketPath: supervisor.socketPath, heartbeatMs: 0 });
     await browser.start({ registrationType: "register_client", clientInstanceId: "cache-ui" }); t.after(() => browser.stop());
     const visible = await browser.request("get_visible_messages", { sessionId: "past" });
     assert.equal(visible.messages.at(-1).text, frames[2].message.content[0].text);

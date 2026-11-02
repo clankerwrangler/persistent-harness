@@ -1,7 +1,7 @@
 ---------------------------- MODULE SessionFastMode ----------------------------
 \* Sources:
 \*   src/fast-mode.mjs sha256:497e7699c395663ebff315b0244e14f06b43b46885823a8d0c42cccc63d71554
-\*   src/extension.mjs sha256:b7e3c99b2fc52d58d7d051eb9b7cda86334f0d577716d8608d0dac9a50da5d60
+\*   src/extension.mjs sha256:4e0a4af856612e6feeb3756f57c4e4aef9688bce5442b85f1199c7e5a49aa33d
 \*   src/actor-coordinator.mjs sha256:d33d75f88913edccec70c1cc2df0391a3e909d958f96acfd890c3b774935ae62
 \*   src/store.mjs sha256:321247cfd4fcdff36e33af0670e59a501ab67e19328b29387b64a78dc37553a2
 EXTENDS Naturals

@@ -8,7 +8,7 @@ import { HarnessClient } from "../src/client.mjs";
 import { HarnessSupervisor } from "./fixtures/isolated-supervisor.mjs";
 import { ACTOR_INPUT_COMMAND, actorInputCustomPayload } from "../src/protocol.mjs";
 
-async function eventually(predicate, timeout = 3000) {
+async function eventually(predicate, timeout = 120_000) {
   const deadline = Date.now() + timeout;
   while (Date.now() < deadline) { const value = await predicate(); if (value) return value; await new Promise((resolve) => setTimeout(resolve, 20)); }
   throw new Error("condition not reached");
@@ -21,7 +21,7 @@ class CronFakeActor extends EventEmitter {
       model: this.session.launch?.model?.resolved ?? null, thinkingLevel: this.session.launch?.thinking?.resolved ?? "off" };
   }
   async start() {
-    this.connection = new HarnessClient({ socketPath: this.env.PI_HARNESS_SOCKET, heartbeatMs: 0 });
+    this.connection = new HarnessClient({ requestTimeoutMs: 120_000, socketPath: this.env.PI_HARNESS_SOCKET, heartbeatMs: 0 });
     await this.connection.start({ registrationType: "register_actor", sessionId: this.session.sessionId, sessionFile: this.session.sessionFile,
       cwd: this.session.cwd, repositoryRoot: this.session.repositoryRoot, actorToken: this.session.actorToken, actorGeneration: this.session.actorGeneration });
     this.isRunning = true; return this.#state();
@@ -50,7 +50,7 @@ function entry(id, parentId, role, text) {
   return { type: "message", id, parentId, timestamp: new Date().toISOString(), message: { role, content: [{ type: "text", text }] } };
 }
 
-test("supervisor cron steers an origin, completes durable history, isolates fresh runs, and falls back after origin deletion", { timeout: 15_000 }, async (t) => {
+test("supervisor cron steers an origin, completes durable history, isolates fresh runs, and falls back after origin deletion", { timeout: 180000 }, async (t) => {
   const root = await mkdtemp(path.join(os.tmpdir(), "harness-cron-supervisor-")); const skillsPath = path.join(root, "skills");
   await mkdir(skillsPath); const socketPath = path.join(root, "run", "supervisor.sock"); const actors = new Map();
   const supervisor = new HarnessSupervisor({ socketPath, databasePath: path.join(root, "state", "harness.sqlite"),
@@ -67,7 +67,7 @@ test("supervisor cron steers an origin, completes durable history, isolates fres
     await rm(root, { recursive: true, force: true });
   });
 
-  browser = new HarnessClient({ socketPath, heartbeatMs: 0 });
+  browser = new HarnessClient({ requestTimeoutMs: 120_000, socketPath, heartbeatMs: 0 });
   await browser.start({ registrationType: "register_client", clientInstanceId: "cron-browser" });
   const admission = (await browser.request("create_root", { cwd: root, repositoryRoot: root, name: "Cron origin",
     provider: null, model: null, thinkingLevel: null })).admission;
@@ -131,5 +131,5 @@ test("supervisor cron steers an origin, completes durable history, isolates fres
     ? supervisor.cronStore.listRuns(fallbackJob.jobId, 1)[0] : null, 5000);
   assert.equal(fallback.executionModeUsed, "fresh"); assert.equal(fallback.fallbackReason, "origin session no longer exists");
   assert.notEqual(fallback.sessionId, admission.sessionId);
-  await eventually(() => actors.get(fallback.sessionId)?.submits.length === 1, 5000);
+  await eventually(() => actors.get(fallback.sessionId)?.submits.length === 1, 120_000);
 });

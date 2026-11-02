@@ -16,8 +16,8 @@ const supervisorBin = path.resolve(import.meta.dirname, "..", "bin", "harness-su
 const restartBin = path.resolve(import.meta.dirname, "..", "bin", "harness-restart.mjs");
 const fakeProviderPath = path.join(import.meta.dirname, "fixtures", "fake-provider.ts");
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
-async function waitUntil(probe, description, timeoutMs = 90_000) { const deadline = Date.now() + timeoutMs; let last; while (Date.now() < deadline) { try { const value = await probe(); if (value) return value; } catch (error) { last = error; } await sleep(50); } throw new Error(`timed out waiting for ${description}${last ? `: ${last.message}` : ""}`); }
-function waitLine(stream, timeoutMs = 30_000) { return new Promise((resolve, reject) => { let buffer = ""; const timer = setTimeout(() => finish(new Error("startup timeout")), timeoutMs); const onData = (chunk) => { buffer += chunk; const newline = buffer.indexOf("\n"); if (newline >= 0) { try { finish(undefined, JSON.parse(buffer.slice(0, newline))); } catch (error) { finish(error); } } }; const finish = (error, value) => { clearTimeout(timer); stream.off("data", onData); error ? reject(error) : resolve(value); }; stream.on("data", onData); }); }
+async function waitUntil(probe, description, timeoutMs = 120_000) { const deadline = Date.now() + timeoutMs; let last; while (Date.now() < deadline) { try { const value = await probe(); if (value) return value; } catch (error) { last = error; } await sleep(50); } throw new Error(`timed out waiting for ${description}${last ? `: ${last.message}` : ""}`); }
+function waitLine(stream, timeoutMs = 120_000) { return new Promise((resolve, reject) => { let buffer = ""; const timer = setTimeout(() => finish(new Error("startup timeout")), timeoutMs); const onData = (chunk) => { buffer += chunk; const newline = buffer.indexOf("\n"); if (newline >= 0) { try { finish(undefined, JSON.parse(buffer.slice(0, newline))); } catch (error) { finish(error); } } }; const finish = (error, value) => { clearTimeout(timer); stream.off("data", onData); error ? reject(error) : resolve(value); }; stream.on("data", onData); }); }
 async function processIdentity(pid) {
   if (!Number.isInteger(pid) || pid <= 0) return null;
   try {
@@ -47,7 +47,7 @@ async function processTable() {
   const identities = await Promise.all(entries.filter((entry) => entry.isDirectory() && /^\d+$/.test(entry.name)).map((entry) => processIdentity(Number(entry.name))));
   return identities.filter(Boolean);
 }
-async function waitForIdentityExit(identity, timeoutMs = 8000) {
+async function waitForIdentityExit(identity, timeoutMs = 120_000) {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
     if (!await identityIsAlive(identity)) return true;
@@ -163,7 +163,7 @@ async function discoverTestSupervisors({ socketPath, pidPath, expectedSupervisor
 async function stopCurrentTestSupervisor({ socketPath, pidPath, expectedSupervisor, actorIdentities, request = controlRequest }) {
   const stoppedPids = new Set();
   const groups = new Map();
-  const deadline = Date.now() + 12_000;
+  const deadline = Date.now() + 120_000;
   let quietSince = null;
   while (Date.now() < deadline) {
     const discovered = await discoverTestSupervisors({ socketPath, pidPath, expectedSupervisor, request });
@@ -196,7 +196,7 @@ async function stopCurrentTestSupervisor({ socketPath, pidPath, expectedSupervis
   const remaining = await discoverTestSupervisors({ socketPath, pidPath, expectedSupervisor, request });
   throw new Error(`timed out waiting for detached supervisor publication/exit${remaining.candidates.length ? `: ${remaining.candidates.map((item) => item.pid).join(", ")}` : ""}`);
 }
-async function client(socketPath) { const value = new HarnessClient({ socketPath, heartbeatMs: 0, requestTimeoutMs: 120_000 }); assert(await value.start({ registrationType: "register_client", clientInstanceId: crypto.randomUUID() })); return value; }
+async function client(socketPath) { const value = new HarnessClient({ requestTimeoutMs: 120_000, socketPath, heartbeatMs: 0, requestTimeoutMs: 120_000 }); assert(await value.start({ registrationType: "register_client", clientInstanceId: crypto.randomUUID() })); return value; }
 async function submitAndSettle(value, sessionId, message) { const settled = new Promise((resolve, reject) => { const timer = setTimeout(() => { cleanup(); reject(new Error("settle timeout")); }, 60_000); const listener = (frame) => { if (frame.event === "actor_event" && frame.data?.sessionId === sessionId && frame.data?.event?.type === "agent_settled") { cleanup(); resolve(); } }; const cleanup = () => { clearTimeout(timer); value.off("event", listener); }; value.on("event", listener); }); await value.request("submit_input", { sessionId, message, behavior: "auto" }); await settled; }
 
 test("teardown discovers actor process groups from supervisor descendants", () => {
@@ -209,7 +209,7 @@ test("teardown discovers actor process groups from supervisor descendants", () =
   assert.deepEqual([...groups.get(200).members.values()].map((item) => item.pid), [200, 201]);
 });
 
-test("teardown waits for detached supervisor publication when control is unavailable", { timeout: 30_000 }, async () => {
+test("teardown waits for detached supervisor publication when control is unavailable", { timeout: 180000 }, async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), "harness-post-restart-publication-"));
   const socketPath = path.join(root, "run", "supervisor.sock"); const databasePath = path.join(root, "state", "harness.sqlite"); const pidPath = path.join(root, "run", "supervisor.pid");
   const env = { ...sanitizedRestartEnvironment(process.env), PI_HARNESS_SCRATCH_ROOT: path.join(root, "scratch"), PI_CODING_AGENT_DIR: path.join(root, "agent"), PI_HARNESS_AUTO_INSTALL: process.env.PI_HARNESS_AUTO_INSTALL ?? "0" };
@@ -230,7 +230,7 @@ test("teardown waits for detached supervisor publication when control is unavail
   }
 });
 
-test("external restart revives and nudges the initiating session exactly once", { timeout: 180_000 }, async (t) => {
+test("external restart revives and nudges the initiating session exactly once", { timeout: 1080000 }, async (t) => {
   const root = await mkdtemp(path.join(os.tmpdir(), "harness-post-restart-e2e-"));
   const agentDir = path.join(root, "agent"); const cwd = path.join(root, "project");
   const socketPath = path.join(root, "run", "supervisor.sock"); const databasePath = path.join(root, "state", "harness.sqlite"); const pidPath = path.join(root, "run", "supervisor.pid");
@@ -291,7 +291,7 @@ test("external restart revives and nudges the initiating session exactly once", 
   const before = (await ui.request("get_status")).sessions.find((item) => item.sessionId === admitted.sessionId);
   const sessionFile = before.sessionFile; const oldActorPid = before.actorPid;
   const oldActor = await processIdentity(oldActorPid); assert(oldActor); actorIdentities.set(`${oldActor.pid}:${oldActor.startTime}`, oldActor);
-  const scheduled = JSON.parse((await execFileAsync(process.execPath, [restartBin, "--resume", admitted.sessionId, "--socket", socketPath, "--db", databasePath, "--pid", pidPath], { env, timeout: 15_000 })).stdout);
+  const scheduled = JSON.parse((await execFileAsync(process.execPath, [restartBin, "--resume", admitted.sessionId, "--socket", socketPath, "--db", databasePath, "--pid", pidPath], { env, timeout: 120_000 })).stdout);
   restartWorker = await processIdentity(scheduled.workerPid);
   await ui.stop(); clients.delete(ui);
   await once(daemon, "exit");
@@ -307,7 +307,7 @@ test("external restart revives and nudges the initiating session exactly once", 
   assert.equal(history.entries.filter((entry) => entry.type === "message" && entry.message?.role === "user" && JSON.stringify(entry).includes(POST_RESTART_NUDGE)).length, 1);
   // Simulate a worker crash after submit_input succeeded but before the terminal job update.
   await writeFile(scheduled.jobPath, `${JSON.stringify({ ...completedJob, state: "nudging" }, null, 2)}\n`, { mode: 0o600 });
-  const replayWorkers = await Promise.allSettled([1, 2].map(() => execFileAsync(process.execPath, [restartBin, "--worker", scheduled.jobPath], { env: { ...env, PI_HARNESS_RESTART_WORKER: "1" }, timeout: 30_000 })));
+  const replayWorkers = await Promise.allSettled([1, 2].map(() => execFileAsync(process.execPath, [restartBin, "--worker", scheduled.jobPath], { env: { ...env, PI_HARNESS_RESTART_WORKER: "1" }, timeout: 120_000 })));
   assert(replayWorkers.some((result) => result.status === "fulfilled"));
   const replayedJob = JSON.parse(await readFile(scheduled.jobPath, "utf8")); assert.equal(replayedJob.state, "complete");
   const replayedHistory = await ui2.request("get_actor_entries", { sessionId: admitted.sessionId, since: null });

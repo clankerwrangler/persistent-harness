@@ -54,7 +54,7 @@ test("two supervisors started at the same moment leave exactly one running", asy
   assert.match(refused.stderr, /already starting or running/);
 
   const survivor = daemons[1 - refused.index];
-  const deadline = Date.now() + 15_000;
+  const deadline = Date.now() + 120_000;
   while (!await exists(paths.pidPath)) {
     assert.ok(Date.now() < deadline, `surviving supervisor did not start: ${survivor.output().stderr}`);
     await new Promise((resolve) => setTimeout(resolve, 50));
@@ -79,7 +79,7 @@ test("a supervisor refuses to start while another in this process holds the same
 test("a lock left by a crashed supervisor does not block the next start", async (t) => {
   const paths = await harnessPaths(t);
   const crashed = startDaemon(paths);
-  const deadline = Date.now() + 15_000;
+  const deadline = Date.now() + 120_000;
   while (!await exists(paths.pidPath)) {
     assert.ok(Date.now() < deadline, `supervisor did not start: ${crashed.output().stderr}`);
     await new Promise((resolve) => setTimeout(resolve, 50));

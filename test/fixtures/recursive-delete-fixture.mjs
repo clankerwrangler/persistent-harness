@@ -6,7 +6,7 @@ import path from "node:path";
 import { HarnessClient } from "../../src/client.mjs";
 import { HarnessSupervisor } from "./isolated-supervisor.mjs";
 
-export async function until(probe, timeout = 5000) {
+export async function until(probe, timeout = 120_000) {
   const deadline = Date.now() + timeout;
   while (Date.now() < deadline) { const value = await probe(); if (value) return value; await new Promise(resolve => setTimeout(resolve, 5)); }
   throw new Error("recursive deletion fixture timed out");
@@ -48,7 +48,7 @@ export async function deletionFixture(t) {
     await rm(dir, { recursive: true, force: true });
   });
   await fixture.supervisor.start();
-  fixture.client = new HarnessClient({ socketPath, heartbeatMs: 0, requestTimeoutMs: 20_000 }); fixture.clients.push(fixture.client);
+  fixture.client = new HarnessClient({ requestTimeoutMs: 120_000, socketPath, heartbeatMs: 0, requestTimeoutMs: 120_000 }); fixture.clients.push(fixture.client);
   await fixture.client.start({ registrationType: "register_client", clientInstanceId: randomUUID() });
   fixture.admit = async (name, parent = null, { start = true, seedGrant = true } = {}) => {
     const sessionId = randomUUID(), sessionFile = path.join(dir, `${sessionId}.jsonl`);
@@ -63,7 +63,7 @@ export async function deletionFixture(t) {
   };
   fixture.actorClient = async session => {
     const launch = fixture.supervisor.store.getActorLaunch(session.sessionId);
-    const client = new HarnessClient({ socketPath, heartbeatMs: 0, requestTimeoutMs: 20_000 }); fixture.clients.push(client);
+    const client = new HarnessClient({ requestTimeoutMs: 120_000, socketPath, heartbeatMs: 0, requestTimeoutMs: 120_000 }); fixture.clients.push(client);
     await client.start({ registrationType: "register_actor", sessionId: launch.sessionId, sessionFile: launch.sessionFile,
       cwd: launch.cwd, repositoryRoot: launch.repositoryRoot, actorToken: launch.actorToken, actorGeneration: launch.actorGeneration });
     return client;

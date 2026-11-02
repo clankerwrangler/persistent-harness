@@ -149,6 +149,7 @@ export class BackgroundCompletionMonitor {
   #directoryReader;
   #retryJobs = new Set();
   #onScanComplete;
+  #completedScans = 0;
   #retirementSample;
   #retentionMs;
 
@@ -304,6 +305,8 @@ export class BackgroundCompletionMonitor {
     this.#timer.unref?.();
   }
 
+  get completedScans() { return this.#completedScans; }
+
   async stop() {
     this.#stopped = true;
     if (this.#timer) clearInterval(this.#timer);
@@ -339,6 +342,7 @@ export class BackgroundCompletionMonitor {
       }
       if (!this.#stopped) await this.#pruneFinished(jobs);
       if (!this.#stopped) {
+        this.#completedScans += 1;
         try { await this.#onScanComplete(); }
         catch { this.#logger.error?.("pending root scratch cleanup could not be checked"); }
       }

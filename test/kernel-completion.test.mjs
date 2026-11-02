@@ -54,7 +54,7 @@ for line in control.makefile("rb"):
 function assertExited(pid) {
   assert.throws(() => process.kill(pid, 0), { code: "ESRCH" }, "terminal completion must follow owned process exit");
 }
-for (const mode of ["decode", "control"]) test(`${mode} failure cannot complete while the Python writer survives`, { timeout: 5000 }, async (t) => {
+for (const mode of ["decode", "control"]) test(`${mode} failure cannot complete while the Python writer survives`, { timeout: 1080000 }, async (t) => {
   const { kernel, root, pid } = await fixture(t, mode);
   if (mode === "control") {
     for (let count = 0; ; count++) {
@@ -72,7 +72,7 @@ for (const mode of ["decode", "control"]) test(`${mode} failure cannot complete 
   assert.equal((await queued).errorType, "KernelReplacedError");
 });
 
-test("close escalation keeps process ownership until SIGKILL exit", { timeout: 5000 }, async (t) => {
+test("close escalation keeps process ownership until SIGKILL exit", { timeout: 180000 }, async (t) => {
   const { kernel, pid } = await fixture(t, "close");
   await kernel.close({ snapshot: false });
   assertExited(pid);

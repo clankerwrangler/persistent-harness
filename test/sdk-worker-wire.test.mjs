@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { after, mock, test } from "node:test";
-import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, rm, writeFile, rename } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { PassThrough } from "node:stream";
@@ -46,7 +46,7 @@ const usage = { input: 10, output: 2, cacheRead: 0, cacheWrite: 0, totalTokens: 
   cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } };
 const tick = () => new Promise(resolve => setTimeout(resolve, 2));
 async function until(predicate) {
-  const deadline = Date.now() + 5000;
+  const deadline = Date.now() + 120_000;
   while (!predicate()) { assert(Date.now() < deadline, "fixture timed out"); await tick(); }
 }
 async function runTurn(eventMode) {
@@ -123,7 +123,7 @@ async function runTurn(eventMode) {
   } finally { input.end(); await running; }
 }
 
-test("real worker JSONL measures result multiplicity and preserves direct full events", { timeout: 15000 }, async t => {
+test("real worker JSONL measures result multiplicity and preserves direct full events", { timeout: 180000 }, async t => {
   const reports = []; let supervised;
   for (const eventMode of ["supervised-source", "full"]) {
     const run = await runTurn(eventMode);
@@ -168,7 +168,8 @@ async function verifySupervisor(t, run) {
   for (const [oldActor, newActor] of pairs) {
     const isRoot = oldActor === oldRoot;
     for (const actor of [oldActor, newActor]) {
-      await writeFile(actor.session.sessionFile, run.persisted.map((entry, index) => JSON.stringify(index === 0 ? { ...entry, id: actor.session.sessionId } : entry)).join("\n") + "\n");
+      await writeFile(`${actor.session.sessionFile}.tmp`, run.persisted.map((entry, index) => JSON.stringify(index === 0 ? { ...entry, id: actor.session.sessionId } : entry)).join("\n") + "\n");
+      await rename(`${actor.session.sessionFile}.tmp`, actor.session.sessionFile);
       await f.client.request("subscribe_session", { selector: actor.session.sessionId });
     }
     const compare = async sequence => {

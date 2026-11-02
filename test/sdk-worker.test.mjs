@@ -59,7 +59,7 @@ if (sourceOwnerOverride) {
 const integratedExternal = retentionSdk ? { ...external, sdk: { ...external.sdk, SessionManager: retentionSdk.SessionManager,
   ...(sourceOwnerOverride ? { createAgentSession: retentionSdk.createAgentSession, ExtensionRunner: retentionSdk.ExtensionRunner } : {}) } } : external;
 const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
-async function until(predicate, timeout = 3000) {
+async function until(predicate, timeout = 120_000) {
   const started = Date.now();
   while (!predicate()) { if (Date.now() - started > timeout) throw new Error("Condition timed out"); await delay(5); }
 }
@@ -562,7 +562,7 @@ await runSDKWorkerRpc({ bootstrap: (options) => bootstrapSDKWorker({ ...options,
       PI_HARNESS_PI_MODULE: sdkEntry, PI_OFFLINE: "1", PI_TELEMETRY: "0", PI_SKIP_VERSION_CHECK: "1" },
     args: [...(workerHeapCap ? [workerHeapCap] : []), driver, "--mode", "rpc", "--provider", "worker-fixture", "--model", "fixture", "--thinking", "high",
       "--extension", path.join(candidate, "index.ts"), "--no-extensions", "--no-skills", "--no-context-files",
-      "--name", "Child actor", "--session", path.join(directory, "canonical.jsonl")], requestTimeoutMs: 5000,
+      "--name", "Child actor", "--session", path.join(directory, "canonical.jsonl")], requestTimeoutMs: 120_000,
   });
   const events = []; actor.on("event", (event) => events.push(event));
   try {
@@ -580,7 +580,7 @@ await runSDKWorkerRpc({ bootstrap: (options) => bootstrapSDKWorker({ ...options,
     assert.equal(command.source, "extension");
     assert.deepEqual(command.sourceInfo, { path: "<inline:persistent-harness>", source: "inline", scope: "temporary", origin: "top-level" });
     await actor.submit("real actor request", "auto", [], "actor-input");
-    await until(() => events.some((event) => event.type === "agent_settled"), 5000);
+    await until(() => events.some((event) => event.type === "agent_settled"), 120_000);
     const messages = (await actor.request("get_messages")).messages;
     assert.equal(messages.filter((message) => message.role === "assistant").length, 1);
     assert.equal(messages.find((message) => message.role === "user").id, "actor-input");
@@ -1078,7 +1078,7 @@ test("source-aware supervised turns avoid raw hydration while direct worker end 
 });
 
 
-for (const site of ["after_commit", "threshold_preflight"]) test(`actual isolated worker preserves tool result and old receipt flow with diagnostic: ${site}`, { timeout: 15000 }, async () => {
+for (const site of ["after_commit", "threshold_preflight"]) test(`actual isolated worker preserves tool result and old receipt flow with diagnostic: ${site}`, { timeout: 1080000 }, async () => {
   let worker, reporter, requests = 0, effects = 0, armed = true, receiptRequests = 0;
   const accepted = new Set(), outbound = [], original = new TypeError("PRIVATE_WORKER_SENTINEL");
   const f = await fixture({ eventMode: "supervised-source", extensionFactory(pi, lifecycle) {

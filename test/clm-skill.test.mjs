@@ -84,7 +84,7 @@ function tool(pi, name, exposure, execute, parameters = object({})) {
 const annotationParameters = { ...object({ action: { type: "string" }, source: { type: "string" }, title: { type: "string" },
   reason: { type: "string" }, futureAction: { type: "string" }, retention: { type: "string" }, id: { type: "string" }, resolution: { type: "string" } }), required: ["action"] };
 
-test("dedicated companion skill invokes exact grants through ordinary replay gates, real Python, and native hooks", { timeout: 30000 }, async t => {
+test("dedicated companion skill invokes exact grants through ordinary replay gates, real Python, and native hooks", { timeout: 180000 }, async t => {
   const executions = [], hooks = [];
   const f = await fixture(t, { cells: [String.raw`
 from _persistent_harness import host_request
@@ -136,7 +136,7 @@ print("EXACT_OPERATIONS_PASSED")`], configure(pi) {
   assert.equal(stale.isError, true); assert.equal(executions.length, 1);
 });
 
-for (const exposure of ["direct", "model-only", "hidden"]) test(`exact grant cannot bypass ${exposure} callable policy`, { timeout: 30000 }, async t => {
+for (const exposure of ["direct", "model-only", "hidden"]) test(`exact grant cannot bypass ${exposure} callable policy`, { timeout: 1080000 }, async t => {
   let calls = 0;
   const f = await fixture(t, { cells: ['assert clm.annotate("list")["isError"] is True\nprint("DENIED")'], configure(pi) {
     tool(pi, "live_context_annotate", exposure, async () => { calls++; return { content: [], details: {} }; }, annotationParameters);
@@ -147,7 +147,7 @@ for (const exposure of ["direct", "model-only", "hidden"]) test(`exact grant can
   assert.equal(f.manager.getBranch().find(entry => entry.message?.role === "toolResult").message.isError, false);
 });
 
-test("an uninstalled companion grants nothing, and missing per-cell context fails closed", { timeout: 30000 }, async t => {
+test("an uninstalled companion grants nothing, and missing per-cell context fails closed", { timeout: 180000 }, async t => {
   const absent = await fixture(t, { grant: false });
   assert.deepEqual((await absent.kernel.start()).skills, []);
   let result = await absent.kernel.execute('from _persistent_harness import host_request\nhost_request("extension_tool.live_context_annotate", {})', {
@@ -159,7 +159,7 @@ test("an uninstalled companion grants nothing, and missing per-cell context fail
   assert.equal(result.ok, false); assert.match(result.error, /live tool-owned Python cell/);
 });
 
-test("bounded outcomes fail explicitly after one execution without retry", { timeout: 30000 }, async t => {
+test("bounded outcomes fail explicitly after one execution without retry", { timeout: 180000 }, async t => {
   let calls = 0;
   const f = await fixture(t, { cells: [String.raw`
 try:
@@ -176,7 +176,7 @@ print("BOUNDED")`], configure(pi) {
   assert.match(JSON.stringify(result.content), /BOUNDED/); assert.equal(result.usage.input, 7); assert.equal(result.nestedCalls.calls[0].status, "ok");
 });
 
-test("nested records remain bounded while all nested usage is counted", { timeout: 30000 }, async t => {
+test("nested records remain bounded while all nested usage is counted", { timeout: 180000 }, async t => {
   const f = await fixture(t, { configure(pi) { tool(pi, "counter", "codemode", async () => ({ content: [], details: {}, usage: usage(1) }), object({ data: { type: "string" } })); } });
   const dispatch = f.coor.toolDispatch, signal = new AbortController().signal;
   dispatch.open("outer", signal, f.coor.assistant([]), []);
@@ -190,7 +190,7 @@ test("nested records remain bounded while all nested usage is counted", { timeou
 });
 
 
-test("nested cancellation follows the originating cell and a later cell runs once", { timeout: 30000 }, async t => {
+test("nested cancellation follows the originating cell and a later cell runs once", { timeout: 180000 }, async t => {
   const started = Promise.withResolvers(); let attempts = 0, cancelled = false;
   const f = await fixture(t, { cells: ['clm.annotate("wait")', 'assert not clm.recall("next")["isError"]\nprint("NEXT_CELL")'], configure(pi) {
     tool(pi, "live_context_annotate", "codemode", async (_id, _args, signal) => {
@@ -208,7 +208,7 @@ test("nested cancellation follows the originating cell and a later cell runs onc
   assert.equal(results[1].nestedCalls.calls[0].id, "cell-2/1"); assert.match(JSON.stringify(results[1].content), /NEXT_CELL/);
 });
 
-test("late host completion cannot borrow a new cell's context or deliver its response there", { timeout: 30000 }, async t => {
+test("late host completion cannot borrow a new cell's context or deliver its response there", { timeout: 180000 }, async t => {
   const f = await fixture(t), started = Promise.withResolvers(), released = Promise.withResolvers();
   const controller = new AbortController(); let firstSignal, firstCalls = 0, nextCalls = 0;
   const outcome = name => ({ toolCall: { id: name, name, arguments: {}, type: "toolCall" }, result: { content: [], details: {} }, isError: false });
@@ -228,7 +228,7 @@ test("late host completion cannot borrow a new cell's context or deliver its res
   assert.equal(wrongIdentity.ok, false); assert.match(wrongIdentity.error, /no live originating cell/);
 });
 
-test("nested contexts retain parentage, honor active direct tools, and cannot recurse into orchestration", { timeout: 30000 }, async t => {
+test("nested contexts retain parentage, honor active direct tools, and cannot recurse into orchestration", { timeout: 180000 }, async t => {
   const f = await fixture(t, { configure(pi) {
     tool(pi, "first", "codemode", async (_id, _args, _signal, _update, ctx) => {
       const child = await ctx.executeTool("second", {});

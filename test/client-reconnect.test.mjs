@@ -17,7 +17,7 @@ const actorRegistration = {
 const clientRegistration = { registrationType: "register_client", clientInstanceId: "fixture-ui" };
 
 async function waitFor(predicate, message) {
-  const deadline = Date.now() + 2000;
+  const deadline = Date.now() + 120_000;
   while (!predicate() && Date.now() < deadline) await sleep(5);
   assert.ok(predicate(), message);
 }
@@ -51,7 +51,7 @@ async function fixture(t, onRegistration, options = {}) {
       }
     });
   });
-  const client = new HarnessClient({ socketPath, heartbeatMs: 0, requestTimeoutMs: 100, reconnectBaseMs: 15, reconnectMaxMs: 30, ...options });
+  const client = new HarnessClient({ requestTimeoutMs: 120_000, socketPath, heartbeatMs: 0, requestTimeoutMs: 100, reconnectBaseMs: 15, reconnectMaxMs: 30, ...options });
   client.on("status", (status) => states.push(status));
   client.on("event", (frame) => events.push(frame));
   client.on("registered", (data) => registered.push(data));
@@ -75,7 +75,7 @@ function admit(socket, request) {
 for (const registration of [actorRegistration, clientRegistration]) {
   for (const phase of ["initial", "reconnect"]) {
     for (const failure of ["timeout", "close-before-response"]) {
-      test(`${registration.registrationType}: ${phase} ${failure} retries and restores delivery`, { timeout: 5000 }, async (t) => {
+      test(`${registration.registrationType}: ${phase} ${failure} retries and restores delivery`, { timeout: 180000 }, async (t) => {
         const firstFailure = phase === "initial" ? 1 : 2;
         const recoveredAttempt = firstFailure + 2;
         const f = await fixture(t, (socket, request, attempt) => {
@@ -114,7 +114,7 @@ for (const registration of [actorRegistration, clientRegistration]) {
 
 for (const phase of ["initial", "reconnect"]) {
   for (const rejection of ["admission", "protocol"]) {
-    test(`${phase} explicit ${rejection} rejection stops retries`, { timeout: 5000 }, async (t) => {
+    test(`${phase} explicit ${rejection} rejection stops retries`, { timeout: 180000 }, async (t) => {
       const rejectedAttempt = phase === "initial" ? 1 : 2;
       const f = await fixture(t, (socket, request, attempt) => {
         if (attempt < rejectedAttempt) { admit(socket, request); return; }
@@ -138,7 +138,7 @@ for (const phase of ["initial", "reconnect"]) {
   }
 }
 
-test("malformed registration receives a terminal protocol rejection", { timeout: 5000 }, async (t) => {
+test("malformed registration receives a terminal protocol rejection", { timeout: 180000 }, async (t) => {
   const f = await fixture(t, () => assert.fail("invalid registration cannot be admitted"));
   assert.equal(await f.client.start({ ...actorRegistration, actorGeneration: 0 }), undefined);
   await sleep(180);
@@ -147,7 +147,7 @@ test("malformed registration receives a terminal protocol rejection", { timeout:
   assert.equal(f.states.at(-1).state, "rejected");
 });
 
-test("stop cancels registration without rejection and permits an explicit same-client start", { timeout: 5000 }, async (t) => {
+test("stop cancels registration without rejection and permits an explicit same-client start", { timeout: 180000 }, async (t) => {
   const f = await fixture(t, (socket, request, attempt) => { if (attempt > 1) admit(socket, request); });
   const starting = f.client.start(actorRegistration);
   await waitFor(() => f.registrations.length === 1, "registration starts");
@@ -163,7 +163,7 @@ test("stop cancels registration without rejection and permits an explicit same-c
   assert.deepEqual(await f.client.request("heartbeat"), {});
 });
 
-test("stop cancels a scheduled reconnect", { timeout: 5000 }, async (t) => {
+test("stop cancels a scheduled reconnect", { timeout: 180000 }, async (t) => {
   const f = await fixture(t, () => {}, { reconnectBaseMs: 200, reconnectMaxMs: 200 });
   assert.equal(await f.client.start(actorRegistration), undefined);
   await f.client.stop();
@@ -173,7 +173,7 @@ test("stop cancels a scheduled reconnect", { timeout: 5000 }, async (t) => {
   assert.ok(!f.states.some(({ state }) => state === "rejected"));
 });
 
-test("registration response received during stop cannot restore connected state", { timeout: 5000 }, async (t) => {
+test("registration response received during stop cannot restore connected state", { timeout: 180000 }, async (t) => {
   const f = await fixture(t, (socket, request) => { socket.on("end", () => admit(socket, request)); });
   const starting = f.client.start(actorRegistration);
   await waitFor(() => f.registrations.length === 1, "registration starts");

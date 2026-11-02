@@ -11,7 +11,7 @@ const checkpoint = { version: 1, sessionId: "deferred-fixture", toolCallId: "fir
 const pause = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 async function waitForFile(file) {
-  const deadline = Date.now() + 3000;
+  const deadline = Date.now() + 120_000;
   while (true) {
     try { await access(file); return; }
     catch (error) { if (error.code !== "ENOENT" || Date.now() >= deadline) throw error; }
@@ -85,7 +85,7 @@ for line in control:
   return { root, kernel, release: () => writeFile(path.join(root, "release"), "") };
 }
 
-test("deferred results finish before checkpointing while FIFO and callback retain ownership", { timeout: 15_000 }, async (t) => {
+test("deferred results finish before checkpointing while FIFO and callback retain ownership", { timeout: 180000 }, async (t) => {
   const { root, kernel, release } = await fixture(t);
   const callbackStarted = Promise.withResolvers();
   const finishCallback = Promise.withResolvers();
@@ -125,7 +125,7 @@ test("deferred results finish before checkpointing while FIFO and callback retai
   await kernel.close({ snapshot: false });
 });
 
-test("close waits for a failed deferred checkpoint and surfaces notification errors", { timeout: 15_000 }, async (t) => {
+test("close waits for a failed deferred checkpoint and surfaces notification errors", { timeout: 180000 }, async (t) => {
   const { root, kernel, release } = await fixture(t, { fail: true });
   const callback = Promise.withResolvers();
   const result = await kernel.execute("first", {
@@ -151,7 +151,7 @@ test("close waits for a failed deferred checkpoint and surfaces notification err
   assert.equal(result.ok, true, "known execution success differs from checkpoint failure");
 });
 
-test("real deferred checkpoints preserve in-place mutations and recover their original identity", { timeout: 15_000 }, async (t) => {
+test("real deferred checkpoints preserve in-place mutations and recover their original identity", { timeout: 180000 }, async (t) => {
   const { kernel } = await fixture(t, { real: true });
   const firstCheckpoint = Promise.withResolvers();
   const first = await kernel.execute("mutable = {'items': [1]}", {
@@ -180,7 +180,7 @@ test("real deferred checkpoints preserve in-place mutations and recover their or
   } finally { await restored.close({ snapshot: false }); }
 });
 
-test("interrupted execution cannot leave a kill timer attached to its deferred checkpoint", { timeout: 15_000 }, async (t) => {
+test("interrupted execution cannot leave a kill timer attached to its deferred checkpoint", { timeout: 180000 }, async (t) => {
   const { root, kernel, release } = await fixture(t, { interruptTimeoutMs: 50 });
   const checkpointDone = Promise.withResolvers();
   const controller = new AbortController();

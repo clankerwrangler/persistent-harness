@@ -15,7 +15,7 @@ import { VisibleTranscriptReader } from "../src/visible-transcript-reader.mjs";
 const models = ["parent", "pinned"].map((id) => ({ provider: "fake", id, reasoning: false, thinkingLevels: ["off"] }));
 const params = (overrides = {}) => ({ prompt: "ONLY_NEW_TASK", name: "forked", parentModel: models[0], parentThinkingLevel: "off", availableModels: models, forkContext: true, forkLeafId: "pending", model: "fake/pinned", ...overrides });
 const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
-async function eventually(probe) { const end = Date.now() + 5000; while (Date.now() < end) { const value = await probe(); if (value) return value; await delay(10); } throw new Error("condition did not become true"); }
+async function eventually(probe) { const end = Date.now() + 120_000; while (Date.now() < end) { const value = await probe(); if (value) return value; await delay(10); } throw new Error("condition did not become true"); }
 async function entries(file) { return (await readFile(file, "utf8")).trim().split("\n").map(JSON.parse); }
 async function append(file, row) { await appendFile(file, `${JSON.stringify({ timestamp: new Date().toISOString(), ...row })}\n`); }
 class FakeActor extends EventEmitter {
@@ -34,7 +34,7 @@ class FakeActor extends EventEmitter {
   async close() { if (!this.isRunning) return; this.isRunning = false; this.emit("exit", { code: 0, signal: "SIGTERM", expected: true }); }
 }
 
-test("fork admission freezes queued context, cleans failures, rejects replay, and resumes only the child's own task", { timeout: 30_000 }, async (t) => {
+test("fork admission freezes queued context, cleans failures, rejects replay, and resumes only the child's own task", { timeout: 180000 }, async (t) => {
   const root = await mkdtemp(path.join(os.tmpdir(), "context-fork-admission-")); const skillsPath = path.join(root, "skills"); await mkdir(skillsPath);
   const previousAgent = process.env.PI_CODING_AGENT_DIR; process.env.PI_CODING_AGENT_DIR = path.join(root, "agent");
   const actors = []; const clients = []; let supervisor;
@@ -45,7 +45,7 @@ test("fork admission freezes queued context, cleans failures, rejects replay, an
     processTerminator: async () => ({ terminated: true }) };
   t.after(async () => { await Promise.all(clients.map((client) => client.stop())); await supervisor?.stop(); if (previousAgent === undefined) delete process.env.PI_CODING_AGENT_DIR; else process.env.PI_CODING_AGENT_DIR = previousAgent; await rm(root, { recursive: true, force: true }); });
   supervisor = new HarnessSupervisor(config); await supervisor.start();
-  async function connect(registration) { const client = new HarnessClient({ socketPath: config.socketPath, heartbeatMs: 0 }); clients.push(client); await client.start(registration); return client; }
+  async function connect(registration) { const client = new HarnessClient({ requestTimeoutMs: 120_000, socketPath: config.socketPath, heartbeatMs: 0 }); clients.push(client); await client.start(registration); return client; }
   const ui = await connect({ registrationType: "register_client", clientInstanceId: "fork-unit-ui" });
   const rootAdmission = (await ui.request("create_root", { cwd: root, name: "parent", repositoryRoot: root, provider: "fake", model: "parent", thinkingLevel: "off" })).admission;
   const parentActor = await eventually(() => actors.find((actor) => actor.session.sessionId === rootAdmission.sessionId && actor.isRunning));

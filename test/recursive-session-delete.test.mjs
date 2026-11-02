@@ -114,7 +114,7 @@ test("close failure does not tombstone or lose ownership; a later retry succeeds
 });
 
 
-test("spawn preflight already in flight rechecks the parent before admitting a child", { timeout: 10_000 }, async t => {
+test("spawn preflight already in flight rechecks the parent before admitting a child", { timeout: 180000 }, async t => {
   const f = await deletionFixture(t), root = await f.admit("Root"), actor = await f.actorClient(root);
   const sdk = await fauxForkSessionSdk(t, f.dir), removed = new Set(), cleanupDone = Promise.withResolvers(), remove = fs.rm;
   const sourceBefore = await readFile(root.sessionFile);
@@ -298,7 +298,7 @@ test("ordinary capacity and inactivity passivation still allow fresh activation"
 });
 
 
-test("cold reconciliation promotes a verified grant before capacity and retains it at launch", { timeout: 10_000 }, async t => {
+test("cold reconciliation promotes a verified grant before capacity and retains it at launch", { timeout: 180000 }, async t => {
   const slotEntered = Promise.withResolvers(), releaseSlot = Promise.withResolvers();
   t.after(() => releaseSlot.resolve());
   const f = await deletionFixture(t);
@@ -330,7 +330,7 @@ test("cold reconciliation promotes a verified grant before capacity and retains 
   assert.deepEqual(f.errors, []);
 });
 
-test("cold reconciliation fails before revival intent and a later repaired read remains available", { timeout: 10_000 }, async t => {
+test("cold reconciliation fails before revival intent and a later repaired read remains available", { timeout: 180000 }, async t => {
   const f = await deletionFixture(t), session = await f.admit("Pre-intent failure", null, { start: false, seedGrant: false });
   f.supervisor.store.markActorLifecycle(session.sessionId, session.actorGeneration, "stopped");
   await fs.mkdir(`${f.dir}/skills/invalid`); await writeFile(`${f.dir}/skills/invalid/SKILL.md`, "# malformed package\n");

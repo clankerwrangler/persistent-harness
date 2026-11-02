@@ -169,5 +169,5 @@ assert calls[-1][1]["forkContext"] is True
 assert calls[-1][1]["model"] == "fake/pinned"
 print("ok")
 `;
-  assert.equal(execFileSync("python3", ["-c", code, source], { encoding: "utf8", timeout: 30_000 }).trim(), "ok");
+  assert.equal(execFileSync("python3", ["-c", code, source], { encoding: "utf8", timeout: 120_000 }).trim(), "ok");
 });

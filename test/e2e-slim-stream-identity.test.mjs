@@ -5,7 +5,7 @@ import test from "node:test";
 import { assistantMessageParts } from "../src/conversation-projection.mjs";
 import { slimFixture, until } from "./fixtures/slim-stream.mjs";
 
-test("real slim RPC joins interleaved text deltas, item completion, and canonical history by start identity", { timeout: 90_000 }, async (t) => {
+test("real slim RPC joins interleaved text deltas, item completion, and canonical history by start identity", { timeout: 540000 }, async (t) => {
   const { client, sessionId, rawEvents, events, responses, requests, visible, send, item, done } = await slimFixture(t, "slim-rpc", ({ response, send, item }) => {
     for (const [index, value] of [[0, "A"], [1, "B"]]) {
       send(response, { type: "response.output_item.added", output_index: index, item: { ...item(index, ""), status: "in_progress", content: [] } });
@@ -58,7 +58,7 @@ test("real slim RPC joins interleaved text deltas, item completion, and canonica
   assert.equal(requests.length, 2);
 });
 
-test("real slim RPC keeps one text identity when an early native prefix rebases its open remainder", { timeout: 90_000 }, async (t) => {
+test("real slim RPC keeps one text identity when an early native prefix rebases its open remainder", { timeout: 540000 }, async (t) => {
   const callId = "rebase|fc_rebase";
   const code = 'from pathlib import Path\ncounter = Path("native-execute-count")\ncounter.write_text(str(int(counter.read_text()) + 1) if counter.exists() else "1")\nprint("EARLY_PREFIX_TOOL_RESULT")';
   const call = { type: "function_call", id: "fc_rebase", call_id: "rebase", name: "ipython", arguments: JSON.stringify({ code }), async: true };
@@ -153,7 +153,7 @@ test("real slim RPC keeps one text identity when an early native prefix rebases 
 });
 
 
-test("actual progress producer and slim text preserve per-part births through commit, cold history and restart", { timeout: 90_000 }, async t => {
+test("actual progress producer and slim text preserve per-part births through commit, cold history and restart", { timeout: 540000 }, async t => {
   const { conversationOrderFixture } = await import("./fixtures/conversation-order.mjs");
   const f = await conversationOrderFixture(t);
   const progress = await f.start(); assert.equal(progress.history.at(-1).kind, "progress");

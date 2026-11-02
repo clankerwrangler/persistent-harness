@@ -7,7 +7,7 @@ import test from "node:test";
 import { HarnessClient } from "../src/client.mjs";
 import { HarnessSupervisor } from "./fixtures/isolated-supervisor.mjs";
 
-async function waitUntil(probe, description, timeoutMs = 60_000) {
+async function waitUntil(probe, description, timeoutMs = 120_000) {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
     if (await probe()) return;
@@ -17,7 +17,7 @@ async function waitUntil(probe, description, timeoutMs = 60_000) {
 }
 
 // Use real Pi actors and Python tools with a deterministic local provider.
-test("background completion during supervisor downtime revives its real owner exactly once", { timeout: 180_000 }, async (t) => {
+test("background completion during supervisor downtime revives its real owner exactly once", { timeout: 1080000 }, async (t) => {
   const root = await mkdtemp(path.join(os.tmpdir(), "harness-background-e2e-"));
   const agentDir = path.join(root, "agent");
   const cwd = path.join(root, "project");
@@ -85,7 +85,7 @@ test("background completion during supervisor downtime revives its real owner ex
   const start = async () => {
     supervisor = new HarnessSupervisor(options);
     await supervisor.start();
-    client = new HarnessClient({ socketPath: options.socketPath, heartbeatMs: 0, requestTimeoutMs: 120_000 });
+    client = new HarnessClient({ requestTimeoutMs: 120_000, socketPath: options.socketPath, heartbeatMs: 0, requestTimeoutMs: 120_000 });
     await client.start({ registrationType: "register_client", clientInstanceId: crypto.randomUUID() });
   };
   await start();

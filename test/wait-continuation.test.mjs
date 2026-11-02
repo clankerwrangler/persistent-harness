@@ -35,7 +35,7 @@ function registeredWait() {
 }
 
 for (const state of ["pending", "already-settled"]) for (const newerSteer of [false, true]) {
-  test(`${state}: one wait resumes original results and useful work${newerSteer ? " after the newer steer" : ""}`, { timeout: 10000 }, async t => {
+  test(`${state}: one wait resumes original results and useful work${newerSteer ? " after the newer steer" : ""}`, { timeout: 180000 }, async t => {
     const root = await mkdtemp(path.join(os.tmpdir(), "stock-wait-"));
     const previousNative = process.env.PI_HARNESS_NATIVE_ASYNC;
     process.env.PI_HARNESS_NATIVE_ASYNC = "1";

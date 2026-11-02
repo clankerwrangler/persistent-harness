@@ -105,7 +105,7 @@ test("authenticated roster RPC and real host consumer preserve fields, freshness
     backgroundCompletionIntervalMs: 3600000 });
   await supervisor.start(); const db = seed(supervisor.databasePath);
   t.after(async () => { for (const client of clients) client.stop(); db.close(); await supervisor.stop(); });
-  const actor = new HarnessClient({ socketPath: supervisor.socketPath, heartbeatMs: 0 }); clients.push(actor);
+  const actor = new HarnessClient({ requestTimeoutMs: 120_000, socketPath: supervisor.socketPath, heartbeatMs: 0 }); clients.push(actor);
   await actor.start({ registrationType: "register_actor", sessionId: "child", sessionFile: path.join(dir, "child.jsonl"),
     cwd: "/fixture", repositoryRoot: null, actorToken: "fixture-child", actorGeneration: 1 });
   assert(actor.isConnected);
@@ -121,7 +121,7 @@ test("authenticated roster RPC and real host consumer preserve fields, freshness
   assert(fresh.agents.some(row => row.name === "new name" && row.lineage === "root/child/new name"));
   db.prepare("UPDATE sessions SET lifecycle='deleted' WHERE id='child'").run();
   await assert.rejects(handlers["agent_message.list_agents"](), /caller session does not exist/);
-  const browser = new HarnessClient({ socketPath: supervisor.socketPath, heartbeatMs: 0 }); clients.push(browser);
+  const browser = new HarnessClient({ requestTimeoutMs: 120_000, socketPath: supervisor.socketPath, heartbeatMs: 0 }); clients.push(browser);
   await browser.start({ registrationType: "register_client", clientInstanceId: "fixture" });
   await assert.rejects(browser.request("get_roster", {}), /not available to clients/);
   // An invalid packet closes its connection; make it the final actor request.

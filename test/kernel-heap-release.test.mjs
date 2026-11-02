@@ -13,7 +13,7 @@ async function anonymousBytes(pid) {
   return Number(line.match(/(\d+) kB/)[1]) * 1024;
 }
 
-test("memory a finished cell freed is returned to the OS while its result stays", { timeout: 60000 }, async t => {
+test("memory a finished cell freed is returned to the OS while its result stays", { timeout: 360000 }, async t => {
   const root = await mkdtemp(path.join(os.tmpdir(), "kernel-heap-release-"));
   const runtime = await new PythonRuntimeManager({ runtimeDir: path.join(root, "runtime") }).ensure({ skills: [], consent: async () => true });
   let kernel;

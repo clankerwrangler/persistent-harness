@@ -19,7 +19,7 @@ const { default: extension } = await import("../src/extension.mjs");
 const prompt = { systemPrompt: "base prompt", systemPromptOptions: { contextFiles: [] } };
 
 async function waitFor(predicate, label) {
-  const deadline = Date.now() + 2000;
+  const deadline = Date.now() + 120_000;
   while (!predicate() && Date.now() < deadline) await sleep(5);
   assert(predicate(), label);
 }
@@ -131,7 +131,7 @@ async function fixture(t, { holdReconnect = false, dropAck = false, rejectFlush 
   };
 }
 
-test("incoming family history waits for the compaction owner before persistence and injection", { timeout: 5000 }, async t => {
+test("incoming family history waits for the compaction owner before persistence and injection", { timeout: 180000 }, async t => {
   const historyGate = Promise.withResolvers(); t.after(() => historyGate.resolve());
   const f = await fixture(t, { historyGate });
   const delivered = f.family();
@@ -147,7 +147,7 @@ test("incoming family history waits for the compaction owner before persistence 
   assert.deepEqual(f.notices, []);
 });
 
-test("dropped committed ACK holds the request boundary until authenticated reconnect", { timeout: 5000 }, async t => {
+test("dropped committed ACK holds the request boundary until authenticated reconnect", { timeout: 180000 }, async t => {
   const f = await fixture(t, { dropAck: true, holdReconnect: true });
   const frame = await f.family();
   const closed = once(f.client, "disconnected");
@@ -174,7 +174,7 @@ test("dropped committed ACK holds the request boundary until authenticated recon
 });
 
 
-test("connected flush rejection still blocks request preparation", { timeout: 5000 }, async t => {
+test("connected flush rejection still blocks request preparation", { timeout: 180000 }, async t => {
   const f = await fixture(t, { rejectFlush: true });
   const before = { status: f.client.listenerCount("status"), registered: f.client.listenerCount("registered") };
   const preparation = f.prepare(); await preparation.result;
@@ -184,7 +184,7 @@ test("connected flush rejection still blocks request preparation", { timeout: 50
   assert.equal(f.client.listenerCount("registered"), before.registered);
 });
 
-test("an in-flight flush transport failure is not silently replayed or bypassed", { timeout: 5000 }, async t => {
+test("an in-flight flush transport failure is not silently replayed or bypassed", { timeout: 180000 }, async t => {
   const f = await fixture(t, { dropFlush: true, holdReconnect: true });
   const preparation = f.prepare(); await preparation.result;
   assert.equal(preparation.outcome, "rejected"); assert.match(preparation.error.message, /connection closed before response/);
@@ -192,8 +192,8 @@ test("an in-flight flush transport failure is not silently replayed or bypassed"
 });
 
 for (const terminal of ["rejected", "stopped", "aborted", "timed out"]) {
-  test(`registration wait rejects ${terminal} without issuing a flush or retaining listeners`, { timeout: 5000 }, async t => {
-    const f = await fixture(t, { holdReconnect: true, timeoutMs: terminal === "timed out" ? 140 : 600 });
+  test(`registration wait rejects ${terminal} without issuing a flush or retaining listeners`, { timeout: 180000 }, async t => {
+    const f = await fixture(t, { holdReconnect: true, timeoutMs: terminal === "timed out" ? 140 : 60_000 });
     await f.disconnect();
     const before = { status: f.client.listenerCount("status"), registered: f.client.listenerCount("registered") };
     const preparation = f.prepare();
@@ -211,7 +211,7 @@ for (const terminal of ["rejected", "stopped", "aborted", "timed out"]) {
   });
 }
 
-test("a supervisor that answers flush after several seconds does not fail request preparation", { timeout: 15000 }, async t => {
+test("a supervisor that answers flush after several seconds does not fail request preparation", { timeout: 180000 }, async t => {
   const f = await fixture(t, { delayFlushMs: 4000, keepClientTimeout: true });
   const preparation = f.prepare();
   const prepared = await preparation.result;

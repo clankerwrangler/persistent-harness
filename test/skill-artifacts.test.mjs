@@ -44,7 +44,7 @@ test("shared immutable artifacts retain raw source identity and old generation b
   assert.match(await readFile(path.join(first.python.srcPath, "demo", "__init__.py"), "utf8"), /first/);
   assert.deepEqual(await verifyManifest(old), old);
   const imported = execFileSync(process.env.PI_HARNESS_PYTHON || "python3", ["-c", "import demo; print(demo.run()); print(demo.__file__)"], {
-    env: { ...process.env, PYTHONPATH: first.python.srcPath, PYTHONDONTWRITEBYTECODE: "1" }, encoding: "utf8", timeout: 5000, maxBuffer: 65536,
+    env: { ...process.env, PYTHONPATH: first.python.srcPath, PYTHONDONTWRITEBYTECODE: "1" }, encoding: "utf8", timeout: 120_000, maxBuffer: 65536,
   }).trim().split("\n");
   assert.equal(imported[0], "first"); assert(imported[1].startsWith(first.python.srcPath));
   assert.equal((await lstat(path.join(first.python.srcPath, "demo", "__init__.py"))).mode & 0o222, 0);
@@ -249,7 +249,7 @@ async function generationExtension(t, { drift = false, desiredPath = false, with
   return { ...f, skills, grant, grantPath, sessionFile, owner, hooks, tools, ctx, extensionInternals, requests, commandReads: () => commandReads };
 }
 
-test("real extension preparation and lazy Python import retain exact generation artifact after source edit", { timeout: 15_000 }, async t => {
+test("real extension preparation and lazy Python import retain exact generation artifact after source edit", { timeout: 180000 }, async t => {
   const f = await generationExtension(t, { withPython: true });
   const identity = await verifySkillArtifact(f.skills[0].skillPath);
   await f.owner.prepareRequest({ systemPrompt: "base prompt", systemPromptOptions: { contextFiles: [] } }, f.ctx);

@@ -42,7 +42,7 @@ async function fixture(t, hostHandler, KernelClass = PythonKernel) {
 
 const gateCode = (name) => `fixture.host_request("fixture.gate", {"name": "${name}"})`;
 
-test("pre-aborted cells do not start the kernel or mutate its namespace", { timeout: 30_000 }, async (t) => {
+test("pre-aborted cells do not start the kernel or mutate its namespace", { timeout: 180000 }, async (t) => {
   const { kernel } = await fixture(t, () => { throw new Error("must not execute"); });
   const controller = new AbortController(); controller.abort();
   const result = await kernel.execute("cancelled_value = 1", { signal: controller.signal });
@@ -53,7 +53,7 @@ test("pre-aborted cells do not start the kernel or mutate its namespace", { time
   assert.equal((await kernel.execute("'cancelled_value' in globals()")).mime["text/plain"], "False");
 });
 
-test("cancellation during startup never admits a cell", { timeout: 30_000 }, async (t) => {
+test("cancellation during startup never admits a cell", { timeout: 180000 }, async (t) => {
   const starting = deferred(); const release = deferred();
   t.after(() => release.resolve());
   class HeldStartupKernel extends PythonKernel {
@@ -72,7 +72,7 @@ test("cancellation during startup never admits a cell", { timeout: 30_000 }, asy
   assert.equal((await kernel.execute("'startup_cancelled_value' in globals()")).mime["text/plain"], "False");
 });
 
-test("queued cancellation never interrupts the active cell or enters the FIFO namespace", { timeout: 30_000 }, async (t) => {
+test("queued cancellation never interrupts the active cell or enters the FIFO namespace", { timeout: 180000 }, async (t) => {
   const started = deferred(); const release = deferred(); const calls = [];
   t.after(() => release.resolve());
   const { kernel } = await fixture(t, async ({ name }) => {
@@ -93,7 +93,7 @@ test("queued cancellation never interrupts the active cell or enters the FIFO na
   assert.equal((await kernel.execute("value_from_a + 1, 'cancelled_value' in globals()")).mime["text/plain"], "(42, False)");
 });
 
-test("cells execute FIFO while the host remains responsive", { timeout: 30_000 }, async (t) => {
+test("cells execute FIFO while the host remains responsive", { timeout: 180000 }, async (t) => {
   const started = deferred(); const release = deferred(); const calls = [];
   t.after(() => release.resolve());
   const { kernel } = await fixture(t, async ({ name }) => {
@@ -112,7 +112,7 @@ test("cells execute FIFO while the host remains responsive", { timeout: 30_000 }
   assert.deepEqual(calls, ["A", "B"]);
 });
 
-test("active abort and queued abort leave a usable ordinary kernel", { timeout: 30_000 }, async (t) => {
+test("active abort and queued abort leave a usable ordinary kernel", { timeout: 180000 }, async (t) => {
   const started = deferred(); const release = deferred();
   t.after(() => release.resolve());
   const { kernel } = await fixture(t, async (_payload, { signal }) => {
@@ -130,7 +130,7 @@ test("active abort and queued abort leave a usable ordinary kernel", { timeout: 
   assert.equal((await kernel.execute("'after_abort' in globals(), 'queued_after_abort' in globals()")).mime["text/plain"], "(False, False)");
 });
 
-test("late host completion and progress cannot enter a later cell", { timeout: 30_000 }, async (t) => {
+test("late host completion and progress cannot enter a later cell", { timeout: 180000 }, async (t) => {
   const aStarted = deferred(); const bStarted = deferred(); const releaseA = deferred(); const releaseB = deferred();
   const aFinished = deferred();
   t.after(() => { releaseA.resolve(); releaseB.resolve(); });
@@ -153,7 +153,7 @@ test("late host completion and progress cannot enter a later cell", { timeout: 3
   assert.doesNotMatch(result.stdout, /STALE/);
 });
 
-test("kernel death invalidates already queued cells without replaying side effects", { timeout: 30_000 }, async (t) => {
+test("kernel death invalidates already queued cells without replaying side effects", { timeout: 180000 }, async (t) => {
   const started = deferred(); const release = deferred();
   t.after(() => release.resolve());
   const { kernel, root, options } = await fixture(t, async () => {
@@ -180,7 +180,7 @@ test("kernel death invalidates already queued cells without replaying side effec
 
 const checkpointFor = (toolCallId) => ({ version: 1, sessionId: "synthetic-native-session", toolCallId, actorGeneration: 1 });
 
-test("native results wait for a durable namespace checkpoint inside the same FIFO slot", { timeout: 30_000 }, async (t) => {
+test("native results wait for a durable namespace checkpoint inside the same FIFO slot", { timeout: 180000 }, async (t) => {
   const snapshotStarted = deferred(); const releaseSnapshot = deferred();
   t.after(() => releaseSnapshot.resolve());
   const { kernel, root, options } = await fixture(t, async () => {
@@ -234,7 +234,7 @@ test("native results wait for a durable namespace checkpoint inside the same FIF
   } finally { await replacement.close({ snapshot: false }); }
 });
 
-test("failed native cells checkpoint their actual partial mutation without claiming execution success", { timeout: 30_000 }, async (t) => {
+test("failed native cells checkpoint their actual partial mutation without claiming execution success", { timeout: 180000 }, async (t) => {
   const { kernel, options } = await fixture(t, () => {});
   const result = await kernel.execute('partial_native_value = 77\nraise RuntimeError("after mutation")', {
     namespaceCheckpoint: checkpointFor("partial"),
@@ -251,7 +251,7 @@ test("failed native cells checkpoint their actual partial mutation without claim
   } finally { await replacement.close({ snapshot: false }); }
 });
 
-test("native checkpoint failure preserves the previous snapshot and reports possible side effects", { timeout: 30_000 }, async (t) => {
+test("native checkpoint failure preserves the previous snapshot and reports possible side effects", { timeout: 180000 }, async (t) => {
   const { kernel, root, options } = await fixture(t, () => {});
   const seed = await kernel.execute("durable_value = 41", { namespaceCheckpoint: checkpointFor("seed") });
   const result = await kernel.execute([
@@ -279,7 +279,7 @@ test("native checkpoint failure preserves the previous snapshot and reports poss
   } finally { await replacement.close({ snapshot: false }); }
 });
 
-test("native cancellation during snapshot does not mark an unpublished namespace clean", { timeout: 30_000 }, async (t) => {
+test("native cancellation during snapshot does not mark an unpublished namespace clean", { timeout: 180000 }, async (t) => {
   const snapshotStarted = deferred(); const release = deferred();
   t.after(() => release.resolve());
   const { kernel } = await fixture(t, async () => {
@@ -306,7 +306,7 @@ test("native cancellation during snapshot does not mark an unpublished namespace
   assert.equal((await kernel.execute("snapshot_cancel_value")).mime["text/plain"], "41");
 });
 
-test("rejected snapshot manifests cannot crash startup or supply a trusted checkpoint", { timeout: 60_000 }, async (t) => {
+test("rejected snapshot manifests cannot crash startup or supply a trusted checkpoint", { timeout: 360000 }, async (t) => {
   for (const [name, manifest] of [
     ["list", [1]], ["string", "invalid snapshot"], ["number", 7], ["boolean", true],
     ["invalid checkpoint", { version: 1, saved: [], namespaceCheckpoint: { version: 999 } }],

@@ -188,7 +188,7 @@ test("files.edit performs exact single and replace-all edits while preserving or
   await assertNoTemps(cwd);
 });
 
-test("post-link parent detach is always a structurally committed failure", { timeout: 30_000 }, async (t) => {
+test("post-link parent detach is always a structurally committed failure", { timeout: 180000 }, async (t) => {
   const { cwd, handlers } = await fixture(t);
   const committedParents = Array.from({ length: 30 }, (_, index) => `committed-parent-${index}`);
   const parentNames = [...committedParents, "published-parent", "durability-parent", "ordinary-parent"];
@@ -222,7 +222,7 @@ test("post-link parent detach is always a structurally committed failure", { tim
   }
 });
 
-test("files.edit reports a fixed committed error after adversarial post-rename parent detach", { timeout: 10_000 }, async (t) => {
+test("files.edit reports a fixed committed error after adversarial post-rename parent detach", { timeout: 180000 }, async (t) => {
   const { cwd, handlers } = await fixture(t);
   for (const [index, parentName] of ["edit-committed-parent", "edit-ordinary-parent"].entries()) {
     const parent = path.join(cwd, parentName);

@@ -2,7 +2,7 @@
 \* Sources:
 \*   src/default-inference.mjs sha256:359b5bcb6ad444477af7a769231e343b543ab14f49211045c23b8eecb51016e4
 \*   src/store.mjs sha256:321247cfd4fcdff36e33af0670e59a501ab67e19328b29387b64a78dc37553a2
-\*   src/supervisor.mjs sha256:b1adb2c43e0cc03644b770e2ac9710541f936b7890cfa05efc3e9f0d6fd08df3
+\*   src/supervisor.mjs sha256:f98ce08909ebba0dbc34e8121dac397e068d8fe32d0c21c5eb4017a434b628bb
 EXTENDS Naturals
 CONSTANTS Sessions, Pinned, Old, New, SettingsFirst
 

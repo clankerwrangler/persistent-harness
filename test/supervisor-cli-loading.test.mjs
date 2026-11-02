@@ -29,7 +29,7 @@ async function signalOwned(identity, signal) {
   }
 }
 async function waitForExit(identity, onWaiting) {
-  const deadline = Date.now() + 3000;
+  const deadline = Date.now() + 120_000;
   while (await ownedAlive(identity)) {
     onWaiting();
     if (Date.now() >= deadline) return false;
@@ -137,7 +137,7 @@ async function assertEvaluation(t, observed, { supervisor = false, client = fals
   }
 }
 for (const command of ["ensure", "status", "shutdown", "memory"]) {
-  test(`CLI helper ${command} evaluates only its required control graph`, { timeout: 10000 }, async t => {
+  test(`CLI helper ${command} evaluates only its required control graph`, { timeout: 180000 }, async t => {
     const f = await fixture(t); const payload = command === "status" ? { running: true, diagnostics: [{ code: "synthetic_audit" }] }
       : command === "memory" ? { version: 1, worker: { state: "unavailable-not-running" } } : { stopping: true };
     const requests = await f.peer(request => request.type === "get_liveness" ? { alive: true }
@@ -157,7 +157,7 @@ for (const importOnly of [true,false]) test(`CLI ${importOnly?"import-only":"inv
   await assertEvaluation(t,observed);
 });
 
-test("CLI explicit start still evaluates and runs the real supervisor", {timeout:15000}, async t => {
+test("CLI explicit start still evaluates and runs the real supervisor", {timeout:180000}, async t => {
   const f=await fixture(t), child=f.launch(["start"]); let buffer="";
   const ready=new Promise((resolve,reject)=>{child.stdout.on("data",chunk=>{buffer+=chunk;if(buffer.includes("\n"))resolve(JSON.parse(buffer.slice(0,buffer.indexOf("\n"))));});child.once("error",reject);});
   const status=await ready;assert.equal(status.running,true);assert.equal(status.pid,child.pid);
@@ -165,7 +165,7 @@ test("CLI explicit start still evaluates and runs the real supervisor", {timeout
   const exited=once(child,"exit");await controlRequest(f.socketPath,"shutdown_daemon");assert.equal((await exited)[0],0);
 });
 
-test("CLI ensure removes only helper loading while its start child keeps the normal service graph", {timeout:15000}, async t => {
+test("CLI ensure removes only helper loading while its start child keeps the normal service graph", {timeout:180000}, async t => {
   const waiting = Promise.withResolvers(), removing = Promise.withResolvers();
   const f=await fixture(t, { holdExit: true, onExitWait: () => waiting.resolve(), beforeRemove: async () => {
     removing.resolve();

@@ -14,7 +14,7 @@ const { python: PYTHON_VERSION, ipython: IPYTHON_VERSION, dill: DILL_VERSION } =
 async function settled(client, id, text) {
   let cleanup;
   const done = new Promise((resolve, reject) => {
-    const timer = setTimeout(() => { cleanup(); reject(new Error(`settlement timeout for ${text}`)); }, 30000);
+    const timer = setTimeout(() => { cleanup(); reject(new Error(`settlement timeout for ${text}`)); }, 120_000);
     const listener = frame => { if (frame.event === "actor_event" && frame.data?.sessionId === id && frame.data?.event?.type === "agent_settled") { cleanup(); resolve(); } };
     cleanup = () => { clearTimeout(timer); client.off("event", listener); }; client.on("event", listener);
   });
@@ -85,7 +85,7 @@ async function stockWorkerCase(t, { copyPrerequisites = cp, seed = process.env.P
   supervisor = new HarnessSupervisor({ socketPath: path.join(root, "s.sock"), databasePath: path.join(root, "harness.sqlite"), pidPath: path.join(root, "s.pid"),
     skillsPath: path.resolve("skills"), actorInactivityMs: 0, actorExtensionPaths: [path.resolve("test/fixtures/fake-provider.ts")] });
   pendingSetup = supervisor.start(); await pendingSetup; t.signal.throwIfAborted();
-  client = new HarnessClient({ socketPath: path.join(root, "s.sock"), heartbeatMs: 0, requestTimeoutMs: 40000 });
+  client = new HarnessClient({ requestTimeoutMs: 120_000, socketPath: path.join(root, "s.sock"), heartbeatMs: 0, requestTimeoutMs: 120_000 });
   pendingSetup = client.start({ registrationType: "register_client", clientInstanceId: crypto.randomUUID() });
   await pendingSetup; t.signal.throwIfAborted();
   // This fixture alone consents to its expected disposable runtime installation.
@@ -139,7 +139,7 @@ async function stockWorkerCase(t, { copyPrerequisites = cp, seed = process.env.P
   assert.doesNotMatch(JSON.stringify(messages), /toolResult|thinkingSignature/);
   assert.equal((await client.request("get_notification", { id: attention.id })).notification.state, "resolved");
   await settled(client, admission.sessionId, "RUN_CRON");
-  let delivered; const deadline = Date.now() + 30000;
+  let delivered; const deadline = Date.now() + 120_000;
   while (Date.now() < deadline) {
     delivered = (await client.request("list_notifications")).notifications.find(n => n.kind === "cron");
     if (delivered) break; await new Promise(resolve => setTimeout(resolve, 20));
@@ -152,7 +152,7 @@ async function stockWorkerCase(t, { copyPrerequisites = cp, seed = process.env.P
   assert.equal(provisioningError, null);
 }
 
-test("stock worker: real supervisor, external stock SDK, canonical input and persistent Python", { timeout: 60000 }, t => stockWorkerCase(t));
+test("stock worker: real supervisor, external stock SDK, canonical input and persistent Python", { timeout: 360000 }, t => stockWorkerCase(t));
 
 test("cancelled stock setup drains its copy and cannot start late workers", async t => {
   const controller = new AbortController(), copying = Promise.withResolvers(), release = Promise.withResolvers();

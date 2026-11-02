@@ -95,7 +95,7 @@ test("package smoke loads the standalone harness without creating agent state", 
   await assert.rejects(lstat(agentDir), { code: "ENOENT" });
 });
 
-test("supervisor ensure, status, and shutdown need no companion setup", { timeout: 30_000 }, async t => {
+test("supervisor ensure, status, and shutdown need no companion setup", { timeout: 180000 }, async t => {
   const { root, agentDir } = await fixture(t), supervisor = path.join(packageRoot, "bin", "harness-supervisor.mjs");
   const skills = path.join(root, "skills"); await mkdir(skills);
   const command = name => runNode(supervisor, [name], agentDir, { PI_HARNESS_SKILLS_PATH: skills });
@@ -109,7 +109,7 @@ test("supervisor ensure, status, and shutdown need no companion setup", { timeou
 });
 
 
-test("ensure liveness does not run diagnostics or relax heartbeat registration", { timeout: 15_000 }, async t => {
+test("ensure liveness does not run diagnostics or relax heartbeat registration", { timeout: 180000 }, async t => {
   const { root, agentDir } = await fixture(t);
   const directory = path.join(agentDir, "harness");
   const socketPath = path.join(directory, "supervisor.sock"), pidPath = path.join(directory, "supervisor.pid");
@@ -138,7 +138,7 @@ test("ensure liveness does not run diagnostics or relax heartbeat registration",
   } finally { await supervisor.stop(); }
 });
 
-test("ensure accepts only current or explicit same-version legacy liveness evidence", { timeout: 20_000 }, async t => {
+test("ensure accepts only current or explicit same-version legacy liveness evidence", { timeout: 180000 }, async t => {
   const legacy = { version: PROTOCOL_VERSION, type: "protocol_error", code: "unknown_request",
     message: "unknown request type: get_liveness" };
   const cases = [

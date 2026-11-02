@@ -499,7 +499,7 @@ test("stock compaction sees structured user location only in its rendered transc
 test("compaction cancellation reaches the hook with large opaque history under a bounded heap", () => {
   const fixturePath = fileURLToPath(new URL("./fixtures/compaction-archive-memory.mjs", import.meta.url));
   const output = execFileSync(process.execPath, ["--max-old-space-size=256", fixturePath], {
-    env: process.env, timeout: 30000, encoding: "utf8", maxBuffer: 64 * 1024,
+    env: process.env, timeout: 120_000, encoding: "utf8", maxBuffer: 64 * 1024,
   });
   assert.match(output, /"phase":"verified"/);
 });

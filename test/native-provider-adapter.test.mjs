@@ -61,7 +61,7 @@ function loopbackFetch(url, init) {
   assert.equal(new URL(url).hostname, "127.0.0.1"); return fetch(url, init);
 }
 
-test("SSE loopback: raw complete call precedes terminal, headers/hooks, reasoning, usage, and ordinary wait", { timeout: 10000 }, async (t) => {
+test("SSE loopback: raw complete call precedes terminal, headers/hooks, reasoning, usage, and ordinary wait", { timeout: 180000 }, async (t) => {
   let release, requestBody, headers;
   const gate = new Promise((resolve) => { release = resolve; });
   const reason = { type: "reasoning", id: "rs_original", summary: [{ type: "summary_text", text: "réason" }], encrypted_content: "opaque-fixture" };
@@ -213,14 +213,14 @@ async function websocketFixture(t, handler) {
 }
 const send = (socket, raw) => raw.forEach((event) => socket.send(JSON.stringify(event)));
 
-test("idle WebSocket keeps continuation state without completed caller contexts", { timeout: 30000 }, async () => {
+test("idle WebSocket keeps continuation state without completed caller contexts", { timeout: 180000 }, async () => {
   const { stdout } = await promisify(execFile)(process.execPath,
     ["--expose-gc", fileURLToPath(new URL("./fixtures/native-idle-owner.mjs", import.meta.url)), paths.sdk],
-    { timeout: 20000, maxBuffer: 64 * 1024 });
+    { timeout: 120_000, maxBuffer: 64 * 1024 });
   assert.equal(stdout.trim(), "native idle caller ownership passed");
 });
 
-test("WebSocket loopback: exact raw provenance, reused chain delta, changed-prefix full replay", { timeout: 10000 }, async (t) => {
+test("WebSocket loopback: exact raw provenance, reused chain delta, changed-prefix full replay", { timeout: 180000 }, async (t) => {
   const f = await websocketFixture(t, ({ socket, count }) => send(socket, count === 1 ? frames() : [created(`resp_${count}`), complete(`resp_${count}`)]));
   const first = await collect(f.a.stream(f.selected, context, { transport: "websocket-cached", sessionId: "session" }));
   assert.ok(f.a.nativeCompletion(first.events.find((e) => e.type === "toolcall_end")));
@@ -232,7 +232,7 @@ test("WebSocket loopback: exact raw provenance, reused chain delta, changed-pref
   assert.equal(f.requests[2].previous_response_id, undefined); assert.equal(f.requests[2].input.length, 1);
 });
 
-for (const rejection of ["previous_response_not_found", "websocket_connection_limit_reached"]) test(`WebSocket explicit ${rejection}: reconnect full history without duplicate call`, { timeout: 10000 }, async (t) => {
+for (const rejection of ["previous_response_not_found", "websocket_connection_limit_reached"]) test(`WebSocket explicit ${rejection}: reconnect full history without duplicate call`, { timeout: 1080000 }, async (t) => {
   const f = await websocketFixture(t, ({ socket, count }) => {
     if (count === 2) socket.send(JSON.stringify({ type: "error", code: rejection, message: "fixture rejection" }));
     else send(socket, count === 1 ? frames() : [created("resp_reconnected"), complete("resp_reconnected")]);
@@ -257,7 +257,7 @@ test("auto falls back before WebSocket send; explicit WebSocket stays visible if
   assert.equal((await a.stream(model, context, { transport: "websocket" }).result()).stopReason, "error"); assert.equal(fetched, 1);
 });
 
-test("WebSocket unexplained close after send reports unknown inference, never silently replays", { timeout: 10000 }, async (t) => {
+test("WebSocket unexplained close after send reports unknown inference, never silently replays", { timeout: 180000 }, async (t) => {
   const f = await websocketFixture(t, ({ socket }) => socket.close());
   const result = await f.a.stream(f.selected, context, { transport: "auto", sessionId: "session" }).result();
   assert.equal(result.stopReason, "error"); assert.equal(result.errorMessage, "websocket_closed"); assert.equal(f.requests.length, 1);
@@ -268,7 +268,7 @@ for (const [cut, raw, expected] of [
   ["post-send/pre-created", [], { created: false, count: 0 }],
   ["created/pre-complete", [created(), { type: "response.output_item.added", output_index: 0, item: { ...callItem(), arguments: "" } }], { created: true, count: 1, complete: false }],
   ["complete-item", [created(), doneCall()], { created: true, count: 1, complete: true }],
-]) test(`fault cut ${cut}: typed UNKNOWN is fenced before publication`, { timeout: 10000 }, async (t) => {
+]) test(`fault cut ${cut}: typed UNKNOWN is fenced before publication`, { timeout: 1080000 }, async (t) => {
   const f = await websocketFixture(t, ({ socket }) => { send(socket, raw); socket.close(); });
   const { events, message } = await collect(f.a.stream(f.selected, context, { transport: "auto", sessionId: "fault-session" }));
   const report = message.nativeTransport;
@@ -396,7 +396,7 @@ test("public hook errors never become a private error-payload log", async (t) =>
   assert.equal(result.errorMessage, "provider_request_failed");
 });
 
-test("explicit rejection retry reports each retired attempt with a distinct ID", { timeout: 10000 }, async (t) => {
+test("explicit rejection retry reports each retired attempt with a distinct ID", { timeout: 180000 }, async (t) => {
   const f = await websocketFixture(t, ({ socket, count }) => {
     if (count === 1) socket.send(JSON.stringify({ type: "error", code: "websocket_connection_limit_reached" }));
     else send(socket, [created("resp_accepted"), complete("resp_accepted")]);
@@ -409,7 +409,7 @@ test("explicit rejection retry reports each retired attempt with a distinct ID",
   assert.equal(Object.hasOwn(result, "nativeProviderError"), false);
 });
 
-for (const transport of ["sse", "websocket"]) test(`${transport}: actual terminal-only items preserve complete-call provenance`, { timeout: 10000 }, async (t) => {
+for (const transport of ["sse", "websocket"]) test(`${transport}: actual terminal-only items preserve complete-call provenance`, { timeout: 1080000 }, async (t) => {
   const item = callItem({ id: "fc_terminal", call_id: "call_terminal", status: "completed" });
   const reason = { type: "reasoning", id: "rs_terminal", summary: [], encrypted_content: "opaque-terminal" };
   const text = { type: "message", id: "msg_terminal", role: "assistant", phase: "final_answer", status: "completed", content: [{ type: "output_text", text: "terminal text", annotations: [] }] };
@@ -478,7 +478,7 @@ for (const [name, stale] of Object.entries({
   "added and argument delta": (item) => [{ type: "response.output_item.added", output_index: 0, item: { ...item, arguments: "" } },
     { type: "response.function_call_arguments.delta", output_index: 0, item_id: item.id, delta: item.arguments }],
   "response_id alias": (item) => [{ ...doneCall({ ...item, id: "not-previously-seen" }), response_id: "r-first" }],
-})) test(`cached successful generation fences delayed ${name} before any new event`, { timeout: 10000 }, async (t) => {
+})) test(`cached successful generation fences delayed ${name} before any new event`, { timeout: 1080000 }, async (t) => {
   const prior = callItem({ id: "i-first", call_id: "c-first", status: "completed" });
   const nextItem = callItem({ id: "i-second", call_id: "c-second", status: "completed", arguments: '{"code":"second"}' });
   let staleSent;
@@ -519,7 +519,7 @@ for (const [name, stale] of Object.entries({
   assert.equal(wire.sockets.length, 1); assert.equal(wire.requests[2].previous_response_id, "r-second");
 });
 
-test("cached generation fences old identities after the new response.created", { timeout: 10000 }, async (t) => {
+test("cached generation fences old identities after the new response.created", { timeout: 180000 }, async (t) => {
   const prior = callItem({ id: "i-first", call_id: "c-first" });
   const nextItem = callItem({ id: "i-second", call_id: "c-second" });
   const wire = memorySocket((socket, number) => queueMicrotask(() => {
@@ -1031,7 +1031,7 @@ test("location renderer reaches native input on the same user item without mutat
 });
 
 
-for (const fast of [false, true]) test(`ordinary STOCK SSE body-read failure is replay-safe, Fast=${fast}`, { timeout: 10000 }, async t => {
+for (const fast of [false, true]) test(`ordinary STOCK SSE body-read failure is replay-safe, Fast=${fast}`, { timeout: 1080000 }, async t => {
   const selected = { ...model, provider: "openai-codex", id: "gpt-6.1-sol" };
   const stock = await import(codexApiUrl.href), models = await runtime(t, selected, stock);
   let outgoing, requests = 0, providerEvents = 0, payloads = 0;

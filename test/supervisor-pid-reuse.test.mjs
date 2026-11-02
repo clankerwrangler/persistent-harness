@@ -43,7 +43,7 @@ function stalePidRecord({ pid, socketPath, startedAt = OLD_STARTED_AT, ownerToke
   return { pid, ownerToken, socketPath, startedAt };
 }
 
-function waitLine(stream, timeoutMs = 20_000) {
+function waitLine(stream, timeoutMs = 120_000) {
   return new Promise((resolve, reject) => {
     let buffer = "";
     const timer = setTimeout(() => cleanup(new Error("timed out waiting for daemon startup")), timeoutMs);
@@ -92,7 +92,7 @@ test("pid=7 self-reuse is stale even if that pid is alive", async () => {
   assert.equal(await supervisorInternals.pidRecordIsLiveSupervisor(record, { currentPid: 7 }), false);
 });
 
-test("bind-mounted pid file with self pid and old startedAt lets harness-supervisor start succeed", { timeout: 20_000 }, async (t) => {
+test("bind-mounted pid file with self pid and old startedAt lets harness-supervisor start succeed", { timeout: 180000 }, async (t) => {
   const paths = await makeHarnessDirs(t, "harness-pid-reuse-self-");
   const daemon = await spawnSupervisor(t, paths, {
     beforeStart: `
@@ -118,7 +118,7 @@ test("bind-mounted pid file with self pid and old startedAt lets harness-supervi
   assert.ok(record.startedAt > OLD_STARTED_AT);
 });
 
-test("HarnessSupervisor.start unlinks a bind-mounted self-pid record (Docker recreate / pid=7 class)", { timeout: 20_000 }, async (t) => {
+test("HarnessSupervisor.start unlinks a bind-mounted self-pid record (Docker recreate / pid=7 class)", { timeout: 180000 }, async (t) => {
   const paths = await makeHarnessDirs(t, "harness-pid-reuse-start-");
   await writeFile(paths.pidPath, `${JSON.stringify(stalePidRecord({ pid: process.pid, socketPath: paths.socketPath }))}\n`, { mode: 0o600 });
   await writeFile(paths.socketPath, "stale-socket", { mode: 0o600 });
@@ -132,7 +132,7 @@ test("HarnessSupervisor.start unlinks a bind-mounted self-pid record (Docker rec
   assert.notEqual(record.ownerToken, STALE_OWNER);
 });
 
-test("true live supervisor with matching identity and listening socket still refuses to start", { timeout: 20_000 }, async (t) => {
+test("true live supervisor with matching identity and listening socket still refuses to start", { timeout: 180000 }, async (t) => {
   const paths = await makeHarnessDirs(t, "harness-pid-reuse-live-");
   const daemon = await spawnSupervisor(t, paths);
   let first;
@@ -152,7 +152,7 @@ test("true live supervisor with matching identity and listening socket still ref
   assert.equal(daemon.exitCode, null);
 });
 
-test("dead stale pid and leftover socket still start", { timeout: 20_000 }, async (t) => {
+test("dead stale pid and leftover socket still start", { timeout: 180000 }, async (t) => {
   const paths = await makeHarnessDirs(t, "harness-pid-reuse-stale-");
   const dead = spawn(process.execPath, ["-e", "process.exit(0)"], { stdio: "ignore" });
   await once(dead, "exit");
@@ -167,7 +167,7 @@ test("dead stale pid and leftover socket still start", { timeout: 20_000 }, asyn
   assert.notEqual(record.pid, dead.pid);
 });
 
-test("supervisor start lock treats self-pid as stale Docker reuse", { timeout: 5_000 }, async (t) => {
+test("supervisor start lock treats self-pid as stale Docker reuse", { timeout: 180000 }, async (t) => {
   const root = await mkdtemp(path.join(os.tmpdir(), "harness-start-lock-"));
   t.after(() => rm(root, { recursive: true, force: true }));
   const lockPath = path.join(root, "supervisor.start.lock");

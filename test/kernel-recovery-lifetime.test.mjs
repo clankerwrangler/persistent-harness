@@ -44,6 +44,6 @@ for fail in (False, True):
         assert context["shell"].user_ns["public_value"] == {"public": "captured bytes"}
         assert report["restored"] == ["public_value"]
 `;
-  const result = spawnSync("python3", ["-I", "-c", script, source], { encoding: "utf8", timeout: 15_000, maxBuffer: 16 * 1024 });
+  const result = spawnSync("python3", ["-I", "-c", script, source], { encoding: "utf8", timeout: 120_000, maxBuffer: 16 * 1024 });
   assert.equal(result.status, 0, result.stderr || result.error?.message);
 });

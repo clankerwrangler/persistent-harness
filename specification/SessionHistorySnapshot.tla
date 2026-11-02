@@ -2,7 +2,7 @@
 \* Sources:
 \*   src/session-history-index.mjs sha256:95d926f31220a5f11456c77ae9578ac05fca4cc21d4aeb34ee85a64c0ac839ae
 \*   src/visible-transcript-reader.mjs sha256:244b202937ba51f1c9f06e272fe77ba34cd3316d43cbed956bf6ee98b7fc8061
-\*   src/supervisor.mjs sha256:b1adb2c43e0cc03644b770e2ac9710541f936b7890cfa05efc3e9f0d6fd08df3
+\*   src/supervisor.mjs sha256:f98ce08909ebba0dbc34e8121dac397e068d8fe32d0c21c5eb4017a434b628bb
 EXTENDS Naturals
 CONSTANTS Isolate, ValidateSpans, LabelSnapshot, MaxVersion, HasIndex
 VARIABLES source, committed, staged, writing, query, pinned, captured, strict,

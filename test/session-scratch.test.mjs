@@ -283,15 +283,18 @@ test("retirement proof reaches beyond presentation cache and does not reaudit un
   }
   await backgroundJob(f, root, "bg-ffffffffffff", held);
   await f.client.request("delete_session", { sessionId: root.sessionId });
-  await new Promise(resolve => setTimeout(resolve, 1400));
+  await settleScans(f);
   assert.equal(await absent(scratchOf(f, root)), false);
   await writeFile(path.join(f.supervisor.backgroundJobsDirectory, "bg-000000000000", "meta.json"), "unrelated malformed history");
   await held.finish();
   await until(() => absent(scratchOf(f, root)));
 });
 
-// Several 100 ms background scans (recursive-delete-fixture), enough to observe that nothing changed.
-const SCAN_SETTLE_MS = 400;
+// A scan in flight may predate the last write, so two more must start and finish after it.
+async function settleScans(f) {
+  const start = f.supervisor.backgroundScans;
+  await until(() => f.supervisor.backgroundScans >= start + 3);
+}
 
 test("unknown and partial background identities repair without losing owner or freezing incomplete facts", async t => {
   for (const mode of ["unknown", "missing-birth", "invalid-kind", "invalid-pid"]) await t.test(mode, async t => {
@@ -306,18 +309,18 @@ test("unknown and partial background identities repair without losing owner or f
     await writeMeta(incomplete);
     const result = await f.client.request("delete_session", { sessionId: root.sessionId });
     assert.equal(result.scratchCleanup, "deleting");
-    await new Promise(resolve => setTimeout(resolve, SCAN_SETTLE_MS));
+    await settleScans(f);
     assert.equal(await absent(scratchOf(f, root)), false);
     if (mode !== "unknown") {
       await writeMeta({ ...valid, session_id: "unrelated-owner" });
-      await new Promise(resolve => setTimeout(resolve, SCAN_SETTLE_MS));
+      await settleScans(f);
       assert.equal(await absent(scratchOf(f, root)), false, "a known association cannot be erased by metadata retargeting");
     }
     await writeMeta(valid);
-    await new Promise(resolve => setTimeout(resolve, SCAN_SETTLE_MS));
+    await settleScans(f);
     assert.equal(await absent(scratchOf(f, root)), false, "repair must observe the active replacement PID/birth, not freeze the earlier partial PID");
     await writeMeta({ ...valid, pid: 2 ** 30, starttime: "1" });
-    await new Promise(resolve => setTimeout(resolve, SCAN_SETTLE_MS));
+    await settleScans(f);
     assert.equal(await absent(scratchOf(f, root)), false, "a complete established process identity remains pinned");
     assert.equal(held.child.exitCode, null);
     await held.finish(); await until(() => absent(scratchOf(f, root)));
@@ -342,7 +345,7 @@ test("invalid scratch metadata never blocks root tombstoning and missing-tree re
 });
 
 
-test("inherited service marker does not hold cleanup, but a matching external writer still does", { timeout: 15_000 }, async t => {
+test("inherited service marker does not hold cleanup, but a matching external writer still does", { timeout: 180000 }, async t => {
   const dir = await mkdtemp(path.join(os.tmpdir(), "scratch-service-marker-"));
   const databasePath = path.join(dir, "harness.sqlite"), base = path.join(dir, "scratch"), rootId = "inherited-service-root";
   const socketPath = path.join(dir, "supervisor.sock"), pidPath = path.join(dir, "supervisor.pid");

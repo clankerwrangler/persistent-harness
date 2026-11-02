@@ -3,7 +3,7 @@
 \*   bin/install.mjs sha256:3c72f6cc373f7ffd971ba1fd8e57bb03f34fffaf2aaf221215170e3c41f505ff
 \*   bin/package-load-smoke.mjs sha256:653a20972aacd8adacdee429bce3769145b41b7faa464627121ca3d9eccb3800
 \*   src/external-pi.mjs sha256:38f8ffdff78010243eb4e5c8617ca6c0c003b03a7d46b6240b814d73d14fcbd3
-\*   src/supervisor.mjs sha256:b1adb2c43e0cc03644b770e2ac9710541f936b7890cfa05efc3e9f0d6fd08df3
+\*   src/supervisor.mjs sha256:f98ce08909ebba0dbc34e8121dac397e068d8fe32d0c21c5eb4017a434b628bb
 \*   src/sdk-worker.mjs sha256:ad3637bdce0be9028c01b99eb3b0c619d76473b0def01bae88de50127622ea0a
 \*   src/actor-compaction.mjs sha256:043eb1861c7490795a5b2fd582848d14bb8e157d4361844d1e23c851f0a6e12e
 \*   src/actor-coordinator.mjs sha256:d33d75f88913edccec70c1cc2df0391a3e909d958f96acfd890c3b774935ae62

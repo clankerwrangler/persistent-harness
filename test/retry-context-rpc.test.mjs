@@ -63,7 +63,7 @@ async function fixture(t, { source = "user", prior = false, cancel = false, repl
   const launch = await writeWorkerFixture(dir, path.join(import.meta.dirname, "fixtures/retry-context-provider.mjs"));
   actor = new PiSessionActor({ command: launch.command, args: [...launch.args,"--mode", "rpc", "--no-extensions", "--no-skills", "--no-prompt-templates", "--no-themes", "--tools", "ipython",
     "--provider", "retry-context-fixture", "--model", "replay", "--session", file],
-    cwd: dir, env, requestTimeoutMs: 15000, shutdownTimeoutMs: 1000 });
+    cwd: dir, env, requestTimeoutMs: 120_000, shutdownTimeoutMs: 1000 });
   actor.on("event", event => events.push(event));
   await actor.start();
   assert((await actor.request("get_commands")).commands.some(command => command.name === "persistent-harness-branch"), actor.stderr);

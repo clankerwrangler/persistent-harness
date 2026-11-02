@@ -11,7 +11,7 @@ import { assistantMessageParts } from "../../src/conversation-projection.mjs";
 import { PythonRuntimeManager } from "../../src/python-runtime.mjs";
 import { acceptedNativeRuntime } from "./accepted-native-runtime.mjs";
 
-export async function until(probe, description, timeout = 30_000) {
+export async function until(probe, description, timeout = 120_000) {
   const deadline = Date.now() + timeout;
   while (Date.now() < deadline) {
     const result = await probe(); if (result) return result;
@@ -84,7 +84,7 @@ export async function slimFixture(t, name, script, { models = ["gpt-6-astra"], m
       rawEvents.push(event); timeline.push({ kind: "actor", type: event.type, role: event.message?.role,
         toolCallId: event.toolCallId, update: event.assistantMessageEvent?.type, contentIndex: event.assistantMessageEvent?.contentIndex });
     }); return actor; } });
-  await supervisor.start(); client = new HarnessClient({ socketPath, heartbeatMs: 0, requestTimeoutMs: 30_000 });
+  await supervisor.start(); client = new HarnessClient({ requestTimeoutMs: 120_000, socketPath, heartbeatMs: 0, requestTimeoutMs: 120_000 });
   await client.start({ registrationType: "register_client", clientInstanceId: crypto.randomUUID() });
   client.on("event", (frame) => { if (frame.event === "actor_event") events.push(frame.data.event); });
   sessionId = (await client.request("create_root", { cwd, repositoryRoot: null, name, provider: "openai-codex", model: "gpt-6-astra", thinkingLevel: "off" })).admission.sessionId;

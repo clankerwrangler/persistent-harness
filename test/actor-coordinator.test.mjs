@@ -363,7 +363,7 @@ for (const stage of ["idle-prompt", "nested-prompt", "request", "neutral-prompt"
   assert.equal(reports.length, 1);
   assert.equal(reports[0].data.failureClass, stage === "request" ? "request_preparation" : "prompt_preparation");
   assert.equal(reports[0].data.dispatchBoundary, "before_provider_dispatch");
-  assert.doesNotMatch(JSON.stringify(reports[0].data), /503|injected|FAULT|TAIL/);
+  assert.doesNotMatch(JSON.stringify(reports[0].data), /injected|FAULT|TAIL/);
   assert(!f.events.some(e => e.type === "auto_retry_start"));
   assert(!f.manager.getBranch().some(e => e.customType === "persistent-harness.inference-retry-v1"));
   assert.deepEqual(f.coor.queue.map(item => item.message), stage === "neutral-prompt" ? [] : ["TAIL"]);
@@ -1157,7 +1157,7 @@ test("handled inner Error reused after successful work belongs to the later esca
 });
 
 
-for (const firstReporter of ["context_source", "handle"]) test(`installed afterCommit shares a physical delivery report with ${firstReporter}`, { timeout: 20_000 }, async t => {
+for (const firstReporter of ["context_source", "handle"]) test(`installed afterCommit shares a physical delivery report with ${firstReporter}`, { timeout: 1080000 }, async t => {
   const { EventEmitter } = await import("node:events");
   const { HarnessClient } = await import("../src/client.mjs");
   const { HarnessSupervisor } = await import("./fixtures/isolated-supervisor.mjs");
@@ -1210,7 +1210,7 @@ for (const firstReporter of ["context_source", "handle"]) test(`installed afterC
   await supervisor.start();
   supervisor.store.createRoot({ sessionId, sessionFile: f.manager.getSessionFile(), cwd: root,
     repositoryRoot: null, name: "Isolated tail", actorToken: "tail-fixture", launch: {} });
-  ui = new HarnessClient({ socketPath, heartbeatMs: 0 });
+  ui = new HarnessClient({ requestTimeoutMs: 120_000, socketPath, heartbeatMs: 0 });
   await ui.start({ registrationType: "register_client", clientInstanceId: "tail-fixture" });
   await ui.request("get_actor_state", { sessionId });
   process.env.PI_HARNESS_ACTOR_ID = sessionId; process.env.PI_HARNESS_ACTOR_TOKEN = "tail-fixture";

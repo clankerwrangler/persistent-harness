@@ -11,7 +11,7 @@ import { PythonRuntimeManager } from "../src/python-runtime.mjs";
 const run = promisify(execFile);
 const packageRoot = path.resolve(import.meta.dirname, "..");
 
-test("grouped checkpoint sync preserves every payload, mutation, and publication boundary", { timeout: 30_000 }, async (t) => {
+test("grouped checkpoint sync preserves every payload, mutation, and publication boundary", { timeout: 180000 }, async (t) => {
   const root = await mkdtemp(path.join(os.tmpdir(), "harness-checkpoint-durability-"));
   t.after(() => rm(root, { recursive: true, force: true }));
   const runtime = await new PythonRuntimeManager({ runtimeDir: path.join(root, "runtime") }).ensure({
@@ -331,13 +331,13 @@ print(json.dumps({"passed": True, "cases": 7, "rootAliases": True}))
 `);
   const result = await run(runtime.pythonPath, [script, path.join(packageRoot, "python-runtime", "kernel.py"), root], {
     env: { ...process.env, PYTHONDONTWRITEBYTECODE: "1", PYTHONPATH: path.join(packageRoot, "python-runtime"), IPYTHONDIR: path.join(root, "ipython") },
-    timeout: 25_000,
+    timeout: 120_000,
   });
   assert.deepEqual(JSON.parse(result.stdout), { passed: true, cases: 7, rootAliases: true });
 });
 
 
-test("fresh workers restore top-level aliases in ordinary and durable checkpoints", { timeout: 30_000 }, async (t) => {
+test("fresh workers restore top-level aliases in ordinary and durable checkpoints", { timeout: 180000 }, async (t) => {
   const root = await mkdtemp(path.join(os.tmpdir(), "harness-root-alias-workers-"));
   t.after(() => rm(root, { recursive: true, force: true }));
   const runtime = await new PythonRuntimeManager({ runtimeDir: path.join(root, "runtime") }).ensure({

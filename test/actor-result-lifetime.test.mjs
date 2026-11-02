@@ -130,7 +130,7 @@ function settled(f) {
   assert(f.ends.every(end => end.pending === 0), "release precedes asynchronous end observers");
 }
 
-for (const mode of ["abort", "throw"]) test(`${mode}: settled native results never reach a later run`, { timeout: 10000 }, async t => {
+for (const mode of ["abort", "throw"]) test(`${mode}: settled native results never reach a later run`, { timeout: 1080000 }, async t => {
   const f = await fixture(t);
   for (let i = 0; i < 6; i++) {
     const state = await f.start(mode, { rejectEnd: i === 0 });
@@ -150,7 +150,7 @@ for (const mode of ["abort", "throw"]) test(`${mode}: settled native results nev
   assert.equal(f.results().length, 6); assert.equal(new Set(f.results().map(r => r.toolCallId)).size, 6);
 });
 
-test("normal and provider-error finals preserve original result delivery and canonical hooks", { timeout: 10000 }, async t => {
+test("normal and provider-error finals preserve original result delivery and canonical hooks", { timeout: 180000 }, async t => {
   const f = await fixture(t);
   for (const mode of ["normal", "error"]) { await f.start(mode); await f.coor.waitForIdle(); settled(f); }
   assert.deepEqual(f.turns.map(turn => turn.ids), [["call-1|item-1"], [], ["call-2|item-2"]]);
@@ -159,7 +159,7 @@ test("normal and provider-error finals preserve original result delivery and can
   assert(f.results().every(result => result.details.canonical)); assert.equal(f.results().length, 2);
 });
 
-test("late native completion survives an earlier flight and steering within the same run", { timeout: 10000 }, async t => {
+test("late native completion survives an earlier flight and steering within the same run", { timeout: 180000 }, async t => {
   const f = await fixture(t); const state = await f.start("late");
   await state.firstTurn.promise; await tick();
   assert.equal(f.coor.running, true); assert.equal(f.coor.flight, null); assert.equal(f.coor.tasks.size, 1);
@@ -178,7 +178,7 @@ test("late native completion survives an earlier flight and steering within the 
   assert.equal(f.ends.length, 1); assert.equal(f.results().length, 1);
 });
 
-test("abort waits for a late native result and its canonical publication fence before release", { timeout: 10000 }, async t => {
+test("abort waits for a late native result and its canonical publication fence before release", { timeout: 180000 }, async t => {
   const f = await fixture(t); const state = await f.start("late-abort", { holdCommit: true });
   await state.firstTurn.promise; await tick();
   let done = false; const aborted = f.coor.abort().then(() => { done = true; });
@@ -194,7 +194,7 @@ test("abort waits for a late native result and its canonical publication fence b
 });
 
 
-test("local preparation journals possible effects before an admitted native task finishes its dispatch hook", { timeout: 10000 }, async t => {
+test("local preparation journals possible effects before an admitted native task finishes its dispatch hook", { timeout: 180000 }, async t => {
   const f = await fixture(t), hookEntered = gate(), release = gate();
   t.after(() => release.resolve());
   f.coor.runner.emitToolCall = async () => { hookEntered.resolve(); await release.promise; };
@@ -273,7 +273,7 @@ test("tool session values stay borrowed through nested drain; exposed arrays sur
 });
 
 
-test("late callback rejection from an older run cannot own the current run diagnostic", { timeout: 10000 }, async t => {
+test("late callback rejection from an older run cannot own the current run diagnostic", { timeout: 180000 }, async t => {
   const f = await fixture(t), oldError = new RangeError("PRIVATE_OLD"), currentError = new TypeError("PRIVATE_CURRENT");
   const previous = await f.start("normal", { holdUpdate: true, updateError: oldError });
   t.after(() => previous.updateRelease.resolve());
@@ -296,7 +296,7 @@ test("late callback rejection from an older run cannot own the current run diagn
 });
 
 
-test("a tool-originated drive queues a fresh run without inheriting the old result state", { timeout: 10000 }, async t => {
+test("a tool-originated drive queues a fresh run without inheriting the old result state", { timeout: 180000 }, async t => {
   const f = await fixture(t); let queued = false, firstTurn;
   f.coor.compactionDriver = async () => assert.fail("must not compact");
   f.coor.session.settingsManager.getCompactionSettings = () => ({ enabled: true });

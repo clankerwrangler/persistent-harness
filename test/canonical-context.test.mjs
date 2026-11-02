@@ -745,7 +745,7 @@ function budgetProcess(body) {
   const env = { ...process.env };
   delete env.PI_HARNESS_CONTEXT_STRING_CODE_UNITS;
   assert.deepEqual(JSON.parse(execFileSync(process.execPath, ["--input-type=module", "-e", code],
-    { env, encoding: "utf8", timeout: 30000, maxBuffer: 64 * 1024 })), { passed: true });
+    { env, encoding: "utf8", timeout: 120_000, maxBuffer: 64 * 1024 })), { passed: true });
 }
 
 test("materialized budget getter defaults only when absent and rejects invalid configuration without its value", () => {

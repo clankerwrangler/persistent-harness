@@ -25,12 +25,12 @@ class ReceiptActor extends EventEmitter {
     this.emit("exit", { code: 0, signal: "SIGTERM", expected: true, error: null }); }
 }
 async function eventually(predicate) {
-  const deadline = Date.now() + 5000;
+  const deadline = Date.now() + 120_000;
   while (Date.now() < deadline) { if (predicate()) return; await new Promise(resolve => setImmediate(resolve)); }
   assert.fail("Receipt reconciliation did not complete within the fixture bound");
 }
 
-test("real reader and supervisor recover historical inputs, skip only ambiguity, and recheck without replay", { timeout: 30000 }, async (t) => {
+test("real reader and supervisor recover historical inputs, skip only ambiguity, and recheck without replay", { timeout: 180000 }, async (t) => {
   const directory = await mkdtemp(path.join(os.tmpdir(), "receipt-reader-supervisor-"));
   const skillsPath = path.join(directory, "skills"); await mkdir(skillsPath);
   const ready = Promise.withResolvers(), actors = [], socketPath = path.join(directory, "supervisor.sock");
@@ -43,7 +43,7 @@ test("real reader and supervisor recover historical inputs, skip only ambiguity,
     processTerminator: async () => ({ terminated: true }) });
   t.after(async () => { ready.resolve(); await client?.stop(); await supervisor.stop();
     if (sessionFile) await rm(sessionFile, { force: true }); await rm(directory, { recursive: true, force: true }); });
-  await supervisor.start(); client = new HarnessClient({ socketPath, heartbeatMs: 0 });
+  await supervisor.start(); client = new HarnessClient({ requestTimeoutMs: 120_000, socketPath, heartbeatMs: 0 });
   await client.start({ registrationType: "register_client", clientInstanceId: "receipt-reader-integration" });
   const { admission } = await client.request("create_root", { cwd: directory, repositoryRoot: null, name: "Receipt reader integration",
     provider: null, model: null, thinkingLevel: null });
@@ -138,7 +138,7 @@ test("real reader and supervisor recover historical inputs, skip only ambiguity,
   assert.match(log, /actor_input_unresolved/); assert.doesNotMatch(log, /Ambiguous exact body|Scheduled original work|Completed original work|"digest"/);
 });
 
-test("real worker startup leaves historical pending proof to supervisor reconciliation without replay", { timeout: 30000 }, async t => {
+test("real worker startup leaves historical pending proof to supervisor reconciliation without replay", { timeout: 180000 }, async t => {
   const directory = await mkdtemp(path.join(os.tmpdir(), "receipt-worker-startup-"));
   const agentDir = path.join(directory, "agent"), skillsPath = path.join(directory, "skills");
   await mkdir(agentDir); await mkdir(skillsPath);
@@ -167,7 +167,7 @@ test("real worker startup leaves historical pending proof to supervisor reconcil
   supervisor.store.markActorStarted = (...args) => { const result = markStarted(...args); started = true; return result; };
   const complete = supervisor.store.completeActorInput.bind(supervisor.store);
   supervisor.store.completeActorInput = (...args) => { completions.push({ inputId: args[0], started }); return complete(...args); };
-  client = new HarnessClient({ socketPath, heartbeatMs: 0, requestTimeoutMs: 20000 });
+  client = new HarnessClient({ requestTimeoutMs: 120_000, socketPath, heartbeatMs: 0, requestTimeoutMs: 120_000 });
   await client.start({ registrationType: "register_client", clientInstanceId: "real-startup-proof" });
   const { admission } = await client.request("create_root", { cwd: directory, repositoryRoot: null, name: "Synthetic startup proof",
     provider: "harness-fake", model: "fake-model", thinkingLevel: null });

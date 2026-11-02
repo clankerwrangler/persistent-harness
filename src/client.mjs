@@ -109,6 +109,8 @@ export class HarnessClient extends EventEmitter {
   }
   #startHeartbeat() { this.#stopHeartbeat(); if (this.heartbeatMs <= 0) return; this.#heartbeatTimer = setInterval(() => this.request("heartbeat", {}).catch(() => this.#socket?.destroy()), this.heartbeatMs); this.#heartbeatTimer.unref(); }
   #stopHeartbeat() { if (this.#heartbeatTimer) clearInterval(this.#heartbeatTimer); this.#heartbeatTimer = undefined; }
+  /** A rejection or stop that already happened, for waiters that start listening after it. */
+  get terminalState() { return this.#registrationRejected ? "rejected" : this.#stopped ? "stopped" : null; }
   #setStatus(state, error) { this.emit("status", { state, error: error instanceof Error ? error.message : error ? String(error) : undefined }); }
 
   request(type, params = {}) {

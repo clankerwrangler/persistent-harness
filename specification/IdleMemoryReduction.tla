@@ -1,6 +1,6 @@
 -------------------- MODULE IdleMemoryReduction --------------------
 \* Sources:
-\*   src/supervisor.mjs sha256:b1adb2c43e0cc03644b770e2ac9710541f936b7890cfa05efc3e9f0d6fd08df3
+\*   src/supervisor.mjs sha256:f98ce08909ebba0dbc34e8121dac397e068d8fe32d0c21c5eb4017a434b628bb
 \*   src/sdk-worker.mjs sha256:ad3637bdce0be9028c01b99eb3b0c619d76473b0def01bae88de50127622ea0a
 \*   src/idle-memory.mjs sha256:22f406794c28a77232e5c4c6359831b3d38a2a7d7f747d59162a26bb3d7539a3
 

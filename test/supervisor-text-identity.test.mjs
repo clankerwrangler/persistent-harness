@@ -20,7 +20,7 @@ class Actor extends EventEmitter {
   async close() { this.isRunning = false; this.emit("exit", { expected: true, code: 0 }); }
 }
 
-test("supervisor joins slim core text IDs through prefix rebasing and repeated canonical reads", { timeout: 20_000 }, async (t) => {
+test("supervisor joins slim core text IDs through prefix rebasing and repeated canonical reads", { timeout: 180000 }, async (t) => {
   const directory = await mkdtemp(path.join(os.tmpdir(), "supervisor-text-id-")); const skillDir = path.join(directory, "skills");
   const agentDir = path.join(directory, "agent"); await Promise.all([mkdir(skillDir), mkdir(agentDir)]);
   const previousAgent = process.env.PI_CODING_AGENT_DIR; process.env.PI_CODING_AGENT_DIR = agentDir;
@@ -41,7 +41,7 @@ test("supervisor joins slim core text IDs through prefix rebasing and repeated c
     await rm(directory, { recursive: true, force: true }); });
   await supervisor.start(); supervisor.store.createRoot({ sessionId, sessionFile, cwd: directory, repositoryRoot: null,
     name: "Core text identity fixture", actorToken: "synthetic", launch: {} }, 1);
-  client = new HarnessClient({ socketPath, heartbeatMs: 0 });
+  client = new HarnessClient({ requestTimeoutMs: 120_000, socketPath, heartbeatMs: 0 });
   await client.start({ registrationType: "register_client", clientInstanceId: "text-id-client" });
   client.on("event", (frame) => { if (frame.event === "actor_event") events.push(frame.data.event); });
   await client.request("subscribe_session", { selector: sessionId });

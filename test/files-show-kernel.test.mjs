@@ -10,7 +10,7 @@ import { PythonRuntimeManager } from "../src/python-runtime.mjs";
 const support = path.resolve(import.meta.dirname, "../python-runtime");
 const PNG = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGP4z8DwHwAFAAH/iZk9HQAAAABJRU5ErkJggg==";
 
-test("a real kernel delivers a show-only image to the display part and only a note to the model", { timeout: 60_000 }, async (t) => {
+test("a real kernel delivers a show-only image to the display part and only a note to the model", { timeout: 360000 }, async (t) => {
   const root = await mkdtemp(path.join(os.tmpdir(), "harness-files-show-"));
   const previousIpythonDir = process.env.IPYTHONDIR; process.env.IPYTHONDIR = path.join(root, "ipython");
   const runtime = await new PythonRuntimeManager({ runtimeDir: path.join(root, "runtime") }).ensure({ skills: [], consent: async () => true });

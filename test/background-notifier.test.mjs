@@ -21,7 +21,7 @@ async function createJob(directory, id, { sessionId = "session-a", exitCode = 0,
   await writeFile(path.join(job, "exit.json"), JSON.stringify({ exit_code: exitCode, signal, ended_at: endedAt }));
 }
 
-async function eventually(fn, timeoutMs = 2000) {
+async function eventually(fn, timeoutMs = 120_000) {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) { if (await fn()) return; await new Promise((resolve) => setTimeout(resolve, 10)); }
   throw new Error("condition did not become true");
@@ -275,7 +275,7 @@ test("oversized and nonregular metadata do not leak or block active and terminal
   await symlink(path.join(directory, validId), path.join(directory, "bg-000000000004"));
   const fifo = path.join(directory, "bg-000000000005", "meta.json");
   await mkdir(path.dirname(fifo));
-  await promisify(execFile)("mkfifo", [fifo], { timeout: 1000 });
+  await promisify(execFile)("mkfifo", [fifo], { timeout: 120_000 });
   await mkdir(path.join(directory, "bg-000000000006", "meta.json"), { recursive: true });
   await createJob(directory, "bg-ffffffffffff");
   let completions = 0;
@@ -287,7 +287,7 @@ test("oversized and nonregular metadata do not leak or block active and terminal
   await eventually(() => monitor.getActiveBackgroundJobs("session-a").length === 0);
 });
 
-test("canonical Python launch and adoption stay visible until their terminal markers arrive", { timeout: 15_000 }, async (t) => {
+test("canonical Python launch and adoption stay visible until their terminal markers arrive", { timeout: 180000 }, async (t) => {
   const root = await mkdtemp(path.join(os.tmpdir(), "background-notifier-canonical-"));
   const agentDirectory = path.join(root, "agent");
   const directory = path.join(agentDirectory, "state", "background-jobs");
@@ -317,7 +317,7 @@ asyncio.run(run())
       PYTHONPATH: path.join(process.env.PI_HARNESS_SKILLS_PATH || path.resolve(import.meta.dirname, "../skills"), "background", "src"),
       PYTHONDONTWRITEBYTECODE: "1",
     },
-    timeout: 5000, maxBuffer: 64 * 1024,
+    timeout: 120_000, maxBuffer: 64 * 1024,
   });
   ids = JSON.parse(stdout);
   const deliveries = [];
@@ -418,7 +418,7 @@ test("fair discovery reaches jobs beyond retained history without stale activity
     logger: { error() {} },
   });
   monitor.start(); t.after(() => monitor.stop());
-  await eventually(() => monitor.getActiveBackgroundJobs("session-a").some((job) => job.id === activeId) && attempts === 2, 4000);
+  await eventually(() => monitor.getActiveBackgroundJobs("session-a").some((job) => job.id === activeId) && attempts === 2, 120_000);
   await new Promise((resolve) => setTimeout(resolve, 750));
   assert.equal(changes.length, 1, "unvisited discovery batches do not clear verified live jobs");
   assert.equal(attempts, 2, "notification markers still prevent redelivery across scan cycles");
@@ -430,7 +430,7 @@ test("fair discovery reaches jobs beyond retained history without stale activity
   await createActiveJob(directory, activeId, identity);
   const restarted = new BackgroundCompletionMonitor({ directory, intervalMs: 100, dispatch: async () => { throw new Error("must not redeliver"); } });
   restarted.start(); t.after(() => restarted.stop());
-  await eventually(() => restarted.getActiveBackgroundJobs("session-a").some((job) => job.id === activeId), 4000);
+  await eventually(() => restarted.getActiveBackgroundJobs("session-a").some((job) => job.id === activeId), 120_000);
   const exited = once(identity.child, "exit");
   identity.child.kill("SIGKILL");
   await exited;

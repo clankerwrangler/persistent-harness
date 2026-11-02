@@ -7,7 +7,7 @@ import { HarnessClient } from "../../src/client.mjs";
 import { HarnessSupervisor } from "./isolated-supervisor.mjs";
 import { ACTOR_INPUT_COMMAND } from "../../src/protocol.mjs";
 export const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
-export async function eventually(predicate, timeout = 3000) {
+export async function eventually(predicate, timeout = 120_000) {
   const deadline = Date.now() + timeout;
   while (Date.now() < deadline) { const value = await predicate(); if (value) return value; await delay(10); }
   throw new Error("condition not reached");
@@ -18,7 +18,7 @@ class Actor extends EventEmitter {
   state() { return { sessionId: this.session.sessionId, sessionFile: this.session.sessionFile, isStreaming: this.streaming,
     model: this.session.launch?.model?.resolved ?? null, thinkingLevel: this.session.launch?.thinking?.resolved ?? "off" }; }
   async start() {
-    this.connection = new HarnessClient({ socketPath: this.env.PI_HARNESS_SOCKET, heartbeatMs: 0 });
+    this.connection = new HarnessClient({ requestTimeoutMs: 120_000, socketPath: this.env.PI_HARNESS_SOCKET, heartbeatMs: 0 });
     await this.connection.start({ registrationType: "register_actor", sessionId: this.session.sessionId, sessionFile: this.session.sessionFile,
       cwd: this.session.cwd, repositoryRoot: this.session.repositoryRoot, actorToken: this.session.actorToken, actorGeneration: this.session.actorGeneration });
     this.isRunning = true; return this.state();
@@ -59,7 +59,7 @@ export async function fixture(t, options = {}) {
     processIdentityFactory: async pid => ({ version: 1, pid, processGroup: pid, startTime: "fake", ownerToken: "fake" }),
     processTerminator: async () => ({ terminated: true }), logger: { error: message => errors.push(String(message)), log() {} }, ...options });
   await supervisor.start();
-  const client = new HarnessClient({ socketPath: supervisor.socketPath, heartbeatMs: 0 });
+  const client = new HarnessClient({ requestTimeoutMs: 120_000, socketPath: supervisor.socketPath, heartbeatMs: 0 });
   await client.start({ registrationType: "register_client", clientInstanceId: "notification-fixture" });
   t.after(async () => { await client.stop(); await supervisor.stop(); await rm(dir, { recursive: true, force: true }); });
   async function actor(parentId = null) {

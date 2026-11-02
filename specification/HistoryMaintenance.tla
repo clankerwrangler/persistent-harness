@@ -1,6 +1,6 @@
 --------------------- MODULE HistoryMaintenance ---------------------
 \* Sources:
-\*   src/supervisor.mjs sha256:b1adb2c43e0cc03644b770e2ac9710541f936b7890cfa05efc3e9f0d6fd08df3
+\*   src/supervisor.mjs sha256:f98ce08909ebba0dbc34e8121dac397e068d8fe32d0c21c5eb4017a434b628bb
 \*   src/session-history-index.mjs sha256:95d926f31220a5f11456c77ae9578ac05fca4cc21d4aeb34ee85a64c0ac839ae
 
 EXTENDS Naturals

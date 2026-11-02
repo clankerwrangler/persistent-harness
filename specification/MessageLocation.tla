@@ -2,7 +2,7 @@
 \* Sources:
 \*   src/store.mjs sha256:321247cfd4fcdff36e33af0670e59a501ab67e19328b29387b64a78dc37553a2
 \*   src/actor-coordinator.mjs sha256:d33d75f88913edccec70c1cc2df0391a3e909d958f96acfd890c3b774935ae62
-\*   src/supervisor.mjs sha256:b1adb2c43e0cc03644b770e2ac9710541f936b7890cfa05efc3e9f0d6fd08df3
+\*   src/supervisor.mjs sha256:f98ce08909ebba0dbc34e8121dac397e068d8fe32d0c21c5eb4017a434b628bb
 \*   src/visible-transcript-reader.mjs sha256:244b202937ba51f1c9f06e272fe77ba34cd3316d43cbed956bf6ee98b7fc8061
 \*   src/input-location.mjs sha256:a6267b63c81f85e71d0483c166e0a6480d5d37dfba5929ee9eb203eec2428781
 \*   src/conversation-projection.mjs sha256:9ccd97f1657710f009ea425590b99a791e5c7ba4b1a9367e96d9da67787cabed

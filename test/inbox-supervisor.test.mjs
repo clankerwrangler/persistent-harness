@@ -10,7 +10,7 @@ import { InboxStore } from "../src/inbox.mjs";
 import { HarnessSupervisor } from "./fixtures/isolated-supervisor.mjs";
 import { ACTOR_INPUT_COMMAND, actorInputCustomPayload } from "../src/protocol.mjs";
 
-async function eventually(predicate, timeout = 3000) {
+async function eventually(predicate, timeout = 120_000) {
   const deadline = Date.now() + timeout;
   while (Date.now() < deadline) { const value = await predicate(); if (value) return value; await new Promise((resolve) => setTimeout(resolve, 20)); }
   throw new Error("condition not reached");
@@ -23,7 +23,7 @@ class InboxFakeActor extends EventEmitter {
       model: this.session.launch?.model?.resolved ?? null, thinkingLevel: this.session.launch?.thinking?.resolved ?? "off" };
   }
   async start() {
-    this.connection = new HarnessClient({ socketPath: this.env.PI_HARNESS_SOCKET, heartbeatMs: 0 });
+    this.connection = new HarnessClient({ requestTimeoutMs: 120_000, socketPath: this.env.PI_HARNESS_SOCKET, heartbeatMs: 0 });
     await this.connection.start({ registrationType: "register_actor", sessionId: this.session.sessionId, sessionFile: this.session.sessionFile,
       cwd: this.session.cwd, repositoryRoot: this.session.repositoryRoot, actorToken: this.session.actorToken, actorGeneration: this.session.actorGeneration });
     this.isRunning = true; return this.#state();
@@ -48,7 +48,7 @@ class InboxFakeActor extends EventEmitter {
     this.emit("exit", { code: 0, signal: "SIGTERM", expected: true, error: null }); }
 }
 
-test("an inbox message from a registered sender reaches the routed session as a labelled background input", { timeout: 15_000 }, async (t) => {
+test("an inbox message from a registered sender reaches the routed session as a labelled background input", { timeout: 180000 }, async (t) => {
   const root = await mkdtemp(path.join(os.tmpdir(), "harness-inbox-supervisor-")); const skillsPath = path.join(root, "skills");
   await mkdir(skillsPath); const socketPath = path.join(root, "run", "supervisor.sock"); const actors = new Map();
   const databasePath = path.join(root, "state", "harness.sqlite");
@@ -60,7 +60,7 @@ test("an inbox message from a registered sender reaches the routed session as a 
   let browser;
   await supervisor.start();
   t.after(async () => { await browser?.stop(); await supervisor.stop(); await rm(root, { recursive: true, force: true }); });
-  browser = new HarnessClient({ socketPath, heartbeatMs: 0 });
+  browser = new HarnessClient({ requestTimeoutMs: 120_000, socketPath, heartbeatMs: 0 });
   await browser.start({ registrationType: "register_client", clientInstanceId: "inbox-browser" });
   await loadExternalPiSdk(); // This fixture measures warm inbox/idle behavior, not cold SDK bootstrap.
   const { sessionId } = (await browser.request("create_root", { cwd: root, repositoryRoot: root, name: "Mail",

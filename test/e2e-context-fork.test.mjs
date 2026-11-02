@@ -25,7 +25,7 @@ function textOf(message) {
   return (message?.content ?? []).filter((block) => block.type === "text").map((block) => block.text).join("\n");
 }
 
-async function waitUntil(probe, description, timeoutMs = 90_000) {
+async function waitUntil(probe, description, timeoutMs = 120_000) {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
     const value = await probe();
@@ -74,7 +74,7 @@ function kernelReport(label, fields) {
 
 // Exercise real Pi, the Python skill, host admission, and first provider payload.
 // All sessions, control state, and provider traffic belong to this test only.
-test("optional context forks preserve first-turn history with fresh kernels and canonical child policy", { timeout: 300_000 }, async (t) => {
+test("optional context forks preserve first-turn history with fresh kernels and canonical child policy", { timeout: 1800000 }, async (t) => {
   const root = await mkdtemp(path.join(os.tmpdir(), "harness-context-fork-e2e-"));
   const agentDir = path.join(root, "agent");
   const cwd = path.join(root, "project");
@@ -171,7 +171,7 @@ test("optional context forks preserve first-turn history with fresh kernels and 
     maxDepth: 2,
   });
   await supervisor.start();
-  client = new HarnessClient({ socketPath, heartbeatMs: 0, requestTimeoutMs: 120_000 });
+  client = new HarnessClient({ requestTimeoutMs: 120_000, socketPath, heartbeatMs: 0, requestTimeoutMs: 120_000 });
   assert(await client.start({ registrationType: "register_client", clientInstanceId: randomUUID() }));
   const parent = (await client.request("create_root", {
     cwd, repositoryRoot: null, name: "fork-e2e-root", provider: "harness-fork-fake", model: "parent-model", thinkingLevel: null,

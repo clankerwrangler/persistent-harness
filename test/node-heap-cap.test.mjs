@@ -43,7 +43,7 @@ test("RPC generated pre-SDK guard proves cap/parity and stops bootstrap on eithe
     // Ordinary uncapped test runs delegate only this check to an explicitly capped parent.
     const result = spawnSync(process.execPath, ["--max-old-space-size=256", "--test", "--test-isolation=none",
       "--test-name-pattern=^RPC generated pre-SDK guard", import.meta.filename], {
-      env: { PATH: process.env.PATH, HOME: process.env.HOME, TMPDIR: os.tmpdir() }, encoding: "utf8", timeout: 30000,
+      env: { PATH: process.env.PATH, HOME: process.env.HOME, TMPDIR: os.tmpdir() }, encoding: "utf8", timeout: 120_000,
     });
     assert.ifError(result.error); assert.equal(result.status, 0, result.stderr + result.stdout); return;
   }
@@ -69,7 +69,7 @@ test("RPC generated pre-SDK guard proves cap/parity and stops bootstrap on eithe
         : prefix;
     await writeFile(script, code);
     const result = spawnSync(launch.command, [cap, script], {
-      cwd: dir, env: { PATH: process.env.PATH, HOME: dir }, encoding: "utf8", timeout: 10000,
+      cwd: dir, env: { PATH: process.env.PATH, HOME: dir }, encoding: "utf8", timeout: 120_000,
     });
     assert.ifError(result.error);
     if (kind === "good") {

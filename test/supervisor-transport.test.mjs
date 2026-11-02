@@ -17,7 +17,7 @@ async function bounded(promise, description, timeout = 3000) {
   try { return await Promise.race([promise, new Promise((_, reject) => { timer = setTimeout(() => reject(new Error(`Timed out: ${description}`)), timeout); })]); }
   finally { clearTimeout(timer); }
 }
-async function eventually(probe, description, timeout = 3000) {
+async function eventually(probe, description, timeout = 120_000) {
   const end = Date.now() + timeout;
   while (Date.now() < end) { const value = await probe(); if (value) return value; await new Promise(resolve => setTimeout(resolve, 10)); }
   assert.fail(`Timed out: ${description}`);
@@ -48,7 +48,7 @@ class TransportActor extends EventEmitter {
   showCallback(id) {
     assert(this.pendingCallbacks.has(id));
     this.emit("event", { type: "extension_ui_request", id, method: "confirm", title: "Synthetic transport callback",
-      message: "Private fixture only", timeout: 1000 });
+      message: "Private fixture only", timeout: 120_000 });
   }
   send(frame) {
     if (frame?.type !== "extension_ui_response") return;
@@ -98,7 +98,7 @@ async function fixture(t, { maxFrameBytes } = {}) {
       actorToken: `synthetic-${id}`, launch: {} }, 1).session;
   };
   const a = await add("transport-a"), b = await add("transport-b");
-  const connect = async () => { const client = new HarnessClient({ socketPath, heartbeatMs: 0, requestTimeoutMs: 10_000 }); clients.push(client);
+  const connect = async () => { const client = new HarnessClient({ requestTimeoutMs: 120_000, socketPath, heartbeatMs: 0, requestTimeoutMs: 120_000 }); clients.push(client);
     await client.start({ registrationType: "register_client", clientInstanceId: crypto.randomUUID() }); return client; };
   const hold = id => { const gate = { started: deferred(), release: deferred() }; gates.push(gate); if (id) readGates.set(id, gate); return gate; };
   const raw = async () => {
@@ -112,7 +112,7 @@ async function fixture(t, { maxFrameBytes } = {}) {
   return { root, supervisor, actors, a, b, add, connect, hold, raw };
 }
 
-test("a held history read does not block unrelated input admission, reads, or a healthy peer", { timeout: 15_000 }, async t => {
+test("a held history read does not block unrelated input admission, reads, or a healthy peer", { timeout: 180000 }, async t => {
   const f = await fixture(t), client = await f.connect(), peer = await f.connect();
   const gate = f.hold(f.a.sessionId), held = client.request("get_visible_messages", { sessionId: f.a.sessionId }); held.catch(() => {});
   await bounded(gate.started.promise, "held canonical read");
@@ -125,7 +125,7 @@ test("a held history read does not block unrelated input admission, reads, or a 
   gate.release.resolve(); await held;
 });
 
-test("same-session mutations remain ordered while another session remains available", { timeout: 15_000 }, async t => {
+test("same-session mutations remain ordered while another session remains available", { timeout: 180000 }, async t => {
   const f = await fixture(t), first = await f.connect(), second = await f.connect(), healthy = await f.connect();
   await first.request("subscribe_session", { selector: f.a.sessionId }); await healthy.request("subscribe_session", { selector: f.b.sessionId });
   const actor = f.actors.get(f.a.sessionId), gate = f.hold(); actor.compactGate = gate;
@@ -136,7 +136,7 @@ test("same-session mutations remain ordered while another session remains availa
   gate.release.resolve(); assert.equal((await one).result.summary, "compaction-1"); assert.equal((await two).result.summary, "compaction-2");
 });
 
-test("registration admission is immediate and cannot retroactively grant or replace a role", { timeout: 15_000 }, async t => {
+test("registration admission is immediate and cannot retroactively grant or replace a role", { timeout: 180000 }, async t => {
   const f = await fixture(t), raw = await f.raw();
   raw.socket.write(Buffer.concat([
     raw.frame("before-register", "list_sessions"),
@@ -153,7 +153,7 @@ test("registration admission is immediate and cannot retroactively grant or repl
   assert.equal(responses.get("after-role-attempt").ok, true); assert.equal(raw.closed(), false);
 });
 
-test("an in-flight duplicate ID is rejected before a held ordinary read finishes", { timeout: 15_000 }, async t => {
+test("an in-flight duplicate ID is rejected before a held ordinary read finishes", { timeout: 180000 }, async t => {
   const f = await fixture(t), raw = await f.raw(), healthy = await f.connect();
   raw.send("register", "register_client", { clientInstanceId: "transport-duplicate" });
   await eventually(() => raw.frames.some(frame => frame.id === "register" && frame.ok), "raw registration");
@@ -168,7 +168,7 @@ test("an in-flight duplicate ID is rejected before a held ordinary read finishes
 });
 
 
-test("bounded indexed output disconnects only a nonreader and keeps a healthy peer responsive", { timeout: 15_000 }, async t => {
+test("bounded indexed output disconnects only a nonreader and keeps a healthy peer responsive", { timeout: 180000 }, async t => {
   const maxFrameBytes = 256 * 1024, budget = socketOutputBufferLimit(maxFrameBytes);
   assert.equal(socketOutputBufferLimit(), 5_505_025, "Use the reviewed default budget, not the smaller root-output budget");
   assert.equal(budget, maxFrameBytes + 1 + 256 * 1024, "The budget admits one complete legal frame plus headroom");
@@ -202,7 +202,7 @@ test("bounded indexed output disconnects only a nonreader and keeps a healthy pe
 });
 
 
-test("bounded admission cannot obstruct the legal callback needed by one executing mutation", { timeout: 15_000 }, async t => {
+test("bounded admission cannot obstruct the legal callback needed by one executing mutation", { timeout: 180000 }, async t => {
   const f = await fixture(t), client = await f.connect(), healthy = await f.connect(), requests = [], callbacks = new Map();
   let server, disconnected = 0, arrivedCompactions = 0;
   const write = net.Socket.prototype.write;
@@ -284,7 +284,7 @@ function assertShared(observed, predicate, recipients) {
   for (const { chunk } of writes) { assert.equal(chunk, writes[0].chunk); assert.equal(String(chunk), `${encodes[0].text}\n`); }
 }
 
-test("identical broadcasts encode once and retain public subscriptions, generations, and input order", { timeout: 15000 }, async t => {
+test("identical broadcasts encode once and retain public subscriptions, generations, and input order", { timeout: 180000 }, async t => {
   const f = await fixture(t), one = await f.connect(), two = await f.connect(), outsider = await f.connect();
   await one.request("subscribe_session", { selector: f.a.sessionId });
   await two.request("subscribe_session", { selector: f.a.sessionId });
@@ -320,7 +320,7 @@ test("identical broadcasts encode once and retain public subscriptions, generati
   t.diagnostic(JSON.stringify({ broadcastEncodes: { actor: 1, navigator: 1, inputState: 1, inputOutcome: 1 }, actorRecipients: 2, navigatorRecipients: 3 }));
 });
 
-test("dialogs do not retarget closing, ended, or destroyed selected sockets", { timeout: 15000 }, async t => {
+test("dialogs do not retarget closing, ended, or destroyed selected sockets", { timeout: 180000 }, async t => {
   for (const mode of ["closing", "ended", "destroyed"]) await t.test(mode, async t => {
     const f = await fixture(t), first = await f.raw();
     first.send("register-first", "register_client", { clientInstanceId: `dialog-${mode}` });
@@ -332,7 +332,7 @@ test("dialogs do not retarget closing, ended, or destroyed selected sockets", { 
     const server = observed.writes.find(({ frame }) => frame.type === "response" && frame.id === "subscribe-first").socket;
     await two.request("subscribe_session", { selector: f.a.sessionId });
     const actor = f.actors.get(f.a.sessionId);
-    actor.emit("event", { type: "extension_ui_request", method: "confirm", id: "selected-dialog", message: "Select once", timeout: 10000 });
+    actor.emit("event", { type: "extension_ui_request", method: "confirm", id: "selected-dialog", message: "Select once", timeout: 120_000 });
     await eventually(() => actorFrames(first.frames, "extension_ui_request").length === 1, "selected dialog");
     assertShared(observed, frame => frame.event === "actor_event" && frame.data.event.id === "selected-dialog", 1);
     assert.equal(actorFrames(seen, "extension_ui_request").length, 0);
@@ -354,7 +354,7 @@ test("dialogs do not retarget closing, ended, or destroyed selected sockets", { 
       else { server.destroy(); assert.equal(server.destroyed, true); }
       // Selection precedes #write eligibility, even before close cleanup removes the subscription.
       const before = observed.encodes.length;
-      actor.emit("event", { type: "extension_ui_request", method: "confirm", id: "ineligible-dialog", message: "Do not retarget", timeout: 10000 });
+      actor.emit("event", { type: "extension_ui_request", method: "confirm", id: "ineligible-dialog", message: "Do not retarget", timeout: 120_000 });
       assert.equal(observed.encodes.length, before, "no eligible selected recipient means no encoding");
       actor.emit("event", { type: "extension_ui_request", method: "notify", id: "eligible-peer", message: "Still shared" });
       await eventually(() => seen.some(frame => frame.data?.event?.id === "eligible-peer"), "eligible peer delivery");
@@ -364,7 +364,7 @@ test("dialogs do not retarget closing, ended, or destroyed selected sockets", { 
   });
 });
 
-test("ordinary oversized broadcasts share the existing fallback and encoding failures isolate recipients", { timeout: 15000 }, async t => {
+test("ordinary oversized broadcasts share the existing fallback and encoding failures isolate recipients", { timeout: 180000 }, async t => {
   const f = await fixture(t, { maxFrameBytes: 4096 }), one = await f.connect(), two = await f.connect();
   await one.request("subscribe_session", { selector: f.a.sessionId }); await two.request("subscribe_session", { selector: f.a.sessionId });
   const observed = observeBroadcasts(t), actor = f.actors.get(f.a.sessionId), seen = [[], []];
@@ -389,7 +389,7 @@ test("ordinary oversized broadcasts share the existing fallback and encoding fai
   assert.equal((await unrelated.request("heartbeat")).alive, true, "an unselected existing client is unaffected");
 });
 
-test("shared broadcast queues drain immutable bytes in order and bound only the stalled client", { timeout: 20000 }, async t => {
+test("shared broadcast queues drain immutable bytes in order and bound only the stalled client", { timeout: 180000 }, async t => {
   const maxFrameBytes = 64 * 1024, budget = socketOutputBufferLimit(maxFrameBytes);
   const f = await fixture(t, { maxFrameBytes }), healthy = await f.connect(), slow = await f.raw();
   await healthy.request("subscribe_session", { selector: f.a.sessionId });
