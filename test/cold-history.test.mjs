@@ -123,7 +123,9 @@ test("saved cards that don't match the file are ignored", () => {
   first.project(); first.session.bookmark("e1", 2); first.project();
   releaseColdHeaders(first.manager);
   const cards = structuredClone(exportColdCards(first.manager));
-  for (const bad of [{ ...cards, count: 99 }, { ...cards, headers: cards.headers.map(header => ({ ...header, id: `x${header.id}` })) }]) {
+  for (const bad of [{ ...cards, count: 99 },
+    { ...cards, headers: cards.headers.map(header => ({ ...header, id: `x${header.id}` })) },
+    { ...cards, headers: cards.headers.map((header, index) => index ? header : { ...header, type: "" }) }]) {
     const next = fixture(messages, bad);
     assert.deepEqual(next.project().readAll(), messages);
   }

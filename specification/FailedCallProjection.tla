@@ -1,7 +1,7 @@
 --------------------- MODULE FailedCallProjection ---------------------
 \* Sources:
-\*   src/canonical-context.mjs sha256:dfbf943096d6c2f126d1001787d87f70e177006296f1fe0ba120a5307c15ca07
-\*   src/actor-coordinator.mjs sha256:d37bea5423fdaa63e6ffde30b6d985a758288a569c1d5658126f311ffcbf0428
+\*   src/canonical-context.mjs sha256:9651ca11b90eaa03fff19272c98e8da42ccb3e3c7f7b1eaac56d1be740552db5
+\*   src/actor-coordinator.mjs sha256:d33d75f88913edccec70c1cc2df0391a3e909d958f96acfd890c3b774935ae62
 \*   src/fast-mode.mjs sha256:497e7699c395663ebff315b0244e14f06b43b46885823a8d0c42cccc63d71554
 
 EXTENDS Naturals, Sequences, FiniteSets, TLC

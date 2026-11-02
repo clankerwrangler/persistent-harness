@@ -1,7 +1,7 @@
 -------------------- MODULE SessionEntryReader --------------------
 \* Sources:
-\*   src/canonical-context.mjs sha256:dfbf943096d6c2f126d1001787d87f70e177006296f1fe0ba120a5307c15ca07
-\*   test/canonical-retention.test.mjs sha256:6b0ac06af3b6bf3e6c5b40d0173405c3866bc53eb3dbd479b38e62c198680199
+\*   src/canonical-context.mjs sha256:9651ca11b90eaa03fff19272c98e8da42ccb3e3c7f7b1eaac56d1be740552db5
+\*   test/canonical-retention.test.mjs sha256:1fe916f53d46478a210018edcdbdf7ba78d21bbe0fb4914204089269287c310f
 EXTENDS Naturals, Sequences, TLC
 CONSTANTS Fault, MaxMutations
 VARIABLES mode, count, owner, generation, value, pending, bytesOK, mutations,

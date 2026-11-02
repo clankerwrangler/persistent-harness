@@ -394,7 +394,14 @@ export class SDKWorker {
       });
       case "get_fork_messages": return { messages: session.getUserMessagesForForking() };
       case "get_last_assistant_text": {
-        const message = this.getMessages().findLast((message) => message.role === "assistant");
+        const source = coordinator?.projectedSource?.();
+        let message;
+        if (source) {
+          for (let index = source.length - 1; index >= 0; index--) {
+            const candidate = source.read(index);
+            if (candidate.role === "assistant") { message = candidate; break; }
+          }
+        } else message = this.getMessages().findLast((message) => message.role === "assistant");
         return { text: message ? message.content.filter((block) => block.type === "text").map((block) => block.text).join("\n") : null };
       }
       case "get_commands": return { commands: [

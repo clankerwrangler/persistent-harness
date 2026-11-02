@@ -690,7 +690,17 @@ export class ActorCoordinator {
           const final = committed.message;
           if (calls.length && !nativeBatch) await this.toolTail;
           const source = this.projectedSource();
-          const tokens = (source?.estimateContextTokens?.() ?? this.core.estimateContextTokens(source ? source.readAll() : this.projectedMessages())).tokens;
+          let tokens;
+          if (source?.estimateContextTokens) tokens = source.estimateContextTokens().tokens;
+          else if (source) {
+            tokens = 0;
+            source.validate();
+            for (let index = 0; index < source.length; index++) {
+              const profile = this.core.estimateContextTokens([source.read(index)]);
+              tokens = profile.lastUsageIndex !== null ? profile.tokens : tokens + profile.tokens;
+            }
+            source.validate();
+          } else tokens = this.core.estimateContextTokens(this.projectedMessages()).tokens;
           this.contextUsage = { tokens, contextWindow: this.session.model.contextWindow, percent: tokens / this.session.model.contextWindow * 100 };
           this.naturalStop = final.stopReason === "stop" && !final.content.some(part => part.type === "toolCall");
           this.continueNative = false;

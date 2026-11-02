@@ -1,7 +1,7 @@
 ----------------------- MODULE ConversationBirthOrder -----------------------
 \* Sources:
 \*   src/conversation-birth.mjs sha256:cb2a4b71f7bc1414e8d0157c1609bb135f01c1a34fad807552529f9d8af590ec
-\*   src/actor-coordinator.mjs sha256:d37bea5423fdaa63e6ffde30b6d985a758288a569c1d5658126f311ffcbf0428
+\*   src/actor-coordinator.mjs sha256:d33d75f88913edccec70c1cc2df0391a3e909d958f96acfd890c3b774935ae62
 \*   src/actor-stream.mjs sha256:f3ce76796b51558c7894a1b0c0dbfa6cf6e4532df7e669267b8787dbf722520e
 \*   src/conversation-projection.mjs sha256:9ccd97f1657710f009ea425590b99a791e5c7ba4b1a9367e96d9da67787cabed
 \*   src/live-conversation.mjs sha256:3b0408222dbb11dbb1038d129a1a6650ce279ef4652b1b14d6f606ecb910ff6c

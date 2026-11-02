@@ -12,7 +12,7 @@ import net from "node:net";
 import http from "node:http";
 import https from "node:https";
 import { resolveExternalPi, loadExternalPi } from "../src/external-pi.mjs";
-import { RpcDialogBroker, bootstrapSDKWorker, runSDKWorkerRpc, toWorkerRpcEvent } from "../src/sdk-worker.mjs";
+import { SDKWorker, RpcDialogBroker, bootstrapSDKWorker, runSDKWorkerRpc, toWorkerRpcEvent } from "../src/sdk-worker.mjs";
 import { PiSessionActor } from "../src/session-actor.mjs";
 import { createCompactionDriver, prepareActorCompaction } from "../src/actor-compaction.mjs";
 import { AUTOMATIC_COMPACTION_CHECK as compactionChannel, createAutomaticCompactionPermission } from "../src/automatic-compaction-permission.mjs";
@@ -1142,4 +1142,21 @@ for (const site of ["after_commit", "threshold_preflight"]) test(`actual isolate
     assert.equal(read().getEntries().filter(e => e.customType === TURN_FAILURE_DIAGNOSTIC_TYPE).length, 1);
     assert(!outbound.join("").includes(TURN_FAILURE_DIAGNOSTIC_TYPE)); assert(!outbound.join("").includes("PRIVATE_WORKER_SENTINEL"));
   } finally { reporter?.close(); await worker.close(); }
+});
+
+
+test("last-assistant RPC reads backward without materializing a long source", async () => {
+  const reads = [];
+  const source = { length: 150_000, read(index) {
+    reads.push(index);
+    return index === 149_998 ? { role: "assistant", content: [{ type: "text", text: "bounded answer" }] }
+      : { role: "toolResult", content: [] };
+  }, readAll() { throw new Error("explicit full history is too large"); } };
+  const worker = new SDKWorker({ session: { sessionManager: { getEntries: () => [], getLeafId: () => null }, subscribe: () => () => {} },
+    sdk: { buildSessionProjection: () => ({ messages: [] }) }, coordinator: { projectedSource: () => source }, projectContext() { throw new Error("explicit full history is too large"); } });
+  assert.deepEqual(await worker.handle({ type: "get_last_assistant_text" }), { text: "bounded answer" });
+  assert.deepEqual(reads, [149_999, 149_998]);
+  await assert.rejects(worker.handle({ type: "get_messages" }), /explicit full history is too large/);
+  source.length = 0;
+  assert.deepEqual(await worker.handle({ type: "get_last_assistant_text" }), { text: null });
 });

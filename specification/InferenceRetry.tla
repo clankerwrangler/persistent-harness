@@ -1,7 +1,7 @@
 -------------------------- MODULE InferenceRetry --------------------------
 \* Sources:
 \*   src/inference-retry.mjs sha256:797aa50ad9a65a2329f6e18b9262a532efccc3c47a3bb482ed4661aef105a6b9
-\*   src/actor-coordinator.mjs sha256:d37bea5423fdaa63e6ffde30b6d985a758288a569c1d5658126f311ffcbf0428
+\*   src/actor-coordinator.mjs sha256:d33d75f88913edccec70c1cc2df0391a3e909d958f96acfd890c3b774935ae62
 
 EXTENDS Naturals, FiniteSets
 CONSTANT MaxRetries

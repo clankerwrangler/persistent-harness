@@ -1279,3 +1279,27 @@ for (const firstReporter of ["context_source", "handle"]) test(`installed afterC
   t.diagnostic(JSON.stringify({ firstReporter, proofReads, successfulResults: 1,
     toolExecutions: f.runs(), providerAttempts: wire.length, freshInputProgress: true, inputDeliveredOnce: true }));
 });
+
+
+test("post-turn token fallback streams profiles instead of materializing unprojected history", async t => {
+  const f = await fixture(t, { contextMode: "source", script: () => [{ type: "text", text: "bounded response" }],
+    promptExtensions: [pi => pi.on("context_source", event => {
+      const messages = event.source.length ? [event.source.read(event.source.length - 1)] : [];
+      return { source: { length: messages.length, contributions: messages.map((message, index) => ({ key: String(index), role: message.role })),
+        read: index => structuredClone(messages[index]), readAll: () => structuredClone(messages),
+        currentSystemMessage: () => undefined, validate() {} } };
+    })] });
+  registerCanonicalSessionManager(f.manager);
+  f.coor.projectContext = projectCanonicalContext;
+  const projected = f.coor.projectedSource.bind(f.coor);
+  let fullReads = 0;
+  f.coor.projectedSource = () => {
+    const source = projected();
+    return { ...source, estimateContextTokens: undefined, readAll() { fullReads++; throw new Error("unprojected history is too large"); } };
+  };
+  await f.coor.submit("bounded request");
+  await f.coor.waitForIdle();
+  assert.equal(f.coor.failure, null);
+  assert.equal(fullReads, 0);
+  assert.equal(f.coor.contextUsage.tokens, f.coor.core.estimateContextTokens(f.manager.buildSessionProjection().messages).tokens);
+});

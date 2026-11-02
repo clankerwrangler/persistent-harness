@@ -129,6 +129,10 @@ function selectBranch(entries, leafId) {
   requireThat(Array.isArray(entries) && entries.length <= CANONICAL_CONTEXT_LIMITS.entries,
     "ERR_CONTEXT_ENTRIES");
   requireThat(leafId === null || identifier(leafId), "ERR_CONTEXT_LEAF");
+  return selectIndexedBranch(indexBranchEntries(entries), leafId);
+}
+
+function indexBranchEntries(entries) {
   const byId = new Map();
   for (const entry of entries) {
     requireThat(isRecord(entry) && identifier(entry.id) && identifier(entry.type)
@@ -136,6 +140,11 @@ function selectBranch(entries, leafId) {
     requireThat(!byId.has(entry.id), "ERR_CONTEXT_DUPLICATE_ENTRY_ID");
     byId.set(entry.id, entry);
   }
+  return byId;
+}
+
+function selectIndexedBranch(byId, leafId) {
+  requireThat(leafId === null || identifier(leafId), "ERR_CONTEXT_LEAF");
   const reverse = [], seen = new Set();
   for (let id = leafId; id !== null;) {
     requireThat(!seen.has(id), "ERR_CONTEXT_BRANCH_CYCLE");
@@ -936,7 +945,7 @@ function managedState(manager, factsRequired = true) {
   let state = owner.state;
   const stamp = manager.getRevision(), count = manager.getEntryCount(), leaf = manager.getLeafId();
   requireThat(Number.isSafeInteger(stamp?.revision) && Number.isSafeInteger(stamp?.generation)
-    && Number.isSafeInteger(count) && count >= 0 && count <= CANONICAL_CONTEXT_LIMITS.entries, "ERR_CONTEXT_MANAGER");
+    && Number.isSafeInteger(count) && count >= 0, "ERR_CONTEXT_MANAGER");
   if (factsRequired && state?.stamp?.revision === stamp.revision && state.stamp.generation === stamp.generation && state.leaf === leaf) return state;
   const old = state;
   if (!state || state.generation !== stamp.generation || count < state.headers.length) {
@@ -997,7 +1006,7 @@ function managedState(manager, factsRequired = true) {
   if (state.resumed && !extendsBranch) { owner.state = null; return managedState(manager, factsRequired); }
   delete state.resumed;
   const selectedStart = extendsBranch ? state.selected.length : 0;
-  const selected = extendsBranch ? state.selected : selectBranch(state.headers, leaf);
+  const selected = extendsBranch ? state.selected : selectIndexedBranch(state.byId, leaf);
   if (extendsBranch) for (const header of suffix) selected.push(header);
   const checkpoint = selected.findLastIndex(entry => entry.type === "compaction");
   if (checkpoint >= 0) {
@@ -1160,8 +1169,11 @@ function resumeColdCards(owner, state, count, stamp, source, entryReader) {
   owner.coldCards = null;
   if (!saved || saved.count > count || !entryReader) return false;
   if (source.getEntryHeader(saved.count - 1)?.id !== saved.headers.at(-1)?.id) return false;
-  state.headers = saved.headers; state.byId = new Map(saved.headers.map(header => [header.id, header]));
-  try { state.selected = selectBranch(saved.headers, saved.entryId); }
+  state.headers = saved.headers;
+  try {
+    state.byId = indexBranchEntries(saved.headers);
+    state.selected = selectIndexedBranch(state.byId, saved.entryId);
+  }
   catch { state.headers = []; state.byId = new Map(); state.selected = []; return false; }
   state.facts = saved.facts; state.nodes = saved.nodes; state.factCount = saved.count; state.leaf = saved.entryId;
   state.released = true; state.resumed = true; state.structural = false;

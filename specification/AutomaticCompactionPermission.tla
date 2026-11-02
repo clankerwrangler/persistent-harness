@@ -1,9 +1,9 @@
 ------------------- MODULE AutomaticCompactionPermission -------------------
 \* Sources:
 \*   src/automatic-compaction-permission.mjs sha256:295549ffaaf636b722b3061bb2ad8d5be8de73f28606807ffb7f36657f3385af
-\*   src/actor-coordinator.mjs sha256:d37bea5423fdaa63e6ffde30b6d985a758288a569c1d5658126f311ffcbf0428
+\*   src/actor-coordinator.mjs sha256:d33d75f88913edccec70c1cc2df0391a3e909d958f96acfd890c3b774935ae62
 \*   src/actor-compaction.mjs sha256:043eb1861c7490795a5b2fd582848d14bb8e157d4361844d1e23c851f0a6e12e
-\*   src/sdk-worker.mjs sha256:0bab6c32d41896821acbc9d8ff3e7509f8ecd341b6f282afbabec504463174b2
+\*   src/sdk-worker.mjs sha256:ad3637bdce0be9028c01b99eb3b0c619d76473b0def01bae88de50127622ea0a
 
 EXTENDS Naturals
 VARIABLES phase, reason, listener, policyDenies, vetoed, sealedVeto,

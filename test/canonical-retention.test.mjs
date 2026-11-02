@@ -711,3 +711,26 @@ test("coordinator startup resumes saved cards across the archive node threshold 
     assert.equal(again.getEntry(appended).message.content, "ordinary new input");
   } finally { rmSync(directory, { recursive: true, force: true }); }
 });
+
+
+test("streamed archive entries exceed the materialized-array limit through a saved-card restart", () => {
+  const count = CANONICAL_CONTEXT_LIMITS.entries + 2;
+  const rows = Array.from({ length: count }, (_, index) => ({ type: "custom", customType: "opaque",
+    id: `e${index}`, parentId: index ? `e${index - 1}` : null }));
+  rows.push({ type: "custom", customType: "live-context-state", id: "bookmark", parentId: rows.at(-1).id,
+    data: { enabled: true, checkpoint: { sourceEntryId: rows.at(-1).id, sourceMessageCount: 0 } } });
+  const first = fixture(rows, { entryReader: true });
+  assert.equal(sessionBranchHeaders(first).length, rows.length);
+  releaseColdHeaders(first);
+  const cards = structuredClone(exportColdCards(first));
+  assert.equal(cards.count, count);
+  const next = fixture([...rows, entry("after-restart", "bookmark", user("new input"))], { entryReader: true });
+  registerCanonicalSessionManager(next, { coldCards: cards });
+  new ActorCoordinator({ session: { sessionManager: next }, sdk: {}, core: {} });
+  assert.equal(sessionBranchHeaders(next).at(-1).id, "after-restart");
+  assert(next.reads.keyed.every(([position]) => position >= cards.count), "saved prefix stays unread");
+  next.append(entry("later", "after-restart", user("later input")));
+  assert.equal(sessionBranchHeaders(next).at(-1).id, "later");
+  assert.throws(() => projectCanonicalContext({ entries: rows, leafId: "bookmark", mode: "native",
+    buildSessionProjection: stock.buildSessionProjection }), { code: "ERR_CONTEXT_ENTRIES" }, "explicit materialized arrays keep their limit");
+});
