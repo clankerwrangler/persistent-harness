@@ -1188,8 +1188,10 @@ function projectManagedSource(manager, mode, stringCodeUnits, allowCold = true) 
   try { sdkSource = manager.buildSessionSource(); }
   catch { throw new CanonicalContextError("ERR_CONTEXT_HELPER_FAILED"); }
   requireThat(Array.isArray(sdkSource.contextEntryIds), "ERR_CONTEXT_SOURCE_PROJECTION");
-  requireThat(isDeepStrictEqual(copyData(cold ? sdkSource.contextEntryIds.slice(cold.end) : sdkSource.contextEntryIds),
-    selected.map(entry => entry.id)), "ERR_CONTEXT_SOURCE_PROJECTION");
+  // Past the bookmark both lists only ever grow together, so their ends settle it.
+  requireThat(cold ? sdkSource.contextEntryIds.length === cold.end + selected.length
+    && sdkSource.contextEntryIds.at(-1) === selected.at(-1)?.id
+    : isDeepStrictEqual(copyData(sdkSource.contextEntryIds), selected.map(entry => entry.id)), "ERR_CONTEXT_SOURCE_PROJECTION");
   const selectedIds = new Set(selected.map(entry => entry.id)), edits = new Map();
   for (const header of selected) if (header.type === "context_edit") edits.set(header.editTargetId, header);
   const expected = selected.flatMap((header, position) => edits.get(header.id)?.edit?.omitted
@@ -1202,7 +1204,7 @@ function projectManagedSource(manager, mode, stringCodeUnits, allowCold = true) 
   const held = cold ? sdkSource.contributions.slice(firstHeld) : sdkSource.contributions;
   requireThat(Array.isArray(held) && held.length === expected.length,
     "ERR_CONTEXT_SOURCE_PROJECTION");
-  held.forEach((item, index) => {
+  if (!cold) held.forEach((item, index) => {
     const { sourceEntryId, messageIndex, role, editEntryId } = item;
     requireThat(isDeepStrictEqual({ sourceEntryId, messageIndex, role, ...(editEntryId === undefined ? {} : { editEntryId }) }, expected[index]),
       "ERR_CONTEXT_SOURCE_PROJECTION");
@@ -1262,7 +1264,7 @@ function projectManagedSource(manager, mode, stringCodeUnits, allowCold = true) 
       signatures, omitted,
       calls: calls.filter(call => !omitted.includes(call.id)),
       toolCallId: info?.toolCallId, stopReason: info?.stopReason, excludeFromContext: info?.excludeFromContext,
-      key: `${contribution.key}:${mode}:${valueDigest(signatures)}:${JSON.stringify(omitted)}` };
+      key: `${contribution.key}:${mode}:${signatures.length ? valueDigest(signatures) : ""}:${JSON.stringify(omitted)}` };
     return Object.freeze(descriptor);
   });
   for (const [id, resultIndex] of retainedResults) {
@@ -1316,8 +1318,8 @@ function projectManagedSource(manager, mode, stringCodeUnits, allowCold = true) 
 
 /** Keeps every position. Messages after the bookmark come from `held`; anything older takes the full path. */
 function createColdSource(sdkSource, held, firstHeld, fullSource) {
-  const prefix = sdkSource.contributions.slice(0, firstHeld).map(item => Object.freeze({ key: item.key, role: item.role, sourceEntryId: item.sourceEntryId }));
-  return Object.freeze({ ...held, length: firstHeld + held.length, contributions: Object.freeze([...prefix, ...held.contributions]),
+  const contributions = Object.freeze([...sdkSource.contributions.slice(0, firstHeld), ...held.contributions]);
+  return Object.freeze({ ...held, length: firstHeld + held.length, contributions,
     read: index => index >= firstHeld ? held.read(index - firstHeld) : fullSource().read(index),
     readAll: () => fullSource().readAll(),
     estimateContextTokens: held.estimateContextTokens && (() => fullSource().estimateContextTokens()) });

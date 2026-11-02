@@ -2,7 +2,7 @@
 \* Sources:
 \*   src/actor-navigation.mjs sha256:b591d67edd33547f1be9403f1130c6b617994acb48f49fbe279b09f5584c2e46
 \*   src/actor-coordinator.mjs sha256:2b0c8be0e148c47dccb3a0ae141c6b63966c22aaef24f43fc787a34f746ec7fb
-\*   src/canonical-context.mjs sha256:eaaf0595488743d7be3f9d2c9413082b0849e99cb2c333e868e53e1e07646174
+\*   src/canonical-context.mjs sha256:c5c1d7d3062fb24ae072ec9588b004fb999c6dfd23a3bebdcfa6a3b17fd4850d
 
 EXTENDS Naturals
 CONSTANT BadRawRefresh

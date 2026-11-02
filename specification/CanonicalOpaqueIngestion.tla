@@ -1,6 +1,6 @@
 -------------------- MODULE CanonicalOpaqueIngestion --------------------
 \* Sources:
-\*   src/canonical-context.mjs sha256:eaaf0595488743d7be3f9d2c9413082b0849e99cb2c333e868e53e1e07646174
+\*   src/canonical-context.mjs sha256:c5c1d7d3062fb24ae072ec9588b004fb999c6dfd23a3bebdcfa6a3b17fd4850d
 
 EXTENDS Naturals, FiniteSets, TLC
 CONSTANTS BadEagerOpaque, BadMetadata, BadValue, BadFence
