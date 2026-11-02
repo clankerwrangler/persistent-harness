@@ -5,10 +5,11 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { pathToFileURL } from "node:url";
-import { ORDINARY_NON_ADMISSION_CUSTOM_TYPE, createOrdinaryNonAdmissionWitness, projectCanonicalContext, projectCanonicalSource, refreshCanonicalSessionContext, planUnknownRecovery, registerCanonicalSessionManager, sessionContextInput,
+import { CANONICAL_CONTEXT_LIMITS, exportColdCards, releaseColdHeaders, ORDINARY_NON_ADMISSION_CUSTOM_TYPE, createOrdinaryNonAdmissionWitness, projectCanonicalContext, projectCanonicalSource, refreshCanonicalSessionContext, planUnknownRecovery, registerCanonicalSessionManager, sessionContextInput,
   sessionEntryHeaders, sessionEntriesMatching, sessionBranchHeaders, sessionCallIssuer, sessionNamespaceHistory } from "../src/canonical-context.mjs";
 import { extensionInternals } from "../src/extension.mjs";
 import { SDKWorker } from "../src/sdk-worker.mjs";
+import { ActorCoordinator } from "../src/actor-coordinator.mjs";
 
 const stock = await import(pathToFileURL(process.env.PI_HARNESS_PI_MODULE));
 const { core } = await (await import("../src/external-pi.mjs")).loadExternalPi();
@@ -664,5 +665,49 @@ test("native recovery neither populates nor clears profiles before fresh project
     const source = project();
     assert.deepEqual(source.estimateContextTokens(), core.estimateContextTokens(source.readAll()));
     assert.deepEqual(estimated, ["second edit with different size"], "changed producer cannot use the old profile");
+  } finally { rmSync(directory, { recursive: true, force: true }); }
+});
+
+
+test("coordinator startup resumes saved cards across the archive node threshold without changing session identity", t => {
+  if (typeof candidate.SessionManager.prototype.buildSessionEntryReader !== "function") return t.skip("requires public entry-reader SDK");
+  const directory = mkdtempSync(path.join(os.tmpdir(), "canonical-growing-history-"));
+  try {
+    const manager = candidate.SessionManager.create(directory, directory, { entryRetention: { maxCachedBytes: 1024 } });
+    manager.appendMessage(assistant([]));
+    const payload = Array(50_000).fill(null);
+    let bookmark;
+    for (let index = 0; index < 39; index++) bookmark = manager.appendMessage({ ...user(`prefix ${index}`), payload });
+    manager.appendCustomEntry("live-context-state", { enabled: true,
+      checkpoint: { sourceEntryId: bookmark, sourceMessageCount: 40 } });
+    registerCanonicalSessionManager(manager);
+    assert.equal(sessionBranchHeaders(manager).length, 41);
+    releaseColdHeaders(manager);
+    const cards = structuredClone(exportColdCards(manager));
+    assert(cards.nodes < CANONICAL_CONTEXT_LIMITS.nodes, "the existing saved prefix is below the old quota");
+
+    manager.appendMessage({ ...user("suffix crossing the old archive quota"), payload });
+    const tail = manager.appendMessage(user("latest input"));
+    const file = manager.getSessionFile(), identity = manager.getSessionId(), before = readFileSync(file);
+    const reopened = candidate.SessionManager.open(file, directory, directory, { entryRetention: { maxCachedBytes: 1024 } });
+    const readPositions = [], build = reopened.buildSessionEntryReader.bind(reopened);
+    reopened.buildSessionEntryReader = () => {
+      const source = build();
+      return { ...source, read(position, key) { readPositions.push(position); return source.read(position, key); } };
+    };
+    registerCanonicalSessionManager(reopened, { coldCards: cards });
+    const coordinator = new ActorCoordinator({ session: { sessionManager: reopened }, sdk: {}, core: {} });
+    assert.equal(coordinator.manager, reopened);
+    assert.equal(sessionBranchHeaders(reopened).at(-1).id, tail);
+    assert(readPositions.every(position => position >= cards.count), "constructor only reads the appended suffix");
+    assert.equal(reopened.getSessionId(), identity);
+    assert.deepEqual(readFileSync(file), before, "constructor and readers do not modify canonical history");
+
+    const appended = reopened.appendMessage(user("ordinary new input"));
+    const again = candidate.SessionManager.open(file, directory, directory, { entryRetention: { maxCachedBytes: 1024 } });
+    registerCanonicalSessionManager(again);
+    assert.equal(sessionBranchHeaders(again).at(-1).id, appended, "a complete no-card reopen also accepts the grown archive");
+    assert.equal(again.getSessionId(), identity);
+    assert.equal(again.getEntry(appended).message.content, "ordinary new input");
   } finally { rmSync(directory, { recursive: true, force: true }); }
 });

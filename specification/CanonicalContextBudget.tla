@@ -1,6 +1,6 @@
 ----------------------- MODULE CanonicalContextBudget -----------------------
 \* Sources:
-\*   src/canonical-context.mjs sha256:c5c1d7d3062fb24ae072ec9588b004fb999c6dfd23a3bebdcfa6a3b17fd4850d
+\*   src/canonical-context.mjs sha256:dfbf943096d6c2f126d1001787d87f70e177006296f1fe0ba120a5307c15ca07
 
 EXTENDS Integers, Sequences
 CONSTANT StringLimit, MaxViewLimit, NodeLimit, DepthLimit, EntryLimit, BadSourceBudget

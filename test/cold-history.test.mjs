@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { exportColdCards, projectCanonicalSource, registerCanonicalSessionManager, releaseColdHeaders } from "../src/canonical-context.mjs";
+import { CANONICAL_CONTEXT_LIMITS, exportColdCards, projectCanonicalSource, registerCanonicalSessionManager, releaseColdHeaders } from "../src/canonical-context.mjs";
 
 const user = content => ({ role: "user", content, timestamp: 1 });
 
@@ -127,4 +127,35 @@ test("saved cards that don't match the file are ignored", () => {
     const next = fixture(messages, bad);
     assert.deepEqual(next.project().readAll(), messages);
   }
+});
+
+
+test("streamed history can exceed the node budget, including a saved-card restart and append", () => {
+  const payload = Array(50_000).fill(null);
+  const messages = Array.from({ length: 41 }, (_, index) => ({ ...user(`message ${index}`), payload }));
+  const first = fixture(messages);
+  const source = first.project();
+  assert.equal(source.length, messages.length);
+  assert.deepEqual(source.read(40), messages[40], "one bounded record remains complete");
+  assert.throws(() => source.readAll(), { code: "ERR_CONTEXT_DATA_LIMIT" }, "a materialized view keeps its aggregate node bound");
+
+  first.session.bookmark("e39", 40);
+  assert.equal(releaseColdHeaders(first.manager), 40);
+  const cards = structuredClone(exportColdCards(first.manager));
+  assert(cards.nodes > CANONICAL_CONTEXT_LIMITS.nodes, "the complete valid archive exceeds the former lifetime quota");
+
+  const next = fixture(messages, cards);
+  next.session.bookmark("e39", 40);
+  next.session.append(user("after restart"));
+  assert.deepEqual(next.project().read(41), user("after restart"));
+  assert.deepEqual(next.session.entryReads.filter(position => position < 40), [], "resume does not reread the saved prefix");
+  assert.deepEqual(next.project().read(0), messages[0], "a cold record remains readable after growth");
+  next.session.append(user("second append"));
+  assert.deepEqual(next.project().read(42), user("second append"));
+});
+
+test("a single archive record still has the fixed node budget", () => {
+  const nested = Array.from({ length: 2000 }, () => Array(1000).fill(null));
+  const { project } = fixture([{ ...user("oversized record"), payload: nested }]);
+  assert.throws(project, { code: "ERR_CONTEXT_DATA_LIMIT" });
 });

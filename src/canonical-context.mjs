@@ -649,6 +649,8 @@ export function sessionContextInput(manager, buildSessionProjection, mode) {
     : { entries: manager.getEntries(), leafId: manager.getLeafId(), buildSessionProjection, mode };
 }
 
+// nodes records consumed archive size for saved-card compatibility, not a lifetime quota.
+// Streamed records use separate fixed budgets; materialized views keep aggregate limits.
 function newArchiveState() {
   return { headers: [], byId: new Map(), profiles: new Map(), nodes: 1, stamp: null, generation: null, factCount: 0, leaf: null, selected: [], facts: null, entrySource: null, entryReader: false };
 }
@@ -807,16 +809,15 @@ const HEADER_CUSTOM_TYPES = new Set(["persistent-harness.progress-v1", "persiste
 const BODY_HEADER_TYPES = new Set(["message", "custom_message", "compaction", "context_edit", "branch_summary"]);
 
 function sourceHeader(descriptor, position, state) {
-  const metadataStart = state.nodes;
-  const budget = { nodes: metadataStart, depth: 1, codeUnits: String(position).length };
+  const budget = { nodes: 1, depth: 1, codeUnits: String(position).length };
   const entry = copyData(descriptor, { budget });
   requireThat(isRecord(entry) && identifier(entry.id) && identifier(entry.type)
     && (entry.parentId === null || identifier(entry.parentId)), "ERR_CONTEXT_ENTRY");
   requireThat(typeof entry.key === "string" && entry.key.length > 0, "ERR_CONTEXT_SOURCE_PROJECTION");
-  state.nodes = budget.nodes;
+  state.nodes += budget.nodes - 1;
   return { id: entry.id, type: entry.type, parentId: entry.parentId, position,
     sourceKey: entry.key, customType: typeof entry.customType === "string" ? entry.customType : undefined,
-    role: typeof entry.role === "string" ? entry.role : undefined, metadataNodes: budget.nodes - metadataStart,
+    role: typeof entry.role === "string" ? entry.role : undefined, metadataNodes: budget.nodes - 1,
     units: 0, contributionRoles: [], birthSequence: 0 };
 }
 
@@ -835,18 +836,18 @@ function readManagedEntry(manager, state, id) {
   const descriptor = state.entryReader ? source.getEntryHeader(header.position) : source.entries[header.position];
   requireThat(descriptor?.key === header.sourceKey, "ERR_CONTEXT_SOURCE_PROJECTION");
   const firstRead = header.sourceDigest === undefined;
-  // Replace descriptor accounting with consumed-record accounting, rather than
-  // charging both inventories against the archive structure budget.
-  const budget = { nodes: firstRead ? state.nodes - header.metadataNodes : 0, depth: 1, codeUnits: String(header.position).length };
+  // A consumed record has its own budget; released historical payloads do not
+  // reduce the capacity available to later records. Count the archive separately.
+  const budget = { nodes: 1, depth: 1, codeUnits: String(header.position).length };
   const entry = copyData(state.entryReader ? source.read(header.position, header.sourceKey) : source.read(header.position), { budget });
   requireThat(entry?.id === id && entry.type === header.type && entry.parentId === header.parentId
     && (typeof entry.customType === "string" ? entry.customType : undefined) === header.customType
     && (typeof entry.message?.role === "string" ? entry.message.role : undefined) === header.role,
     "ERR_CONTEXT_SOURCE_PROJECTION");
   if (firstRead) {
+    state.nodes += budget.nodes - 1 - header.metadataNodes;
     Object.assign(header, archiveHeader(entry, header.position, budget.codeUnits));
     delete header.metadataNodes;
-    state.nodes = budget.nodes;
   } else requireThat(valueDigest(entry) === header.sourceDigest, "ERR_CONTEXT_SOURCE_PROJECTION");
   source.validate();
   return entry;
@@ -971,12 +972,12 @@ function managedState(manager, factsRequired = true) {
       // Legacy registered owners without an entry source retain their captured-value path.
       const range = manager.getEntriesRange(i, 1);
       requireThat(range.length === 1, "ERR_CONTEXT_MANAGER");
-      const budget = { nodes: state.nodes, depth: 1, codeUnits: String(i).length };
+      const budget = { nodes: 1, depth: 1, codeUnits: String(i).length };
       const entry = copyData(range[0], { budget });
       const header = archiveHeader(entry, i, budget.codeUnits);
       if (entry.type === "message") ingestMessageFacts(entry, header, owner.estimateContextTokens);
       requireThat(!state.byId.has(header.id), "ERR_CONTEXT_DUPLICATE_ENTRY_ID");
-      state.headers.push(header); state.byId.set(header.id, header); state.nodes = budget.nodes;
+      state.headers.push(header); state.byId.set(header.id, header); state.nodes += budget.nodes - 1;
     }
   }
   const validate = () => {
