@@ -1,7 +1,6 @@
 import { renderCompactionLocations } from "./input-location.mjs";
 import { randomUUID } from "node:crypto";
-import { isDeepStrictEqual } from "node:util";
-import { refreshCanonicalSessionContext, projectCanonicalBranch, projectCanonicalContext, snapshotCanonicalArchive } from "./canonical-context.mjs";
+import { refreshCanonicalSessionContext, projectCanonicalBranch, projectCanonicalContext, snapshotCanonicalArchive, captureCanonicalCompactionSnapshot, boundedCanonicalContextSource, projectCanonicalSource } from "./canonical-context.mjs";
 
 export class ActorCompactionError extends Error {
   constructor(code, message = code, options) {
@@ -45,8 +44,12 @@ export function createCompactionPreparationCapture() {
  */
 function prepareManualRefresh(sdk, session, branchEntries, leafId) {
   const projection = sdk.buildSessionProjection(branchEntries, leafId);
-  const previous = projection.entries[0]?.sourceEntry;
-  const anchor = projection.entries[1]?.sourceEntry;
+  return prepareManualRefreshGroups(sdk, session, projection.entries.map(entry => ({ ...entry.sourceEntry, messages: entry.messages })));
+}
+
+function prepareManualRefreshGroups(sdk, session, entries) {
+  const previous = entries[0]?.compaction ?? entries[0];
+  const anchor = entries[1];
   if (previous?.type !== "compaction" || typeof previous.summary !== "string"
       || !previous.summary.trim() || !anchor?.id) return undefined;
   const details = !previous.fromHook && previous.details;
@@ -54,7 +57,7 @@ function prepareManualRefresh(sdk, session, branchEntries, leafId) {
   return {
     firstKeptEntryId: anchor.id, previousSummary: previous.summary,
     messagesToSummarize: [], turnPrefixMessages: [], isSplitTurn: false,
-    tokensBefore: projection.messages.reduce((sum, message) => sum + sdk.estimateTokens(message), 0),
+    tokensBefore: entries.flatMap(entry => entry.messages).reduce((sum, message) => sum + sdk.estimateTokens(message), 0),
     fileOps: { read: new Set(paths(details?.readFiles)), written: new Set(), edited: new Set(paths(details?.modifiedFiles)) },
     settings: session.settingsManager.getCompactionSettings(session.model),
   };
@@ -63,22 +66,38 @@ function prepareManualRefresh(sdk, session, branchEntries, leafId) {
 /** Stock owns edits, cut selection, usage invalidation and file tracking. Only the
  * harness's native async call/result span may require an earlier retained turn.
  */
-export async function prepareActorCompaction({ sdk, session, capture, reason }) {
-  const manager = session.sessionManager, leafId = manager.getLeafId();
-  const original = snapshotCanonicalArchive(manager.getEntries());
-  const { entries: branchEntries, diagnostics } = projectCanonicalBranch({ entries: original, leafId });
-  const projection = projectCanonicalContext({ entries: branchEntries, leafId, buildSessionProjection: sdk.buildSessionProjection, mode: "native" });
-  const outstanding = projection.outstanding;
+export async function prepareActorCompaction({ sdk, session, capture, reason, runner, snapshot = captureCanonicalCompactionSnapshot(session.sessionManager) }) {
+  const manager = session.sessionManager, leafId = snapshot.leafId;
+  const branchEntries = snapshot.branchEntries, diagnostics = [...snapshot.diagnostics];
+  let preparation, outstanding, projected, activeEntryIds;
+  if (snapshot.managed) {
+    check(typeof sdk.prepareCompactionFromSource === "function" && runner?.emitContextSource, "ERR_COMPACTION_SOURCE_API");
+    const projection = projectCanonicalSource({ sessionManager: manager, mode: "native" });
+    outstanding = projection.outstanding;
+    const effective = await runner.emitContextSource(projection.source, { purpose: "compaction" });
+    check(session.isIdle && snapshot.isCurrent(), "ERR_COMPACTION_STALE_SNAPSHOT");
+    const view = sdk.prepareCompactionFromSource(boundedCanonicalContextSource(effective), {
+      source: projection.source, entries: snapshot.contextEntries, readEntry: snapshot.readEntry,
+    }, session.settingsManager.getCompactionSettings(session.model));
+    preparation = view.preparation; projected = view.entries;
+    activeEntryIds = snapshot.contextEntries.map(entry => entry.id);
+    if (!preparation && reason === "manual") preparation = prepareManualRefreshGroups(sdk, session, projected);
+  } else {
+    const projection = projectCanonicalContext({ entries: branchEntries, leafId, buildSessionProjection: sdk.buildSessionProjection, mode: "native" });
+    outstanding = projection.outstanding;
+    preparation = await capture.read(session);
+    if (!preparation && reason === "manual") preparation = prepareManualRefresh(sdk, session, branchEntries, leafId);
+    projected = sdk.buildSessionProjection(branchEntries, leafId).entries.map(entry => ({
+      id: entry.sourceEntry.id, type: entry.sourceEntry.type, messages: entry.messages,
+    }));
+  }
+  check(session.isIdle && snapshot.isCurrent(), "ERR_COMPACTION_STALE_SNAPSHOT");
   check(outstanding.every(call => call.retainedInContext), "ERR_COMPACTION_PENDING_ALREADY_PRUNED");
-  let preparation = await capture.read(session);
-  check(session.isIdle && manager.getLeafId() === leafId && isDeepStrictEqual(manager.getEntries(), original), "ERR_COMPACTION_STALE_SNAPSHOT");
-  if (!preparation && reason === "manual") preparation = prepareManualRefresh(sdk, session, branchEntries, leafId);
-  const base = { branchEntries, diagnostics, outstanding, preparation };
+  const base = { branchEntries, diagnostics, outstanding, preparation, branch: snapshot.branch, activeEntryIds };
   if (!preparation) return base;
-  const projected = sdk.buildSessionProjection(branchEntries, leafId).entries;
-  const previous = projected.findIndex(entry => entry.sourceEntry.type === "compaction" && entry.messages.length);
+  const previous = projected.findIndex(entry => entry.type === "compaction" && entry.messages.length);
   const start = previous + 1;
-  const originalCut = projected.findIndex(entry => entry.sourceEntry.id === preparation.firstKeptEntryId);
+  const originalCut = projected.findIndex(entry => entry.id === preparation.firstKeptEntryId);
   check(originalCut >= start, "ERR_COMPACTION_KEPT_ANCHOR");
   let cut = originalCut;
   const results = new Map(projected.flatMap((entry, index) => entry.messages
@@ -91,14 +110,15 @@ export async function prepareActorCompaction({ sdk, session, capture, reason }) 
     let turn = index;
     while (turn > start && !sdk.convertToLlm(projected[turn].messages).some(message => message.role === "user")) turn--;
     cut = Math.min(cut, turn);
-    for (const call of calls) diagnostics.push({ code: "NATIVE_CALL_RETAINED", severity: "info", toolCallId: call.id, messageEntryId: entry.sourceEntry.id });
+    for (const call of calls) diagnostics.push({ code: "NATIVE_CALL_RETAINED", severity: "info", toolCallId: call.id, messageEntryId: entry.id });
   }
   if (cut === originalCut) return base;
-  const messages = projected.slice(start, cut).filter(entry => entry.sourceEntry.type !== "compaction")
+  check(typeof projected[cut]?.id === "string", "ERR_COMPACTION_KEPT_ANCHOR");
+  const messages = projected.slice(start, cut).filter(entry => entry.type !== "compaction")
     .flatMap(entry => entry.messages.filter(message => message.role !== "system"));
   if (!messages.length) return { ...base, preparation: undefined };
   // Retaining more history does not invalidate stock's cumulative file-operation facts.
-  return { ...base, preparation: { ...preparation, firstKeptEntryId: projected[cut].sourceEntry.id,
+  return { ...base, preparation: { ...preparation, firstKeptEntryId: projected[cut].id,
     messagesToSummarize: messages, turnPrefixMessages: [], isSplitTurn: false } };
 }
 
@@ -109,16 +129,16 @@ function validateResult(result, prepared, sdk) {
   check(result && typeof result.summary === "string" && result.summary.trim().length > 0
     && result.summary.length <= 16 * 1024 * 1024, "ERR_COMPACTION_RESULT");
   check(finite(result.tokensBefore), "ERR_COMPACTION_RESULT");
-  const active = sdk.buildContextEntries(prepared.branchEntries, prepared.branchEntries.at(-1)?.id ?? null);
-  const kept = active.findIndex(entry => entry.id === result.firstKeptEntryId);
+  const active = prepared.activeEntryIds ?? sdk.buildContextEntries(prepared.branchEntries, prepared.branchEntries.at(-1)?.id ?? null).map(entry => entry.id);
+  const kept = active.indexOf(result.firstKeptEntryId);
   check(kept >= 0, "ERR_COMPACTION_RESULT_ANCHOR");
-  const keptIds = new Set(active.slice(kept).map(entry => entry.id));
+  const keptIds = new Set(active.slice(kept));
   for (const call of prepared.outstanding) check(keptIds.has(call.messageEntryId), "ERR_COMPACTION_RESULT_PRUNES_PENDING");
   return result;
 }
 
 /** The caller holds the sole coordinator service lease through this whole operation.
- * This driver uses that same SessionManager; only dormant preparation calls AgentSession.compact.
+ * Registered sources use public stock preparation; mutable compatibility uses dormant compact().
  */
 export function createCompactionDriver({ sdk, core, runner, session, models, capture, lifecycle = {}, publish = () => {} } = {}) {
   check(session?.sessionManager && runner && runner !== session.extensionRunner, "ERR_COMPACTION_OWNER");
@@ -135,24 +155,22 @@ export function createCompactionDriver({ sdk, core, runner, session, models, cap
     signal = AbortSignal.any([callerSignal, localController.signal]);
     const completions = [], dispatches = [];
     let providerTail = Promise.resolve(), streamFailure;
-    const sessionId = manager.getSessionId(), leafId = manager.getLeafId();
-    const original = snapshotCanonicalArchive(manager.getEntries());
+    const snapshot = captureCanonicalCompactionSnapshot(manager);
     const sameSnapshot = () => {
       abort(signal);
-      check(session.isIdle && manager.getSessionId() === sessionId && manager.getLeafId() === leafId
-        && isDeepStrictEqual(manager.getEntries(), original), "ERR_COMPACTION_STALE_SNAPSHOT");
+      check(session.isIdle && snapshot.isCurrent(), "ERR_COMPACTION_STALE_SNAPSHOT");
     };
     let fromExtension = false, committed = false, finalResult, terminalAttempted = false;
     await publish({ type: "compaction_start", reason });
     try {
       sameSnapshot();
       check(session.model, "ERR_COMPACTION_MODEL");
-      const prepared = await prepareActorCompaction({ sdk, session, capture, reason });
+      const prepared = await prepareActorCompaction({ sdk, session, capture, reason, runner, snapshot });
       sameSnapshot();
       check(prepared.outstanding.length === 0, "ERR_COMPACTION_PENDING_CALLS");
       check(prepared.preparation, "ERR_COMPACTION_NOTHING_TO_SUMMARIZE");
       const event = { type: "session_before_compact", preparation: clone(prepared.preparation),
-        branchEntries: snapshotCanonicalArchive(prepared.branchEntries), customInstructions, reason, willRetry, signal };
+        branchEntries: prepared.branch ? prepared.branch() : snapshotCanonicalArchive(prepared.branchEntries), customInstructions, reason, willRetry, signal };
       const diagnostic = await lifecycle.prepareCompaction?.(event, runner.createContext());
       if (diagnostic?.customInstructions !== undefined) {
         check(typeof diagnostic.customInstructions === "string" && diagnostic.customInstructions.length <= 4 * 1024 * 1024,

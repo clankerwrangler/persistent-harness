@@ -653,6 +653,95 @@ export function registerCanonicalSessionManager(manager, { estimateContextTokens
   snapshotManagers.set(manager, { state: null, estimateContextTokens, coldCards, savedBoundary: coldCards?.entryId ?? null });
 }
 
+/** Capture compaction ownership without retaining a second lifetime archive.
+ * Only explicitly registered immutable committed managers may use revision fences.
+ * Branch reads are detached, validated per record, and expire with the snapshot.
+ */
+export function captureCanonicalCompactionSnapshot(manager) {
+  const sessionId = manager.getSessionId(), leafId = manager.getLeafId();
+  if (!snapshotManagers.has(manager)) {
+    const original = snapshotCanonicalArchive(manager.getEntries());
+    const { entries, diagnostics } = projectCanonicalBranch({ entries: original, leafId });
+    return { managed: false, leafId, branchEntries: entries, diagnostics,
+      isCurrent: () => manager.getSessionId() === sessionId && manager.getLeafId() === leafId
+        && isDeepStrictEqual(manager.getEntries(), original) };
+  }
+  const revision = { ...manager.getRevision() }, count = manager.getEntryCount();
+  const state = managedState(manager), selected = state.selected.slice();
+  const isCurrent = () => {
+    const current = manager.getRevision();
+    return current.revision === revision.revision && current.generation === revision.generation
+      && manager.getEntryCount() === count && manager.getSessionId() === sessionId && manager.getLeafId() === leafId;
+  };
+  const branch = () => {
+    requireThat(selected.length <= CANONICAL_CONTEXT_LIMITS.entries, "ERR_CONTEXT_ENTRIES");
+    const entries = new Array(selected.length), budget = { nodes: 1, depth: 1, codeUnits: 0 };
+    const stringCodeUnits = getCanonicalContextStringCodeUnits();
+    let failure;
+    selected.forEach((header, index) => {
+      let value, loaded = false;
+      Object.defineProperty(entries, index, { enumerable: true, configurable: true,
+        get: () => {
+          requireThat(isCurrent(), "ERR_CONTEXT_SOURCE_PROJECTION");
+          if (failure) throw failure;
+          if (!loaded) {
+            try {
+              budget.codeUnits += String(index).length;
+              value = copyData(overlaidEntry(manager, state, state.facts, header.id), { budget, stringCodeUnits });
+              loaded = true;
+            } catch (error) { failure = error; throw error; }
+          }
+          requireThat(isCurrent(), "ERR_CONTEXT_SOURCE_PROJECTION");
+          return value;
+        },
+        set: replacement => { value = replacement; loaded = true; },
+      });
+    });
+    return entries;
+  };
+  requireThat(isCurrent(), "ERR_CONTEXT_SOURCE_PROJECTION");
+  return { managed: true, leafId, branchEntries: branch(), branch, isCurrent,
+    contextEntries: selectedContextHeaders(state).map(header => ({ id: header.id, type: header.type, role: header.role, position: header.position })),
+    readEntry: id => {
+      requireThat(isCurrent(), "ERR_CONTEXT_SOURCE_PROJECTION");
+      const entry = copyData(overlaidEntry(manager, state, state.facts, id));
+      requireThat(isCurrent(), "ERR_CONTEXT_SOURCE_PROJECTION");
+      return entry;
+    },
+    diagnostics: state.facts.signatureDiagnostics.map(item => ({ ...item })) };
+}
+
+/** Bound an extension-transformed materialized view, including incremental reads. */
+export function boundedCanonicalContextSource(source) {
+  source.validate();
+  const length = source.length, contributions = source.contributions;
+  requireThat(Number.isSafeInteger(length) && length >= 0, "ERR_CONTEXT_SOURCE_PROJECTION");
+  requireThat(length + 2 <= CANONICAL_CONTEXT_LIMITS.nodes, "ERR_CONTEXT_DATA_LIMIT");
+  requireThat(Array.isArray(contributions) && contributions.length === length, "ERR_CONTEXT_SOURCE_PROJECTION");
+  const validate = () => {
+    source.validate();
+    requireThat(source.length === length && source.contributions.length === length, "ERR_CONTEXT_SOURCE_PROJECTION");
+  };
+  const budget = { nodes: 1, depth: 1, codeUnits: 0 }, stringCodeUnits = getCanonicalContextStringCodeUnits();
+  const cached = new Map();
+  let failure;
+  const read = index => {
+    validate();
+    requireThat(Number.isSafeInteger(index) && index >= 0 && index < length, "ERR_CONTEXT_SOURCE_PROJECTION");
+    if (failure) throw failure;
+    if (!cached.has(index)) {
+      try {
+        budget.codeUnits += String(index).length;
+        const message = copyData(source.read(index), { budget, stringCodeUnits });
+        validateMessage(message); cached.set(index, message);
+      } catch (error) { failure = error; throw error; }
+    }
+    validate();
+    return cached.get(index);
+  };
+  return { ...source, length, contributions, validate, read, readAll: () => Array.from({ length }, (_, index) => read(index)) };
+}
+
 export function sessionContextInput(manager, buildSessionProjection, mode) {
   return snapshotManagers.has(manager) ? { sessionManager: manager, mode }
     : { entries: manager.getEntries(), leafId: manager.getLeafId(), buildSessionProjection, mode };

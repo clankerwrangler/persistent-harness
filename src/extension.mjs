@@ -1310,7 +1310,7 @@ ${catalog.diagnostics.map((item) => item.error).join("\n")}`);
   });
 
   pi.on("context", () => actorInputs.flush());
-  pi.on("context_source", () => actorInputs.flush());
+  pi.on("context_source", event => event.purpose === "compaction" ? undefined : actorInputs.flush());
 
   pi.on("message_start", async (event) => {
     // Earlier message_end events have persisted before this assistant event.

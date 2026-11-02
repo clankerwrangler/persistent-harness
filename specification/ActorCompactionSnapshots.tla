@@ -1,11 +1,12 @@
 ---------------------- MODULE ActorCompactionSnapshots ----------------------
 \* Sources:
-\*   src/actor-compaction.mjs sha256:043eb1861c7490795a5b2fd582848d14bb8e157d4361844d1e23c851f0a6e12e
-\*   src/canonical-context.mjs sha256:9651ca11b90eaa03fff19272c98e8da42ccb3e3c7f7b1eaac56d1be740552db5
+\*   src/actor-compaction.mjs sha256:2d57968fd70a4dba91cbf1ae088290be984bfe3cf679d5f378a08210de32c09b
+\*   src/canonical-context.mjs sha256:c764a6a5cc36f09f3f9d428c85face2c4363ddb99de8ad6059085e54953858b1
 
 EXTENDS Naturals, FiniteSets
 CONSTANTS Entries, Active, Pending
-\* Companion to ActorCompaction: each owner has distinct nested containers.
+\* Mutable-manager compatibility companion: each owner has distinct nested containers.
+\* Registered immutable managers use the full fence abstracted by ActorCompaction.
 \* String identities are immutable atoms; copying containers allocates no strings.
 VARIABLES phase, heap, snapshot, hookView, stringStore, sourceMutation,
           hookMutation, cancel, writes, providers

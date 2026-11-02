@@ -1,10 +1,15 @@
 -------------------------- MODULE ActorCompaction --------------------------
 \* Sources:
-\*   src/actor-compaction.mjs sha256:043eb1861c7490795a5b2fd582848d14bb8e157d4361844d1e23c851f0a6e12e
+\*   src/actor-compaction.mjs sha256:2d57968fd70a4dba91cbf1ae088290be984bfe3cf679d5f378a08210de32c09b
 \*   src/actor-coordinator.mjs sha256:d33d75f88913edccec70c1cc2df0391a3e909d958f96acfd890c3b774935ae62
-\*   src/extension.mjs sha256:4e0a4af856612e6feeb3756f57c4e4aef9688bce5442b85f1199c7e5a49aa33d
+\*   src/extension.mjs sha256:d88ad23b82d510474453f81e83bac07811806e08fbfb7a89c85468834b6f0eb2
+\*   src/canonical-context.mjs sha256:c764a6a5cc36f09f3f9d428c85face2c4363ddb99de8ad6059085e54953858b1
 
 EXTENDS Naturals, FiniteSets
+\* Historical sameLeaf abstracts validity of the complete snapshot fence:
+\* session identity, leaf, revision, generation and entry count.
+\* Trusted committed managers change a fence component on every canonical change;
+\* mutable compatibility managers compare their complete detached archive instead.
 CONSTANTS Entries
 \* flights/queued track driver-owned default summary requests; custom hook computation is abstract.
 VARIABLES phase, aborted, sameLeaf, hook, pending, cut, kept, writes,
@@ -23,7 +28,7 @@ Interrupt == /\ phase \in {"prepare", "capture", "diagnostic", "hook", "summary"
              /\ ~aborted /\ aborted' = TRUE
              /\ UNCHANGED <<phase, sameLeaf, hook, pending, cut, kept, writes, source,
                             instructions, beforeEvent, terminal, effects, canonical, noticeFailure, flights, abortedProvider, queued, instructionRole, captured, outcome, reason, summaryErrors, retries, continued, stockPrepared, hasCheckpoint, hasAnchor, refresh>>
-Move == /\ phase \in {"diagnostic", "hook", "summary", "validate"} /\ sameLeaf
+Move == /\ phase \in {"prepare", "capture", "diagnostic", "hook", "summary", "validate"} /\ sameLeaf
         /\ sameLeaf' = FALSE
         /\ UNCHANGED <<phase, aborted, hook, pending, cut, kept, writes, source,
                        instructions, beforeEvent, terminal, effects, canonical, noticeFailure, flights, abortedProvider, queued, instructionRole, captured, outcome, reason, summaryErrors, retries, continued, stockPrepared, hasCheckpoint, hasAnchor, refresh>>

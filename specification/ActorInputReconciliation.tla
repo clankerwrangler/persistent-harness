@@ -1,6 +1,6 @@
 --------------------- MODULE ActorInputReconciliation ---------------------
 \* Sources:
-\*   src/extension.mjs sha256:4e0a4af856612e6feeb3756f57c4e4aef9688bce5442b85f1199c7e5a49aa33d
+\*   src/extension.mjs sha256:d88ad23b82d510474453f81e83bac07811806e08fbfb7a89c85468834b6f0eb2
 \*   src/supervisor.mjs sha256:f98ce08909ebba0dbc34e8121dac397e068d8fe32d0c21c5eb4017a434b628bb
 \*   src/visible-transcript-reader.mjs sha256:244b202937ba51f1c9f06e272fe77ba34cd3316d43cbed956bf6ee98b7fc8061
 
@@ -11,6 +11,8 @@ VARIABLES ready, generation, pending, proof, accepted, writes, delivered,
 vars == <<ready, generation, pending, proof, accepted, writes, delivered,
           incremental, admitted, stopped, compacting, startupQueries, reporting, callers, reportEpoch, reportFault>>
 Inputs == {"old", "new", "completed"}
+\* Compaction-purpose source reads do not initiate a flush; they stutter.
+\* Ordinary inference/settlement and explicit commands retain these report owners.
 Callers == {"flush1", "flush2", "handle"}
 Init == /\ ready = FALSE /\ generation = 1 /\ pending = {"old"}
         /\ proof \in [Inputs -> {"absent", "proven", "ambiguous"}]
