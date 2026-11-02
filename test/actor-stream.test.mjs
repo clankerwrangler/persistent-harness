@@ -5,7 +5,7 @@ import { createActorStreamPlanner, ACTOR_STREAM_LIMITS } from "../src/actor-stre
 import { projectCanonicalContext, THINKING_SIGNATURE_CUSTOM_TYPE } from "../src/canonical-context.mjs";
 import { createNativeProviderAdapter } from "../src/native-provider.mjs";
 
-// Tests require an explicitly selected stock 0.99.1 public SDK/API graph.
+// Tests require an explicitly selected stock 1.5.0 public SDK/API graph.
 const { sdk, api, responsesApi } = await loadExternalPi();
 const clone = structuredClone;
 const usage = () => ({ input: 10, output: 20, cacheRead: 3, cacheWrite: 4, reasoning: 5, totalTokens: 37,

@@ -1,7 +1,7 @@
 ------------------------ MODULE CanonicalContext ------------------------
 \* Sources:
 \*   src/canonical-context.mjs sha256:c5c1d7d3062fb24ae072ec9588b004fb999c6dfd23a3bebdcfa6a3b17fd4850d
-\*   src/actor-coordinator.mjs sha256:2b0c8be0e148c47dccb3a0ae141c6b63966c22aaef24f43fc787a34f746ec7fb
+\*   src/actor-coordinator.mjs sha256:d37bea5423fdaa63e6ffde30b6d985a758288a569c1d5658126f311ffcbf0428
 
 EXTENDS Naturals, Sequences, FiniteSets, TLC
 \* Read-only projection/recovery model. Tokens stand for immutable messages,

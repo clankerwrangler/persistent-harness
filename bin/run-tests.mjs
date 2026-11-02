@@ -4,7 +4,7 @@
 //   node bin/run-tests.mjs [unit|integration|native|all] [test files...]
 //
 // unit:        tests that need neither Pi nor Python (everything not listed in test/integration-files.txt)
-// integration: tests listed in test/integration-files.txt; they need stock Pi 0.99.1 and the managed Python
+// integration: tests listed in test/integration-files.txt; they need stock Pi 1.5.0 and the managed Python
 // native:      test/native/*.test.mjs
 // Missing Pi or Python skips the groups that need them, with the reason, instead of failing.
 import { spawnSync } from "node:child_process";
@@ -26,7 +26,7 @@ function discoverPi() {
   }
   const runtimes = path.join(agentDir, "runtimes");
   if (!existsSync(runtimes)) return null;
-  for (const name of readdirSync(runtimes).filter((entry) => entry.startsWith("pi-0.99.1-")).sort().reverse()) {
+  for (const name of readdirSync(runtimes).filter((entry) => entry.startsWith("pi-1.5.0-")).sort().reverse()) {
     const dist = path.join(runtimes, name, "node_modules/pi-sdk-runtime/node_modules/@earendil-works/pi-coding-agent/dist");
     if (existsSync(path.join(dist, "cli.js")) && existsSync(path.join(dist, "index.js"))) {
       // The build root is the installed stock graph, the directory above its node_modules.
@@ -50,7 +50,7 @@ function discoverPython() {
 // The official (not source-built) Pi package, for the tests that check its pinned bundle.
 function discoverOfficialPi() {
   if (process.env.PI_HARNESS_TEST_OFFICIAL_PI_MODULE) return process.env.PI_HARNESS_TEST_OFFICIAL_PI_MODULE;
-  const official = path.join(agentDir, "runtimes/pi-0.99.1/node_modules/@earendil-works/pi-coding-agent");
+  const official = path.join(agentDir, "runtimes/pi-1.5.0/node_modules/@earendil-works/pi-coding-agent");
   return existsSync(path.join(official, "dist/bundle/index.js")) ? official : null;
 }
 
@@ -73,7 +73,7 @@ const native = existsSync(path.join(checkout, "test/native"))
   ? readdirSync(path.join(checkout, "test/native")).filter((name) => name.endsWith(".test.mjs")).map((name) => `native/${name}`)
   : [];
 const pi = discoverPi(), python = discoverPython();
-const missing = [!pi && "stock Pi 0.99.1 (set PI_HARNESS_PI_COMMAND and PI_HARNESS_PI_MODULE)", !python && "Python runtime (set PI_HARNESS_PYTHON)"].filter(Boolean);
+const missing = [!pi && "stock Pi 1.5.0 (set PI_HARNESS_PI_COMMAND and PI_HARNESS_PI_MODULE)", !python && "Python runtime (set PI_HARNESS_PYTHON)"].filter(Boolean);
 
 let files;
 if (explicit.length) files = explicit.map((file) => path.relative(path.join(checkout, "test"), path.resolve(file)));

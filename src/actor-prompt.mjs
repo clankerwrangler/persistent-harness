@@ -15,7 +15,7 @@ export function createAgentStartPromptCapture() {
     async prepare(runner, prompt, images, options) {
       rendered = undefined;
       try {
-        const prepared = await runner.emitBeforeAgentStart(prompt, images, options);
+        const prepared = await runner.emitBeforeAgentStart({ messageType: "user", prompt, images }, options);
         if (typeof rendered !== "string") throw new Error("Agent-start prompt observer did not render a prompt");
         return { ...prepared, systemPrompt: rendered };
       } finally { rendered = undefined; }

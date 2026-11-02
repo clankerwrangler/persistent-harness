@@ -221,17 +221,16 @@ test("resolver requires explicit install and uses manifest exports beside bundle
   const packageManifest = JSON.parse(await readFile(path.join(stock, "package.json"), "utf8"));
   const programmatic = packageManifest.exports["./programmatic"]?.import;
   assert.deepEqual(byCommand, { ...byModule, sdk: programmatic ? path.resolve(stock, programmatic) : byModule.sdk });
-  assert.equal(byModule.version, "0.99.1");
+  assert.equal(byModule.version, "1.5.0");
   assert.equal(byModule.sdk, path.join(stock, "dist/index.js"));
   const apiPackageFile = findPackageJSON(pathToFileURL(byModule.api));
   const apiPackage = JSON.parse(await readFile(apiPackageFile, "utf8"));
-  assert.equal(apiPackage.name, "@earendil-works/pi-ai"); assert.equal(apiPackage.version, "0.99.1");
+  assert.equal(apiPackage.name, "@earendil-works/pi-ai"); assert.equal(apiPackage.version, "1.5.0");
   const target = apiPackage.exports["./api/*"].import;
   assert.equal(target, "./dist/api/*.js");
   assert.equal(byModule.responsesApi, fileURLToPath(new URL(target.replace("*", "openai-responses-shared"), pathToFileURL(apiPackageFile))));
   const executable = path.join(temporary, "explicit-pi"); await symlink(path.join(stock, "dist/bundle/cli.js"), executable);
   assert.deepEqual(await resolveExternalPi({ env: { PI_HARNESS_PI_COMMAND: executable } }), byCommand);
-  assert.equal(typeof external.core.formatPromptTemplateInvocation, "function");
   assert.equal(typeof external.responsesApi.processResponsesStream, "function");
 });
 
@@ -255,15 +254,15 @@ test("resolver honors the explicit official bundled SDK without changing public 
 test("resolver rejects altered bundled entry bytes before executing them", async () => {
   const directory = path.join(temporary, "altered/node_modules/@earendil-works/pi-coding-agent");
   await mkdir(path.join(directory, "dist/bundle"), { recursive: true });
-  await writeFile(path.join(directory, "package.json"), JSON.stringify({ name: "@earendil-works/pi-coding-agent", version: "0.99.1",
-    exports: { ".": { import: "./dist/index.js" } }, dependencies: { "@earendil-works/pi-ai": "0.99.1", "@earendil-works/pi-agent-core": "0.99.1" } }));
+  await writeFile(path.join(directory, "package.json"), JSON.stringify({ name: "@earendil-works/pi-coding-agent", version: "1.5.0",
+    exports: { ".": { import: "./dist/index.js" } }, dependencies: { "@earendil-works/pi-ai": "1.5.0", "@earendil-works/pi-agent-core": "1.5.0" } }));
   await writeFile(path.join(directory, "dist/index.js"), "throw new Error('must not execute');");
   await writeFile(path.join(directory, "dist/bundle/index.js"), "throw new Error('must not execute');");
   for (const name of ["pi-ai", "pi-agent-core"]) {
     const dependency = path.join(directory, "node_modules/@earendil-works", name);
     await mkdir(dependency, { recursive: true });
-    await writeFile(path.join(dependency, "package.json"), JSON.stringify({ name: `@earendil-works/${name}`, version: "0.99.1",
-      dependencies: name === "pi-agent-core" ? { "@earendil-works/pi-ai": "0.99.1" } : {} }));
+    await writeFile(path.join(dependency, "package.json"), JSON.stringify({ name: `@earendil-works/${name}`, version: "1.5.0",
+      dependencies: name === "pi-agent-core" ? { "@earendil-works/pi-ai": "1.5.0" } : {} }));
   }
   await assert.rejects(loadExternalPi({ env: { PI_HARNESS_PI_MODULE: path.join(directory, "dist/bundle/index.js") } }), /official stock bytes/);
 });
@@ -275,9 +274,9 @@ test("resolver rejects a different stock version before importing code", async (
   await mkdir(ai, { recursive: true }); await mkdir(core, { recursive: true });
   await writeFile(path.join(directory, "package.json"), JSON.stringify({ name: "@earendil-works/pi-coding-agent", version: "0.85.0",
     dependencies: { "@earendil-works/pi-ai": "*", "@earendil-works/pi-agent-core": "*" } }));
-  await writeFile(path.join(ai, "package.json"), JSON.stringify({ name: "@earendil-works/pi-ai", version: "0.99.1" }));
-  await writeFile(path.join(core, "package.json"), JSON.stringify({ name: "@earendil-works/pi-agent-core", version: "0.99.1", dependencies: { "@earendil-works/pi-ai": "*" } }));
-  await assert.rejects(resolveExternalPi({ env: { PI_HARNESS_PI_MODULE: directory } }), /Expected stock Pi 0.99.1/);
+  await writeFile(path.join(ai, "package.json"), JSON.stringify({ name: "@earendil-works/pi-ai", version: "1.5.0" }));
+  await writeFile(path.join(core, "package.json"), JSON.stringify({ name: "@earendil-works/pi-agent-core", version: "1.5.0", dependencies: { "@earendil-works/pi-ai": "*" } }));
+  await assert.rejects(resolveExternalPi({ env: { PI_HARNESS_PI_MODULE: directory } }), /Expected stock Pi 1.5.0/);
 });
 
 test("UI broker correlates overlapping dialogs, ignores invalid/stale replies, and drains cancellation", async () => {

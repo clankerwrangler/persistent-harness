@@ -3,7 +3,7 @@
 \*   src/actor-compile-cache.mjs sha256:f0308df107c22995268707e4f94b1456d3c3757379c0deb5b75b7bcee7920c94
 \*   src/supervisor.mjs sha256:b1adb2c43e0cc03644b770e2ac9710541f936b7890cfa05efc3e9f0d6fd08df3
 \*   bin/harness-actor.mjs sha256:36a688d0b5f51906e78e982720687b8ba774c21fdedb2274aeb92c8532dc0263
-\*   src/external-pi.mjs sha256:3d0a1636ddbff7bb85ba0dd269debbf47bc52296dc45144d5eead8cd0af7f8ae
+\*   src/external-pi.mjs sha256:38f8ffdff78010243eb4e5c8617ca6c0c003b03a7d46b6240b814d73d14fcbd3
 
 EXTENDS Naturals, FiniteSets
 CONSTANTS Actors, MaxGeneration, WaitForWriters, RevalidateOnHit, CheckSource

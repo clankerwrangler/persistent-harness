@@ -8,12 +8,12 @@ import { resolveExternalPi } from "../../src/external-pi.mjs";
 
 // Accept the package's public CLI/SDK entries by name and version, not by file hash,
 // so a rebuilt or patched install of the same stock release still runs the tests.
-const officialEntries = new Set(["dist/index.js", "dist/cli.js", "dist/bundle/index.js", "dist/bundle/cli.js"]);
-const acceptedVersion = "0.99.1";
+const officialEntries = new Set(["dist/index.js", "dist/programmatic.js", "dist/cli.js", "dist/bundle/index.js", "dist/bundle/cli.js"]);
+const acceptedVersion = "1.5.0";
 
 export async function acceptedNativeRuntime() {
   const command = process.env.PI_HARNESS_PI_COMMAND, module = process.env.PI_HARNESS_PI_MODULE;
-  assert(command && module, "Use explicit stock 0.99.1 CLI/SDK test seams");
+  assert(command && module, "Use explicit stock 1.5.0 CLI/SDK test seams");
   const paths = await resolveExternalPi();
   const [cli, sdk] = await Promise.all([realpath(command), realpath(module)]);
   assert.equal(sdk, paths.sdk, "Use the selected public SDK entry, not another module");

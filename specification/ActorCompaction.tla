@@ -1,7 +1,7 @@
 -------------------------- MODULE ActorCompaction --------------------------
 \* Sources:
 \*   src/actor-compaction.mjs sha256:043eb1861c7490795a5b2fd582848d14bb8e157d4361844d1e23c851f0a6e12e
-\*   src/actor-coordinator.mjs sha256:2b0c8be0e148c47dccb3a0ae141c6b63966c22aaef24f43fc787a34f746ec7fb
+\*   src/actor-coordinator.mjs sha256:d37bea5423fdaa63e6ffde30b6d985a758288a569c1d5658126f311ffcbf0428
 \*   src/extension.mjs sha256:b7e3c99b2fc52d58d7d051eb9b7cda86334f0d577716d8608d0dac9a50da5d60
 
 EXTENDS Naturals, FiniteSets

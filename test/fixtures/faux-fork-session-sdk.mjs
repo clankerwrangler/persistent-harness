@@ -47,9 +47,9 @@ export async function fauxForkSessionSdk(t, root) {
   for (const name of ["pi-coding-agent", "pi-ai", "pi-agent-core"]) {
     const directory = path.join(modules, "@earendil-works", name); await mkdir(directory, { recursive: true });
     await writeFile(path.join(directory, "package.json"), JSON.stringify({ name: `@earendil-works/${name}`,
-      version: "0.99.1", type: "module", dependencies: name === "pi-coding-agent"
-        ? { "@earendil-works/pi-ai": "0.99.1", "@earendil-works/pi-agent-core": "0.99.1" }
-        : name === "pi-agent-core" ? { "@earendil-works/pi-ai": "0.99.1" } : {},
+      version: "1.5.0", type: "module", dependencies: name === "pi-coding-agent"
+        ? { "@earendil-works/pi-ai": "1.5.0", "@earendil-works/pi-agent-core": "1.5.0" }
+        : name === "pi-agent-core" ? { "@earendil-works/pi-ai": "1.5.0" } : {},
       exports: name === "pi-coding-agent" ? { ".": "./forbidden.mjs", "./programmatic": "./session-api.mjs" } : {} }));
   }
   await writeFile(path.join(agent, "forbidden.mjs"), 'throw new Error("full SDK loading is outside the faux session fixture");\n');

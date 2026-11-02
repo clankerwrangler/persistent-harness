@@ -100,8 +100,10 @@ function callIds(call) {
   return parts;
 }
 // Deliberately not transformMessages(): it manufactures missing tool outputs.
-function replay(api, model, messages, grammar, { codex, anchorsAdditions, convert } = {}) {
-  const input = [], identities = new Map();
+function replay(api, responsesApi, model, messages, grammar, { codex, support, folded, convert } = {}) {
+  const input = [], identities = new Map(), unavailable = new Set();
+  const role = model.reasoning && model.compat?.supportsDeveloperRole !== false ? "developer" : "system";
+  let declared = false, systemIndex = 0;
   for (const msg of messages) for (const block of msg.role === "assistant" ? msg.content : []) {
     if (block.type !== "toolCall") continue;
     const ids = callIds(block);
@@ -112,11 +114,25 @@ function replay(api, model, messages, grammar, { codex, anchorsAdditions, conver
     if (msg.role === "system") {
       // Public stock helpers own checkpoint/delta semantics. Only wire placement
       // stays here because transforming native history would synthesize results.
-      if (index > 0 && anchorsAdditions && msg.toolsAdded?.length)
-        input.push({ type: "additional_tools", role: "developer", tools: convert(msg.toolsAdded) });
-      const text = index === 0 ? api.getSystemMessageText(msg) : api.renderSystemMessageUpdate(msg);
-      if (text && (index > 0 || !codex))
-        input.push({ role: model.reasoning && model.compat?.supportsDeveloperRole !== false ? "developer" : "system", content: text });
+      const anchors = systemIndex++ >= folded;
+      const added = msg.toolsAdded ?? [];
+      if (anchors) for (const tool of added) unavailable.delete(tool.name);
+      if (anchors && support === "changes" && added.length) {
+        if (declared) input.push({ role, content: responsesApi.renderIncrementalToolsNotice(unavailable) });
+        declared = true;
+        input.push({ type: "additional_tools", role: "developer", tools: convert(added) });
+      }
+      if (index > 0 || !codex) {
+        const parts = [index === 0 ? api.getSystemMessageText(msg) : api.renderSystemMessageUpdate(msg)];
+        if (anchors) {
+          const names = new Set(added.map(tool => tool.name));
+          const removed = (msg.toolsRemoved ?? []).map(tool => tool.name).filter(name => !names.has(name));
+          if (removed.length) parts.push(responsesApi.renderToolRemovalNotice(removed));
+          for (const name of removed) unavailable.add(name);
+        }
+        const text = parts.filter(Boolean).join("\n\n");
+        if (text) input.push({ role, content: text });
+      }
     } else if (msg.role === "user") input.push({ role: "user", content: inputContent(msg.content) });
     else if (msg.role === "toolResult") {
       const [callId] = identities.get(msg.toolCallId) ?? callIds({ ...msg, id: msg.toolCallId });
@@ -157,7 +173,11 @@ function replay(api, model, messages, grammar, { codex, anchorsAdditions, conver
 function buildBody(api, responsesApi, model, context, options) {
   const codex = model.api === "openai-codex-responses";
   context = api.resolveTranscript(api.normalizeContext(context), model.compat?.supportsMidConvoSystemMessages);
-  const { requestTools, anchorsAdditions } = api.resolveTranscriptTools(context.messages, model.compat?.supportsAdditionalTools);
+  // Synthetic tool search is left to stock; such models declare the current tools at the top instead.
+  const stockSupport = responsesApi.getResponsesToolSupport({ supportsMidConvoSystemMessages: model.compat?.supportsMidConvoSystemMessages ?? false,
+    supportsAdditionalTools: model.compat?.supportsAdditionalTools ?? false, supportsToolSearch: model.compat?.supportsToolSearch ?? false });
+  const support = stockSupport === "additions" ? "none" : stockSupport;
+  const { requestTools, foldedSystemMessages } = api.resolveTranscriptTools(context.messages, support);
   const grammar = new Map();
   const convert = definitions => {
     const tools = responsesApi.convertResponsesTools(definitions, {
@@ -176,7 +196,7 @@ function buildBody(api, responsesApi, model, context, options) {
   const definitions = convert(api.getCurrentTools(context.messages));
   const tools = convert(requestTools);
   if (new Set(tools.map((tool) => tool.name)).size !== tools.length) fail("duplicate_tool_name");
-  const input = replay(api, model, context.messages, grammar, { codex, anchorsAdditions, convert });
+  const input = replay(api, responsesApi, model, context.messages, grammar, { codex, support, folded: foldedSystemMessages, convert });
   const initial = api.getInitialSystemMessage(context.messages);
   const systemPrompt = initial ? api.getSystemMessageText(initial) : "";
   const body = { model: model.id, stream: true, store: false, input, tools,
@@ -371,10 +391,13 @@ export function createNativeProviderAdapter({ api, responsesApi, modelRuntime, t
         if (full.previous_response_id !== undefined) fail("use_previousResponseId_option_with_full_context");
         const opted = new Map();
         if (model.compat?.supportsAsyncTools === true && full.model === model.id) {
-          const declarations = [...(full.tools ?? []), ...full.input.filter(item => item.type === "additional_tools").flatMap(item => item.tools ?? [])];
+          const lists = [full.tools ?? [], ...full.input.filter(item => item.type === "additional_tools").map(item => item.tools ?? [])];
+          const declarations = lists.flat();
           for (const expected of definitions) {
-            const advertised = declarations.filter(candidate => candidate.name === expected.name);
-            if (expected.async === true && advertised.length === 1 && advertised[0].async === true &&
+            // A later declaration replaces an earlier one of the same name.
+            const repeated = lists.some(list => list.filter(candidate => candidate.name === expected.name).length > 1);
+            const advertised = declarations.filter(candidate => candidate.name === expected.name).slice(-1);
+            if (expected.async === true && !repeated && advertised.length === 1 && advertised[0].async === true &&
                 advertised[0].type === expected.type && equal(advertised[0].parameters, expected.parameters) && equal(advertised[0].format, expected.format)) opted.set(expected.name, expected.type);
           }
         }
@@ -591,7 +614,7 @@ export function createNativeProviderAdapter({ api, responsesApi, modelRuntime, t
               for (const id of itemIds.keys()) entry.retired.items.add(id);
               for (const id of callIds.keys()) entry.retired.calls.add(id);
               // full is already JSON-detached after onPayload; this template stays private.
-              entry.chain = { id: output.responseId, template: template(full), baseline: [...full.input, ...replay(api, model, [output], grammar)] };
+              entry.chain = { id: output.responseId, template: template(full), baseline: [...full.input, ...replay(api, responsesApi, model, [output], grammar)] };
               if (!options.sessionId || options.cacheRetention === "none" || !nonempty(rawResponseId)) disconnect();
               else armIdle(entry);
               // The completed parser generation is retired; the idle inbox cannot emit events.

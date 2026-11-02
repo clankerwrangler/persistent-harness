@@ -7,7 +7,7 @@ import { loadExternalPiSdk, resolveExternalPi } from "../src/external-pi.mjs";
 const names = { agent: "@earendil-works/pi-coding-agent", ai: "@earendil-works/pi-ai", core: "@earendil-works/pi-agent-core" };
 async function pkg(directory, name, dependencies = {}, overrides = {}) {
   await mkdir(path.join(directory, "dist/api"), { recursive: true });
-  await writeFile(path.join(directory, "package.json"), JSON.stringify({ name, version: "0.99.1", dependencies,
+  await writeFile(path.join(directory, "package.json"), JSON.stringify({ name, version: "1.5.0", dependencies,
     exports: { ".": "./dist/index.js", "./api/*": "./dist/api/*.js" }, ...overrides }));
   for (const file of ["index.js", "api/openai-responses-shared.js", "api/simple-options.js"]) await writeFile(path.join(directory, "dist", file), "export {};\n");
 }
@@ -16,8 +16,8 @@ async function fixture(t, nested = false) {
   t.after(() => rm(root, { recursive: true, force: true }));
   const modules = nested ? path.join(graph, "wrapper/node_modules") : graph;
   const agent = path.join(modules, names.agent), ai = path.join(modules, names.ai), core = path.join(modules, names.core);
-  await pkg(agent, names.agent, { [names.ai]: "0.99.1", [names.core]: "0.99.1" });
-  await pkg(ai, names.ai); await pkg(core, names.core, { [names.ai]: "0.99.1" });
+  await pkg(agent, names.agent, { [names.ai]: "1.5.0", [names.core]: "1.5.0" });
+  await pkg(ai, names.ai); await pkg(core, names.core, { [names.ai]: "1.5.0" });
   return { root, graph, modules, agent, ai, core, resolve: () => resolveExternalPi({ env: { PI_HARNESS_PI_MODULE: path.join(agent, "dist/index.js") } }) };
 }
 for (const nested of [false, true]) test(`resolver accepts the complete ${nested ? "nested" : "top-level"} installed public graph`, async t => {
@@ -38,16 +38,16 @@ for (const [label, overrides, error] of [["version", { version: "0.99.0" }, /Exp
   });
 }
 test("resolver rejects undeclared dependencies and different core-AI instances", async t => {
-  const f = await fixture(t); await pkg(f.agent, names.agent, { [names.core]: "0.99.1" });
+  const f = await fixture(t); await pkg(f.agent, names.agent, { [names.core]: "1.5.0" });
   await assert.rejects(f.resolve(), /does not declare/);
-  await pkg(f.agent, names.agent, { [names.ai]: "0.99.1", [names.core]: "0.99.1" });
+  await pkg(f.agent, names.agent, { [names.ai]: "1.5.0", [names.core]: "1.5.0" });
   await pkg(path.join(f.core, "node_modules", names.ai), names.ai);
   await assert.rejects(f.resolve(), /different pi-ai instances/);
 });
 
 async function programmaticFixture(t, declaration = { types: "./dist/programmatic.d.ts", import: "./dist/programmatic.js" }, extraExports = {}) {
   const f = await fixture(t);
-  await pkg(f.agent, names.agent, { [names.ai]: "0.99.1", [names.core]: "0.99.1" }, {
+  await pkg(f.agent, names.agent, { [names.ai]: "1.5.0", [names.core]: "1.5.0" }, {
     exports: { ".": "./dist/index.js", "./programmatic": declaration, ...extraExports },
   });
   f.programmatic = path.join(f.agent, "dist/programmatic.js");
@@ -88,7 +88,7 @@ for (const [label, declaration] of [["pattern", { "./*": "./dist/*.js" }],
   ["conditional", { "./programmatic": { node: { import: "./dist/programmatic.js" } } }]]) {
   test(`supported ${label} advertisement selects programmatic without guessing a path`, async t => {
     const f = await fixture(t);
-    await pkg(f.agent, names.agent, { [names.ai]: "0.99.1", [names.core]: "0.99.1" }, { exports: { ".": "./dist/index.js", ...declaration } });
+    await pkg(f.agent, names.agent, { [names.ai]: "1.5.0", [names.core]: "1.5.0" }, { exports: { ".": "./dist/index.js", ...declaration } });
     await writeFile(path.join(f.agent, "dist/programmatic.js"), "export class SessionManager {}\n");
     assert.equal((await resolveExternalPi({ env: { PI_HARNESS_PI_MODULE: f.agent } })).sdk, path.join(f.agent, "dist/programmatic.js"));
   });
@@ -97,7 +97,7 @@ for (const [label, declaration] of [["pattern", { "./*": "./dist/*.js" }],
 test("SDK-only helper keeps graph fences but does not resolve or import unused auxiliary exports", async t => {
   const f = await programmaticFixture(t);
   await pkg(f.ai, names.ai, {}, { exports: {} });
-  await pkg(f.core, names.core, { [names.ai]: "0.99.1" }, { exports: {} });
+  await pkg(f.core, names.core, { [names.ai]: "1.5.0" }, { exports: {} });
   const options = { env: { PI_HARNESS_PI_MODULE: f.agent } };
   assert.equal(typeof (await loadExternalPiSdk(options)).SessionManager, "function");
   await assert.rejects(resolveExternalPi(options), /Missing public export/);
@@ -119,7 +119,7 @@ for (const rootAlias of [false, true]) test(`declared root ${rootAlias ? "symlin
   const f = await fixture(t); const bundled = path.join(f.agent, "dist/bundle/index.js");
   await mkdir(path.dirname(bundled)); await writeFile(bundled, "export class SessionManager {}\n");
   if (rootAlias) { await rm(path.join(f.agent, "dist/index.js")); await symlink(bundled, path.join(f.agent, "dist/index.js")); }
-  else await pkg(f.agent, names.agent, { [names.ai]: "0.99.1", [names.core]: "0.99.1" }, {
+  else await pkg(f.agent, names.agent, { [names.ai]: "1.5.0", [names.core]: "1.5.0" }, {
     exports: { ".": "./dist/bundle/index.js", "./programmatic": null },
   });
   for (const entry of [bundled, path.join(f.agent, rootAlias ? "dist/index.js" : "dist/bundle/index.js")]) {

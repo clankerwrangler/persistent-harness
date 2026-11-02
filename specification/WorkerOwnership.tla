@@ -1,8 +1,8 @@
 ------------------------- MODULE WorkerOwnership -------------------------
 \* Sources:
 \*   src/sdk-worker.mjs sha256:0bab6c32d41896821acbc9d8ff3e7509f8ecd341b6f282afbabec504463174b2
-\*   src/external-pi.mjs sha256:3d0a1636ddbff7bb85ba0dd269debbf47bc52296dc45144d5eead8cd0af7f8ae
-\*   src/actor-coordinator.mjs sha256:2b0c8be0e148c47dccb3a0ae141c6b63966c22aaef24f43fc787a34f746ec7fb
+\*   src/external-pi.mjs sha256:38f8ffdff78010243eb4e5c8617ca6c0c003b03a7d46b6240b814d73d14fcbd3
+\*   src/actor-coordinator.mjs sha256:d37bea5423fdaa63e6ffde30b6d985a758288a569c1d5658126f311ffcbf0428
 EXTENDS Naturals, FiniteSets
 CONSTANTS Dialogs, NativeTransport, ToolNames, SupportedSdkEntries
 VARIABLES phase, activeRuntime, serviceRuntime, activeManager, serviceManager,

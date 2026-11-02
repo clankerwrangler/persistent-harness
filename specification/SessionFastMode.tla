@@ -2,7 +2,7 @@
 \* Sources:
 \*   src/fast-mode.mjs sha256:497e7699c395663ebff315b0244e14f06b43b46885823a8d0c42cccc63d71554
 \*   src/extension.mjs sha256:b7e3c99b2fc52d58d7d051eb9b7cda86334f0d577716d8608d0dac9a50da5d60
-\*   src/actor-coordinator.mjs sha256:2b0c8be0e148c47dccb3a0ae141c6b63966c22aaef24f43fc787a34f746ec7fb
+\*   src/actor-coordinator.mjs sha256:d37bea5423fdaa63e6ffde30b6d985a758288a569c1d5658126f311ffcbf0428
 \*   src/store.mjs sha256:321247cfd4fcdff36e33af0670e59a501ab67e19328b29387b64a78dc37553a2
 EXTENDS Naturals
 CONSTANT Sessions

@@ -1,3 +1,4 @@
+import path from "node:path";
 import { ConversationBirthClock, conversationBirth } from "./conversation-birth.mjs";
 import { PROGRESS_ENTRY_TYPE } from "./progress-projection.mjs";
 import { normalizeInputLocation, renderUserLocations } from "./input-location.mjs";
@@ -306,13 +307,13 @@ export class ActorCoordinator {
       if (invocation) {
         const prompt = this.resources?.getPrompts().prompts.find(item => item.name === invocation[1]);
         if (prompt) {
-          if (!this.core?.formatPromptTemplateInvocation) throw new Error("public prompt-template formatter is unavailable");
-          message = this.core.formatPromptTemplateInvocation(prompt, this.core.parseCommandArgs(invocation[2] ?? ""));
+          message = this.sdk.expandPromptTemplate(message, [prompt]);
         } else if (invocation[1].startsWith("skill:")) {
           const skill = this.resources?.getSkills().skills.find(item => item.name === invocation[1].slice(6));
           if (skill) {
-            if (!this.core?.formatSkillInvocation) throw new Error("public skill formatter is unavailable");
-            message = this.core.formatSkillInvocation({ ...skill, content: await readFile(skill.filePath, "utf8") }, invocation[2]);
+            const content = await readFile(skill.filePath, "utf8");
+            const block = `<skill name="${skill.name}" location="${skill.filePath}">\nReferences are relative to ${path.dirname(skill.filePath)}.\n\n${content}\n</skill>`;
+            message = invocation[2] ? `${block}\n\n${invocation[2]}` : block;
           }
         }
       }

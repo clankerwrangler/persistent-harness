@@ -1,6 +1,6 @@
 ---------------- MODULE FirstInputSnapshot ----------------
 \* Sources:
-\*   src/actor-coordinator.mjs sha256:2b0c8be0e148c47dccb3a0ae141c6b63966c22aaef24f43fc787a34f746ec7fb
+\*   src/actor-coordinator.mjs sha256:d37bea5423fdaa63e6ffde30b6d985a758288a569c1d5658126f311ffcbf0428
 
 EXTENDS Integers, Sequences, FiniteSets
 CONSTANT StaleInitial

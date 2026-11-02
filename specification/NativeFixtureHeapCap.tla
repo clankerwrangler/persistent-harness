@@ -1,7 +1,7 @@
 ------------------------- MODULE NativeFixtureHeapCap -------------------------
 \* Sources:
 \*   test/fixtures/node-heap-cap.mjs sha256:df6a4bf3f3f2e4bebd54d5a7721ef0941b732f87d4e13b679db15cae9d9f770b
-\*   test/fixtures/accepted-native-runtime.mjs sha256:72db7d7fd3e90d08c6adeb33bbfd6aab86c24131c95849d2be1d63052e44e031
+\*   test/fixtures/accepted-native-runtime.mjs sha256:d5c01131ad310d3efac61353abc55e20ae7c080af36c070e28e81b33bfc4b804
 \*   test/native/e2e-async.test.mjs sha256:792d662a8bc1a400406a83f16527021e2cf6330c020b2a2771efe570aae2974e
 EXTENDS Naturals, Sequences, TLC
 CONSTANT Bug

@@ -1,6 +1,6 @@
 -------------------- MODULE DependencyLookup --------------------
 \* Sources:
-\*   src/external-pi.mjs sha256:3d0a1636ddbff7bb85ba0dd269debbf47bc52296dc45144d5eead8cd0af7f8ae
+\*   src/external-pi.mjs sha256:38f8ffdff78010243eb4e5c8617ca6c0c003b03a7d46b6240b814d73d14fcbd3
 
 EXTENDS Naturals, FiniteSets
 CONSTANTS SkipRoot, AllowEscape, AllowMismatch

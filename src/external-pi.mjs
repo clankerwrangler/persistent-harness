@@ -4,12 +4,12 @@ import { access, readFile, realpath, stat } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
-export const STOCK_PI_VERSION = "0.99.1";
+export const STOCK_PI_VERSION = "1.5.0";
 const AGENT = "@earendil-works/pi-coding-agent";
 const AI = "@earendil-works/pi-ai";
 const CORE = "@earendil-works/pi-agent-core";
 const OFFICIAL_BUNDLE_ENTRY = "dist/bundle/index.js";
-const OFFICIAL_BUNDLE_SHA256 = "df1f4c36758e3d339d42c6caebb2fca1d9f415de658d56b7b1fa6a9a808f0aa5";
+const OFFICIAL_BUNDLE_SHA256 = "1e33ec4b55ed3997fe41077bce30d44b94556a9aaa128a08040a4c88f135c362";
 const inside = (root, target) => target === root || target.startsWith(`${root}${path.sep}`);
 
 async function commandPath(command, env, cwd) {
@@ -168,5 +168,6 @@ export async function loadExternalPi(options) {
     importSdk(paths.sdk),
     ...[paths.api, paths.core, paths.responsesApi, paths.simpleOptions].map((entry) => import(pathToFileURL(entry).href)),
   ]);
-  return { sdk, api, core, responsesApi, simpleOptions, paths };
+  // Agent-core no longer carries the context estimate; hosts read it from the coding agent.
+  return { sdk, api, core: { ...core, estimateContextTokens: sdk.estimateContextTokens }, responsesApi, simpleOptions, paths };
 }

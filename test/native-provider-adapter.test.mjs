@@ -20,9 +20,9 @@ const { sdk: { ModelRuntime, buildSessionProjection, convertToLlm }, api, respon
 const apiPackageFile = findPackageJSON(pathToFileURL(paths.api));
 const apiPackage = JSON.parse(await readFile(apiPackageFile, "utf8"));
 assert.equal(apiPackage.name, "@earendil-works/pi-ai");
-assert.equal(apiPackage.version, "0.99.1");
+assert.equal(apiPackage.version, "1.5.0");
 const apiExport = apiPackage.exports["./api/*"].import;
-assert.equal(apiExport, "./dist/api/*.js", "stock 0.99.1 public API wildcard export");
+assert.equal(apiExport, "./dist/api/*.js", "stock 1.5.0 public API wildcard export");
 const codexApiUrl = new URL(apiExport.replace("*", "openai-codex-responses"), pathToFileURL(apiPackageFile));
 const syntheticKey = `fixture.${Buffer.from(JSON.stringify({ "https://api.openai.com/auth": { chatgpt_account_id: "fixture-account" } })).toString("base64url")}.fixture`;
 const tool = { name: "ipython", description: "fixture", async: true, parameters: { type: "object", properties: { code: { type: "string" } }, required: ["code"] } };

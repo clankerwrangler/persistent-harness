@@ -1,7 +1,7 @@
 ------------------------- MODULE WorkerResultWire -------------------------
 \* Sources:
 \*   src/sdk-worker.mjs sha256:0bab6c32d41896821acbc9d8ff3e7509f8ecd341b6f282afbabec504463174b2
-\*   src/actor-coordinator.mjs sha256:2b0c8be0e148c47dccb3a0ae141c6b63966c22aaef24f43fc787a34f746ec7fb
+\*   src/actor-coordinator.mjs sha256:d37bea5423fdaa63e6ffde30b6d985a758288a569c1d5658126f311ffcbf0428
 \*   src/supervisor.mjs sha256:b1adb2c43e0cc03644b770e2ac9710541f936b7890cfa05efc3e9f0d6fd08df3
 EXTENDS Naturals, Sequences
 CONSTANT Fault
