@@ -240,8 +240,8 @@ test("own-idle expiry honors a fresh own interval after held control and input r
   assert.equal(f.actor.isRunning, true, "expiry must use the fresh interval, not an old queued deadline");
   await until(() => f.supervisor.store.getSession(f.id).lifecycle === "passivated");
   await f.client.request("submit_input", { sessionId: f.id, message: "input after expiry", behavior: "auto" });
-  await until(() => f.supervisor.store.getSession(f.id).lifecycle === "resident" && f.supervisor.status().capacity.starting === 0
-    && f.actors.some(actor => actor.session.sessionId === f.id && actor.session.actorGeneration >= 2 && actor.submitEntered));
+  // The revived parent may retire again between polls, so only the lasting fact is awaited.
+  await until(() => f.actors.some(actor => actor.session.sessionId === f.id && actor.session.actorGeneration >= 2 && actor.submitEntered));
   assert.equal(child.actor.isRunning, true);
 });
 
