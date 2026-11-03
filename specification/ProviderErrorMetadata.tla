@@ -1,6 +1,6 @@
 --------------------- MODULE ProviderErrorMetadata ---------------------
 \* Sources:
-\*   src/native-provider.mjs sha256:269f20c9a5e31eed6b83d80419454976927d233716c618e06b1f4dd16e77ebbf
+\*   src/native-provider.mjs sha256:17c6b4b941e9e6eb362674665b6a2bb63d7002c9f4157879fc297ad4b91bf8a4
 EXTENDS Naturals, FiniteSets, TLC
 \* Only exact allowlisted code/type tokens may enter auxiliary diagnostics.
 \* Private code/type/message/param values remain raw inputs, never output fields.
@@ -54,13 +54,23 @@ Safe(c, t, f, s) == [version |-> 2,
   errorShape |-> s.error, messageShape |-> s.message]
 Rejected == {"previous_response_not_found", "websocket_connection_limit_reached"}
 VARIABLES raw, frame, sawRaw, nextOutcome, phase, pending, diagnostic, errorMessage, retried
-vars == <<raw, frame, sawRaw, nextOutcome, phase, pending, diagnostic, errorMessage, retried>>
+metadataVars == <<raw, frame, sawRaw, nextOutcome, phase, pending, diagnostic, errorMessage, retried>>
+VARIABLES closeAttempt, closePhase, closeOwners, closeDisposed, closeFaulted,
+          closeBindings, closeRecords, closeFenced, closeFrozen
+closeVars == <<closeAttempt, closePhase, closeOwners, closeDisposed, closeFaulted,
+               closeBindings, closeRecords, closeFenced, closeFrozen>>
+vars == <<metadataVars, closeVars>>
+CloseInit == /\ closeAttempt = 0 /\ closePhase = "idle"
+             /\ closeOwners = [s \in 1..2 |-> 0] /\ closeDisposed = {} /\ closeFaulted = {}
+             /\ closeBindings = [a \in 1..2 |-> 0] /\ closeRecords = [a \in 1..2 |-> 0]
+             /\ closeFenced = {} /\ closeFrozen = [a \in 1..2 |-> 0]
 ShouldRetry == frame = "error" /\ raw.code \in Rejected /\ ~sawRaw
 LegacyError == IF frame = "hook" THEN "provider_request_failed"
   ELSE IF raw.code = "context_length_exceeded" THEN "context_length_exceeded"
   ELSE IF ShouldRetry THEN raw.code
   ELSE IF frame = "error" THEN "provider_error" ELSE "provider_response_failed"
-Init == /\ raw \in [code : (DOMAIN CodeCategory) \cup Private \cup NonTokens,
+Init == /\ CloseInit
+        /\ raw \in [code : (DOMAIN CodeCategory) \cup Private \cup NonTokens,
                     type : (DOMAIN TypeCategory) \cup Private \cup NonTokens,
                     message : {"PRIVATE_A", "PRIVATE_B"}, param : {"PRIVATE_A", "PRIVATE_B"}, shape : Shapes]
         /\ frame \in {"error", "response.failed", "hook"}
@@ -72,7 +82,7 @@ Observe == /\ phase = "input"
            /\ pending' = IF frame = "hook" THEN [x \in {} |-> x] ELSE Safe(raw.code, raw.type, frame, raw.shape)
            /\ errorMessage' = LegacyError /\ retried' = ShouldRetry
            /\ phase' = "observed"
-           /\ UNCHANGED <<raw, frame, sawRaw, nextOutcome, diagnostic>>
+           /\ UNCHANGED <<raw, frame, sawRaw, nextOutcome, diagnostic, closeVars>>
 Finish == /\ phase = "observed"
           /\ pending' = IF retried THEN [x \in {} |-> x] ELSE pending
           /\ diagnostic' = IF ~retried THEN pending
@@ -82,7 +92,7 @@ Finish == /\ phase = "observed"
                   [] nextOutcome = "hook" -> "provider_request_failed"
                   [] OTHER -> "provider_error"
           /\ phase' = "finished"
-          /\ UNCHANGED <<raw, frame, sawRaw, nextOutcome, retried>>
+          /\ UNCHANGED <<raw, frame, sawRaw, nextOutcome, retried, closeVars>>
 Next == Observe \/ Finish \/ (phase = "finished" /\ UNCHANGED vars)
 Spec == Init /\ [][Next]_vars
 FixedFields == \A d \in {pending, diagnostic} :
@@ -103,4 +113,44 @@ LegacyMessage == phase = "observed" \/ (phase = "finished" /\ ~retried) => error
 NoStaleMetadata == phase = "finished" /\ retried =>
   pending = [x \in {} |-> x] /\ (nextOutcome = "unknown_provider_error" \/ diagnostic = [x \in {} |-> x])
 NoHookMetadata == phase = "finished" /\ frame = "hook" => diagnostic = [x \in {} |-> x]
+
+\* Close callbacks observe only the inbox's bound, unfenced attempt. Binding
+\* begins before open (so pre-send closes count) and ends at retirement.
+\* A disposed inbox can still deliver a previously captured callback.
+CloseBegin(s) == /\ closePhase = "idle" /\ closeAttempt < 2
+ /\ s \notin closeDisposed \cup closeFaulted /\ closeOwners[s] = 0
+ /\ closeAttempt' = closeAttempt + 1 /\ closePhase' = "opening"
+ /\ closeOwners' = [closeOwners EXCEPT ![s] = closeAttempt + 1]
+ /\ closeBindings' = [closeBindings EXCEPT ![closeAttempt + 1] = s]
+ /\ UNCHANGED <<closeDisposed, closeFaulted, closeRecords, closeFenced, closeFrozen>>
+CloseSend == /\ closePhase = "opening" /\ closePhase' = "wire"
+ /\ UNCHANGED <<closeAttempt, closeOwners, closeDisposed, closeFaulted,
+                closeBindings, closeRecords, closeFenced, closeFrozen>>
+CloseTarget(s) == IF s \notin closeDisposed /\ closeOwners[s] # 0 /\ closeOwners[s] \notin closeFenced
+                  THEN closeOwners[s] ELSE 0
+UnsafeCloseTarget(s) == closeAttempt
+CloseEvent(s) ==
+ /\ LET target == CloseTarget(s)
+    IN closeRecords' = IF target = 0 THEN closeRecords ELSE [closeRecords EXCEPT ![target] = s]
+ /\ closeFaulted' = IF s \in closeDisposed THEN closeFaulted ELSE closeFaulted \cup {s}
+ /\ UNCHANGED <<closeAttempt, closePhase, closeOwners, closeDisposed,
+                closeBindings, closeFenced, closeFrozen>>
+CloseRetire == /\ closePhase \in {"opening", "wire"} /\ closePhase' = "idle"
+ /\ closeOwners' = [s \in 1..2 |-> IF closeOwners[s] = closeAttempt THEN 0 ELSE closeOwners[s]]
+ /\ closeFenced' = closeFenced \cup {closeAttempt}
+ /\ closeFrozen' = [closeFrozen EXCEPT ![closeAttempt] = closeRecords[closeAttempt]]
+ /\ UNCHANGED <<closeAttempt, closeDisposed, closeFaulted, closeBindings, closeRecords>>
+CloseDispose(s) == /\ closeDisposed' = closeDisposed \cup {s}
+ /\ UNCHANGED <<closeAttempt, closePhase, closeOwners, closeFaulted,
+                closeBindings, closeRecords, closeFenced, closeFrozen>>
+CloseScenarioInit == /\ CloseInit
+ /\ raw = "unused" /\ frame = "unused" /\ sawRaw = FALSE /\ nextOutcome = "unused"
+ /\ phase = "unused" /\ pending = "unused" /\ diagnostic = "unused" /\ errorMessage = "" /\ retried = FALSE
+CloseNext == /\ ((\E s \in 1..2: CloseBegin(s) \/ CloseEvent(s) \/ CloseDispose(s)) \/ CloseSend \/ CloseRetire)
+             /\ UNCHANGED metadataVars
+CloseSpec == CloseScenarioInit /\ [][CloseNext]_vars
+CloseAttemptOwned == \A a \in 1..2: closeRecords[a] = 0 \/ closeRecords[a] = closeBindings[a]
+CloseRetiredImmutable == \A a \in closeFenced: closeRecords[a] = closeFrozen[a]
+CloseIdleUnbound == closePhase = "idle" => \A s \in 1..2: closeOwners[s] = 0
+
 =============================================================================

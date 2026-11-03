@@ -580,7 +580,9 @@ class FakePiActor extends EventEmitter {
 test("automatic history maintenance defers busy entry events and retries final settlement and passivation", async (t) => {
   const root = await mkdtemp(path.join(os.tmpdir(), "harness-history-quiescence-"));
   const skillsPath = path.join(root, "skills"); await mkdir(skillsPath);
-  const actors = new Map(), refreshed = []; let gate = null;
+  const actors = new Map(), refreshed = [];
+  const startup = { entered: Promise.withResolvers(), release: Promise.withResolvers() };
+  let gate = startup;
   const index = { async refresh(sources, { signal }) {
     refreshed.push(...sources.map(source => source.sessionId));
     if (gate) { const current = gate; current.signal = signal; current.entered.resolve(); await current.release.promise; signal.throwIfAborted(); }
@@ -593,7 +595,7 @@ test("automatic history maintenance defers busy entry events and retries final s
     processIdentityFactory: async pid => ({ version: 1, pid, processGroup: pid, startTime: "fake", ownerToken: "fake" }),
     processTerminator: async () => ({ terminated: true }),
   });
-  await supervisor.start(); t.after(async () => { await supervisor.stop(); await rm(root, { recursive: true, force: true }); });
+  await supervisor.start(); t.after(async () => { startup.release.resolve(); await supervisor.stop(); await rm(root, { recursive: true, force: true }); });
   await writeFile(path.join(root, "root.jsonl"), JSON.stringify({ type: "session", version: 3, id: "root", timestamp: "2026-01-01T00:00:00Z" }) + "\n");
   supervisor.store.createRoot({ sessionId: "root", sessionFile: path.join(root, "root.jsonl"), cwd: root,
     repositoryRoot: null, name: "root", actorToken: "token", launch: {} }, 1);
@@ -601,6 +603,12 @@ test("automatic history maintenance defers busy entry events and retries final s
   await browser.start({ registrationType: "register_client", clientInstanceId: "history-quiescence" }); t.after(() => browser.stop());
   await browser.request("revive_session", { sessionId: "root" });
   const worker = await eventually(() => supervisor.store.getSession("root").lifecycle === "resident" && actors.get("root"));
+  await startup.entered.promise;
+  gate = null; startup.release.resolve();
+  // Startup's idle refresh finishes through a finite promise/finally chain.
+  await new Promise(resolve => setImmediate(resolve));
+  assert.deepEqual(refreshed, ["root"], "startup completes exactly one legitimate idle history refresh");
+  refreshed.length = 0;
   worker.emit("event", { type: "agent_start" });
   for (let i = 0; i < 5; i++) worker.emit("event", { type: "entry_appended", entryId: `busy-${i}` });
   await new Promise(resolve => setImmediate(resolve));

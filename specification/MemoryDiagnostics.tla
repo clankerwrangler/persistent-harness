@@ -1,7 +1,7 @@
 -------------------- MODULE MemoryDiagnostics --------------------
 \* Sources:
 \*   src/kernel.mjs sha256:feb1bec8dc4e3d47d0f11956acacea17cdfac0d91fa853c785f0f050754d06e2
-\*   src/extension.mjs sha256:4e0a4af856612e6feeb3756f57c4e4aef9688bce5442b85f1199c7e5a49aa33d
+\*   src/extension.mjs sha256:9483faf8a4e9bdfb2e242fa9b3a20437f2816553b4fba0d180189a6265b06caa
 \*   src/sdk-worker.mjs sha256:ad3637bdce0be9028c01b99eb3b0c619d76473b0def01bae88de50127622ea0a
 \*   src/supervisor.mjs sha256:f98ce08909ebba0dbc34e8121dac397e068d8fe32d0c21c5eb4017a434b628bb
 \*   src/protocol.mjs sha256:f19f3f025a9c8e60d6a3241d9a0c7b0283f56b5de283560028579b24a9d6a446

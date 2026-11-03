@@ -1,6 +1,6 @@
 --------------------- MODULE ActorInputReconciliation ---------------------
 \* Sources:
-\*   src/extension.mjs sha256:d88ad23b82d510474453f81e83bac07811806e08fbfb7a89c85468834b6f0eb2
+\*   src/extension.mjs sha256:9483faf8a4e9bdfb2e242fa9b3a20437f2816553b4fba0d180189a6265b06caa
 \*   src/supervisor.mjs sha256:f98ce08909ebba0dbc34e8121dac397e068d8fe32d0c21c5eb4017a434b628bb
 \*   src/visible-transcript-reader.mjs sha256:244b202937ba51f1c9f06e272fe77ba34cd3316d43cbed956bf6ee98b7fc8061
 

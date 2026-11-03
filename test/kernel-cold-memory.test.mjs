@@ -155,11 +155,12 @@ test("snapshot-demand and diagnostic owner release rearm automatic work without 
  await kernel.start();await release("hold-cold");await writeFile(path.join(root,"cold-state"),"complete");
  t.mock.timers.tick(30000);await until(()=>has("cold"));
  const demand=kernel.snapshot();await release("cold-release");await demand;
- await until(async()=>{t.mock.timers.tick(30000);return (await commands()).split("\n").filter(kind=>kind==="cold_memory").length>=2 && kernel.coldMemoryStats.state==="complete";});
+ await until(async()=>{t.mock.timers.tick(30000);return (await commands()).split("\n").filter(kind=>kind==="cold_memory").length>=2 && kernel.coldMemoryStats.state==="complete" && !kernel.isBusy;});
  assert.equal((await commands()).includes("execute"),false,"snapshot-demand retry needs no ordinary cell");
- const beforeDiagnostic=(await commands()).split("\n").filter(kind=>kind==="cold_memory").length;
  await release("hold-diagnostic");
  const diagnostic=kernel.memoryDiagnostics();await until(async()=>{t.mock.timers.tick(1000);return has("diagnostic");});
+ // Sample only after diagnostic ownership is held, not while prior advice can finish.
+ const beforeDiagnostic=(await commands()).split("\n").filter(kind=>kind==="cold_memory").length;
  t.mock.timers.tick(30000);
  assert.equal((await commands()).split("\n").filter(kind=>kind==="cold_memory").length,beforeDiagnostic);
  await release("diagnostic-release");await diagnostic;

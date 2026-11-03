@@ -859,8 +859,8 @@ test("external compaction hook receives canonical projections and composed names
 
 
 test("worker recovery, context reads, and compaction preserve large opaque archives with small live context", async () => {
-  let capture;
-  const { worker } = await fixture({ createCompactionDriver: options => { capture = options.capture; return createCompactionDriver(options); }, argv: ["--mode", "rpc", "--no-session", "--provider", "worker-fixture", "--model", "fixture",
+  let capture, runner;
+  const { worker } = await fixture({ createCompactionDriver: options => { capture = options.capture; runner = options.runner; return createCompactionDriver(options); }, argv: ["--mode", "rpc", "--no-session", "--provider", "worker-fixture", "--model", "fixture",
     "--no-extensions", "--no-skills", "--no-context-files"] });
   try {
     const manager = worker.session.sessionManager;
@@ -874,7 +874,7 @@ test("worker recovery, context reads, and compaction preserve large opaque archi
     assert.deepEqual(worker.coordinator.projectedMessages(), plain);
     await worker.coordinator.recover();
     assert.deepEqual(manager.getEntries(), entries, "no unknown result or history repair is needed");
-    const prepared = await prepareActorCompaction({ sdk: external.sdk, session: worker.session, capture });
+    const prepared = await prepareActorCompaction({ sdk: external.sdk, session: worker.session, capture, runner });
     assert(prepared.preparation);
     assert.deepEqual(prepared.branchEntries, entries);
     assert.equal(prepared.outstanding.length, 0);
@@ -888,10 +888,10 @@ test("worker recovery, context reads, and compaction preserve large opaque archi
 test("configured process budget reaches worker reads, recovery, compaction and the canonical extension service", async () => {
   const previous = process.env.PI_HARNESS_CONTEXT_STRING_CODE_UNITS;
   process.env.PI_HARNESS_CONTEXT_STRING_CODE_UNITS = "201326592";
-  let emitProjection, worker, capture;
+  let emitProjection, worker, capture, runner;
   try {
     const { default: harnessExtension } = await import("../src/extension.mjs");
-    ({ worker } = await fixture({ createCompactionDriver: options => { capture = options.capture; return createCompactionDriver(options); }, argv: ["--mode", "rpc", "--no-session", "--provider", "worker-fixture", "--model", "fixture",
+    ({ worker } = await fixture({ createCompactionDriver: options => { capture = options.capture; runner = options.runner; return createCompactionDriver(options); }, argv: ["--mode", "rpc", "--no-session", "--provider", "worker-fixture", "--model", "fixture",
       "--no-extensions", "--no-skills", "--no-context-files"], extensionFactory(pi, lifecycle) {
         fixtureExtension(pi); harnessExtension(pi, lifecycle);
         emitProjection = request => pi.events.emit("persistent-harness:project-canonical-context:v1", request);
@@ -904,7 +904,7 @@ test("configured process budget reaches worker reads, recovery, compaction and t
     assert.deepEqual(worker.coordinator.projectedMessages(), plain);
     await worker.coordinator.recover();
     assert.deepEqual(manager.getEntries(), entries);
-    assert((await prepareActorCompaction({ sdk: external.sdk, session: worker.session, capture })).preparation);
+    assert((await prepareActorCompaction({ sdk: external.sdk, session: worker.session, capture, runner })).preparation);
     for (const mode of ["native", "ordinary"]) {
       const request = { entries: manager.getBranch(), leafId, mode };
       emitProjection(request);
@@ -924,10 +924,10 @@ test("configured process budget reaches worker reads, recovery, compaction and t
 });
 
 
-test("dormant public preparation capture has no provider, transcript, UI or active-owner effects", async () => {
-  let capture, providerCalls = 0, activeHooks = 0;
+test("source preparation has no provider, transcript, UI or active-owner effects", async () => {
+  let capture, runner, providerCalls = 0, activeHooks = 0;
   const { worker, events } = await fixture({
-    createCompactionDriver: options => { capture = options.capture; return createCompactionDriver(options); },
+    createCompactionDriver: options => { capture = options.capture; runner = options.runner; return createCompactionDriver(options); },
     extensionFactory(pi) {
       pi.registerProvider("worker-fixture", { ...modelConfig, streamSimple() { providerCalls++; throw new Error("capture must not infer"); } });
       pi.on("session_before_compact", () => { activeHooks++; });
@@ -950,7 +950,7 @@ test("dormant public preparation capture has no provider, transcript, UI or acti
     const state = structuredClone(worker.session.agent.state.messages), beforeEvents = structuredClone(events);
     worker.coordinator.controller = new AbortController();
     const controller = worker.coordinator.controller;
-    const prepared = await worker.coordinator.withServiceMutation(() => prepareActorCompaction({ sdk: external.sdk, session: worker.session, capture }));
+    const prepared = await worker.coordinator.withServiceMutation(() => prepareActorCompaction({ sdk: external.sdk, session: worker.session, capture, runner }));
     assert(prepared.preparation.messagesToSummarize.some(m => m.content === "edited old ".repeat(100)));
     assert.equal(providerCalls, 0); assert.equal(activeHooks, 0);
     assert.deepEqual(manager.getEntries(), before); assert.equal(manager.getLeafId(), leaf);

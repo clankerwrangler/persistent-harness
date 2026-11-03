@@ -39,6 +39,20 @@ test("trusted compaction snapshot reads only requested bodies and owns detached 
   assert.throws(() => JSON.stringify(snapshot.branch()), { code: "ERR_CONTEXT_DATA_LIMIT" });
 });
 
+test("trusted compaction snapshot accepts more than 100000 headers and charges only requested bodies", () => {
+  const f = fixture(100001, 0);
+  registerCanonicalSessionManager(f.manager);
+  const snapshot = captureCanonicalCompactionSnapshot(f.manager);
+  assert.equal(snapshot.branchEntries.length, 100001);
+  assert.equal(f.reads(), 0);
+  assert.equal(snapshot.branchEntries[100000].id, "e100000");
+  assert.equal(snapshot.branchEntries[100000].id, "e100000");
+  assert.equal(f.reads(), 1);
+  assert.throws(() => [...snapshot.branchEntries], { code: "ERR_CONTEXT_ENTRIES" });
+  assert.equal(f.reads(), 100000);
+  assert.throws(() => snapshot.branchEntries[100000], { code: "ERR_CONTEXT_ENTRIES" });
+});
+
 test("trusted compaction fence rejects revision, generation, identity, leaf and count movement", () => {
   for (const key of ["revision", "generation", "session", "leaf", "count"]) {
     const f = fixture(); registerCanonicalSessionManager(f.manager);
@@ -105,4 +119,63 @@ test("bounded source rejects invalid or oversized advertised views before body a
   source.length = 1000000000;
   assert.throws(() => bounded.readAll(), { code: "ERR_CONTEXT_SOURCE_PROJECTION" });
   assert.equal(reads, 1);
+});
+
+test("custom results materialize only this snapshot's exact hook-view getters into plain detached data", () => {
+  const f = fixture(3, 1); registerCanonicalSessionManager(f.manager);
+  const snapshot = captureCanonicalCompactionSnapshot(f.manager), view = snapshot.branch();
+  assert.equal(f.reads(), 0);
+  const result = snapshot.materializeResult({ summary: "hook", details: { branchEntries: view } });
+  assert.equal(f.reads(), 3);
+  assert.deepEqual(result.details.branchEntries, f.entries);
+  assert.equal(Object.getOwnPropertyDescriptor(result.details.branchEntries, "0").get, undefined);
+  result.details.branchEntries[0].data.nested[0].text = "result local";
+  assert.equal(view[0].data.nested[0].text, "archive");
+  assert.equal(f.entries[0].data.nested[0].text, "archive");
+});
+
+test("custom-result materialization rejects forged, replaced, foreign and relocated getters without invoking them", () => {
+  for (const kind of ["forged", "replaced", "foreign", "relocated"]) {
+    const f = fixture(2); registerCanonicalSessionManager(f.manager);
+    const snapshot = captureCanonicalCompactionSnapshot(f.manager), view = snapshot.branch();
+    let calls = 0, result = { details: view };
+    if (kind === "forged") result = { get details() { calls++; return view; } };
+    if (kind === "replaced") Object.defineProperty(view, "0", { enumerable: true, get() { calls++; return f.entries[0]; } });
+    if (kind === "foreign") {
+      const other = captureCanonicalCompactionSnapshot(f.manager);
+      result = { details: other.branchEntries };
+    }
+    if (kind === "relocated") {
+      const getter = Object.getOwnPropertyDescriptor(view, "0").get;
+      const unowned = new Array(1);
+      Object.defineProperty(unowned, "0", { enumerable: true, get: getter });
+      result = { details: unowned };
+    }
+    assert.throws(() => snapshot.materializeResult(result), { code: "ERR_CONTEXT_DATA_TYPE" }, kind);
+    assert.equal(calls, 0, kind);
+    assert.equal(f.reads(), 0, kind);
+  }
+});
+
+test("custom-result materialization keeps stale cached-read, cycle, prototype and aggregate-budget rejection", t => {
+  const previous = process.env.PI_HARNESS_CONTEXT_STRING_CODE_UNITS;
+  delete process.env.PI_HARNESS_CONTEXT_STRING_CODE_UNITS;
+  t.after(() => {
+    if (previous === undefined) delete process.env.PI_HARNESS_CONTEXT_STRING_CODE_UNITS;
+    else process.env.PI_HARNESS_CONTEXT_STRING_CODE_UNITS = previous;
+  });
+  const stale = fixture(); registerCanonicalSessionManager(stale.manager);
+  const snapshot = captureCanonicalCompactionSnapshot(stale.manager), cached = snapshot.branchEntries[0];
+  assert.equal(cached.id, "e0"); stale.stamp.revision++;
+  assert.throws(() => snapshot.materializeResult({ details: snapshot.branchEntries }), { code: "ERR_CONTEXT_SOURCE_PROJECTION" });
+  assert.throws(() => snapshot.branchEntries[0], { code: "ERR_CONTEXT_SOURCE_PROJECTION" });
+  const f = fixture(2, 1); registerCanonicalSessionManager(f.manager);
+  const current = captureCanonicalCompactionSnapshot(f.manager);
+  const cycle = {}; cycle.self = cycle;
+  assert.throws(() => current.materializeResult({ details: cycle }), { code: "ERR_CONTEXT_DATA_CYCLE" });
+  assert.throws(() => current.materializeResult({ details: new Date() }), { code: "ERR_CONTEXT_DATA_TYPE" });
+  const text = "x".repeat(34 * 1024 * 1024);
+  f.entries[0].data = { text }; f.entries[1].data = { text };
+  assert.throws(() => current.materializeResult({ details: current.branchEntries }), { code: "ERR_CONTEXT_DATA_LIMIT" });
+  assert.throws(() => current.branchEntries[0], { code: "ERR_CONTEXT_DATA_LIMIT" });
 });

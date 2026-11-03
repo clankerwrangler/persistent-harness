@@ -2,7 +2,7 @@
 \* Sources:
 \*   src/store.mjs sha256:321247cfd4fcdff36e33af0670e59a501ab67e19328b29387b64a78dc37553a2
 \*   src/supervisor.mjs sha256:f98ce08909ebba0dbc34e8121dac397e068d8fe32d0c21c5eb4017a434b628bb
-\*   src/extension.mjs sha256:4e0a4af856612e6feeb3756f57c4e4aef9688bce5442b85f1199c7e5a49aa33d
+\*   src/extension.mjs sha256:9483faf8a4e9bdfb2e242fa9b3a20437f2816553b4fba0d180189a6265b06caa
 
 EXTENDS Naturals, FiniteSets, TLC
 CONSTANT MaxGeneration

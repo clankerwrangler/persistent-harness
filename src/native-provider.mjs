@@ -28,6 +28,28 @@ const providerErrorTypes = new Map([
   ["permission_error", "permission"], ["not_found_error", "not_found"],
   ["rate_limit_error", "rate_limit"], ["server_error", "server"], ["api_error", "server"],
 ]);
+// Exact generic reasons only; never reflect arbitrary close text.
+const websocketCloseReasons = new Map([
+  ["normal closure", "normal_closure"], ["going away", "going_away"],
+  ["protocol error", "protocol_error"], ["unsupported data", "unsupported_data"],
+  ["invalid payload data", "invalid_payload"], ["invalid frame payload data", "invalid_payload"],
+  ["policy violation", "policy_violation"], ["message too big", "message_too_big"],
+  ["payload too large", "message_too_big"], ["frame too large", "message_too_big"],
+  ["mandatory extension", "mandatory_extension"], ["internal server error", "server_error"],
+  ["internal error", "server_error"], ["server error", "server_error"],
+  ["service restart", "service_restart"], ["try again later", "try_again_later"],
+  ["bad gateway", "bad_gateway"],
+]);
+function safeWebsocketClose({ code, reason, wasClean }) {
+  const validCode = Number.isInteger(code) && code >= 1000 && code <= 4999;
+  const absentReason = reason == null || reason === "";
+  const token = typeof reason === "string" && reason.length <= 123
+    ? websocketCloseReasons.get(reason.toLowerCase().replaceAll("_", " ")) : undefined;
+  return Object.freeze({ code: validCode ? code : null, codeState: validCode ? "valid" : code == null ? "absent" : "invalid",
+    reason: token ?? (absentReason ? "absent" : "redacted"),
+    reasonState: absentReason ? "absent" : token ? "known" : typeof reason === "string" ? "unknown" : "invalid",
+    ...(typeof wasClean === "boolean" ? { wasClean } : {}) });
+}
 function diagnosticShape(value) {
   return value === undefined ? "missing" : value === null ? "null" : typeof value === "string" ? "string"
     : typeof value === "object" && !Array.isArray(value) ? "object" : "other";
@@ -262,7 +284,7 @@ async function* sse(response, signal, maxFrameBytes) {
 // One persistent inbox attaches before open/send. This prevents missing an immediate reply.
 function socketInbox(WebSocket, url, headers, signal, limits) {
   const socket = new WebSocket(url, { headers });
-  let queue = [], wake, fault, queuedBytes = 0, disposed = false;
+  let queue = [], wake, fault, queuedBytes = 0, disposed = false, owner;
   let opened, openFailed;
   const open = new Promise((resolve, reject) => { opened = resolve; openFailed = reject; });
   // An early failure can occur before the caller awaits open.
@@ -270,7 +292,12 @@ function socketInbox(WebSocket, url, headers, signal, limits) {
   const notify = () => { wake?.(); wake = undefined; };
   const bad = (code) => { if (disposed) return; fault = code; openFailed(new AdapterError(code)); notify(); };
   const listeners = {
-    open: () => opened(), error: () => bad("websocket_transport_error"), close: () => bad("websocket_closed"),
+    open: () => opened(), error: () => bad("websocket_transport_error"),
+    close: (event) => {
+      if (disposed) return;
+      if (owner && !owner.fenced) owner.websocketClose ??= safeWebsocketClose(event);
+      bad("websocket_closed");
+    },
     message: ({ data }) => {
       if (disposed) return;
       const text = typeof data === "string" ? data : ArrayBuffer.isView(data) ? Buffer.from(data.buffer, data.byteOffset, data.byteLength).toString("utf8") : data instanceof ArrayBuffer ? Buffer.from(data).toString("utf8") : null;
@@ -287,6 +314,8 @@ function socketInbox(WebSocket, url, headers, signal, limits) {
   return {
     socket, open: wait(open, signal).finally(() => { clearTimeout(timeout); signal.removeEventListener("abort", abort); }),
     healthy: () => !fault && socket.readyState === 1 && queue.length === 0,
+    bindAttempt(attempt) { owner = attempt; },
+    releaseAttempt(attempt) { if (owner === attempt) owner = undefined; },
     async next(signal) {
       while (!queue.length) {
         if (fault) fail(fault);
@@ -296,7 +325,7 @@ function socketInbox(WebSocket, url, headers, signal, limits) {
       return parse(frame.text);
     },
     close() {
-      disposed = true;
+      disposed = true; owner = undefined;
       clearTimeout(timeout); signal.removeEventListener("abort", abort);
       for (const [name, listener] of Object.entries(listeners)) socket.removeEventListener(name, listener);
       // ws emits an error if closed during its handshake. This listener cannot admit data.
@@ -341,16 +370,17 @@ export function createNativeProviderAdapter({ api, responsesApi, modelRuntime, t
     if (options.timeoutMs > 0) timer = setTimeout(() => { timedOut = true; abort(); }, options.timeoutMs);
     const signal = controller.signal;
     const requestId = randomUUID(), attempts = [];
-    let attempt, nativeProviderError, providerTools = false;
+    let attempt, attemptInbox, nativeProviderError, providerTools = false;
     const beginAttempt = (transport) => {
       nativeProviderError = undefined;
       attempt = { attemptId: randomUUID(), attemptNumber: attempts.length + 1, transport,
-        sent: false, created: false, observedCalls: [], providerTools, retired: false, fenced: false,
+        sent: false, dispatchedBodyBytes: 0, created: false, observedCalls: [], providerTools, retired: false, fenced: false,
         possibleUsage: false, outcome: "not_sent" };
       attempts.push(attempt);
     };
     const retire = () => {
-      if (attempt) { attempt.retired = true; attempt.fenced = true; }
+      if (attempt) { attempt.retired = true; attempt.fenced = true; attemptInbox?.releaseAttempt(attempt); }
+      attemptInbox = undefined;
     };
     (async () => {
       let final;
@@ -560,8 +590,10 @@ export function createNativeProviderAdapter({ api, responsesApi, modelRuntime, t
         const sseRequest = async () => {
           disconnect(); retire(); beginAttempt("sse");
           attempt.sent = true; attempt.possibleUsage = true; attempt.outcome = "unknown";
+          const serialized = JSON.stringify(full);
+          attempt.dispatchedBodyBytes = Buffer.byteLength(serialized);
           const response = await wait((options.fetch ?? transportOptions.fetch ?? globalThis.fetch)(url, {
-            method: "POST", headers, body: JSON.stringify(full), signal,
+            method: "POST", headers, body: serialized, signal,
           }), signal);
           await wait(options.onResponse?.({ status: response.status, headers: Object.fromEntries(response.headers) }, model), signal);
           if (!response.ok) {
@@ -585,8 +617,11 @@ export function createNativeProviderAdapter({ api, responsesApi, modelRuntime, t
                 const wsUrl = new URL(url); wsUrl.protocol = wsUrl.protocol === "https:" ? "wss:" : "ws:";
                 const inbox = socketInbox(transportOptions.WebSocket, wsUrl.toString(), headers, signal,
                   { ...limits, connectTimeoutMs: options.websocketConnectTimeoutMs ?? limits.connectTimeoutMs });
+                attemptInbox = inbox; inbox.bindAttempt(attempt);
                 connection = { inbox, identity, createdAt: Date.now(), retired: { responses: new Set(), items: new Set(), calls: new Set() } };
                 await inbox.open;
+              } else {
+                attemptInbox = connection.inbox; attemptInbox.bindAttempt(attempt);
               }
             } catch (error) {
               disconnect(); retire();
@@ -603,7 +638,9 @@ export function createNativeProviderAdapter({ api, responsesApi, modelRuntime, t
             }
             async function* wire() {
               attempt.sent = true; attempt.possibleUsage = true; attempt.outcome = "unknown";
-              entry.inbox.socket.send(JSON.stringify({ ...request, type: "response.create" }));
+              const serialized = JSON.stringify({ ...request, type: "response.create" });
+              attempt.dispatchedBodyBytes = Buffer.byteLength(serialized);
+              entry.inbox.socket.send(serialized);
               // Only observed() may terminate a response: an old terminal frame can
               // be delayed until this request without ending its new generation.
               while (true) yield await entry.inbox.next(signal);

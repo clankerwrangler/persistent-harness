@@ -182,7 +182,10 @@ export function createCompactionDriver({ sdk, core, runner, session, models, cap
       sameSnapshot();
       if (custom?.cancel) throw new ActorCompactionError("ERR_COMPACTION_CANCELLED", "Compaction cancelled");
       let result;
-      if (custom?.compaction) { fromExtension = true; result = custom.compaction; }
+      if (custom?.compaction) {
+        fromExtension = true;
+        result = snapshot.managed ? snapshot.materializeResult(custom.compaction) : custom.compaction;
+      }
       else {
         // Public StreamFn permits a Promise<AssistantMessageEventStream>. Queue starts,
         // not events: return each actual provider stream unchanged, never a fake result.

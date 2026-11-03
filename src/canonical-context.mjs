@@ -51,8 +51,9 @@ function identifier(value) {
 }
 
 // Accept plain SDK data, including optional undefined object fields. Do not invoke
-// getters, toJSON(), or custom clone hooks. Returned data never aliases the input.
-function copyData(value, { archiveRecordUnits, stringCodeUnits = CANONICAL_CONTEXT_LIMITS.stringCodeUnits, budget } = {}) {
+// getters, toJSON(), or custom clone hooks. Only the private snapshot result copy
+// may resolve its own exact array getters. Returned data never aliases the input.
+function copyData(value, { archiveRecordUnits, stringCodeUnits = CANONICAL_CONTEXT_LIMITS.stringCodeUnits, budget, ownedGetters } = {}) {
   let nodes = budget?.nodes ?? 0, codeUnits = budget?.codeUnits ?? 0;
   const ancestors = new Set();
   function copy(item, depth) {
@@ -83,15 +84,20 @@ function copyData(value, { archiveRecordUnits, stringCodeUnits = CANONICAL_CONTE
       if (array && key === "length") continue;
       requireThat(typeof key === "string", "ERR_CONTEXT_DATA_TYPE");
       const descriptor = Object.getOwnPropertyDescriptor(item, key);
-      requireThat(descriptor.enumerable && Object.hasOwn(descriptor, "value"), "ERR_CONTEXT_DATA_TYPE");
+      requireThat(descriptor.enumerable, "ERR_CONTEXT_DATA_TYPE");
       if (array) requireThat(/^(0|[1-9]\d*)$/.test(key) && Number(key) < item.length,
         "ERR_CONTEXT_DATA_TYPE");
+      const data = Object.hasOwn(descriptor, "value");
+      // Only this snapshot's original getter at this exact array slot may run.
+      // Generic accessors, including replacements on an owned view, still reject.
+      requireThat(data || array && typeof descriptor.get === "function"
+        && ownedGetters?.get(item)?.[key] === descriptor.get, "ERR_CONTEXT_DATA_TYPE");
       // Archive records share the node/depth/cycle budget, not a lifetime string sum.
       // Include the top-level array slot key in that record's string accounting.
       if (archiveRecordUnits && depth === 0) codeUnits = 0;
       codeUnits += key.length;
       requireThat(codeUnits <= stringCodeUnits, "ERR_CONTEXT_DATA_LIMIT");
-      const copied = copy(descriptor.value, depth + 1);
+      const copied = copy(data ? descriptor.value : descriptor.get(), depth + 1);
       if (archiveRecordUnits && depth === 0 && copied !== null && typeof copied === "object") {
         archiveRecordUnits.set(copied, codeUnits);
       }
@@ -668,24 +674,27 @@ export function captureCanonicalCompactionSnapshot(manager) {
   }
   const revision = { ...manager.getRevision() }, count = manager.getEntryCount();
   const state = managedState(manager), selected = state.selected.slice();
+  const ownedGetters = new WeakMap();
   const isCurrent = () => {
     const current = manager.getRevision();
     return current.revision === revision.revision && current.generation === revision.generation
       && manager.getEntryCount() === count && manager.getSessionId() === sessionId && manager.getLeafId() === leafId;
   };
   const branch = () => {
-    requireThat(selected.length <= CANONICAL_CONTEXT_LIMITS.entries, "ERR_CONTEXT_ENTRIES");
     const entries = new Array(selected.length), budget = { nodes: 1, depth: 1, codeUnits: 0 };
     const stringCodeUnits = getCanonicalContextStringCodeUnits();
-    let failure;
+    let failure, loadedEntries = 0;
+    const getters = new Array(selected.length);
+    ownedGetters.set(entries, getters);
     selected.forEach((header, index) => {
       let value, loaded = false;
-      Object.defineProperty(entries, index, { enumerable: true, configurable: true,
+      const descriptor = { enumerable: true, configurable: true,
         get: () => {
           requireThat(isCurrent(), "ERR_CONTEXT_SOURCE_PROJECTION");
           if (failure) throw failure;
           if (!loaded) {
             try {
+              requireThat(++loadedEntries <= CANONICAL_CONTEXT_LIMITS.entries, "ERR_CONTEXT_ENTRIES");
               budget.codeUnits += String(index).length;
               value = copyData(overlaidEntry(manager, state, state.facts, header.id), { budget, stringCodeUnits });
               loaded = true;
@@ -695,12 +704,20 @@ export function captureCanonicalCompactionSnapshot(manager) {
           return value;
         },
         set: replacement => { value = replacement; loaded = true; },
-      });
+      };
+      getters[index] = descriptor.get;
+      Object.defineProperty(entries, index, descriptor);
     });
     return entries;
   };
   requireThat(isCurrent(), "ERR_CONTEXT_SOURCE_PROJECTION");
   return { managed: true, leafId, branchEntries: branch(), branch, isCurrent,
+    materializeResult: result => {
+      requireThat(isCurrent(), "ERR_CONTEXT_SOURCE_PROJECTION");
+      const detached = copyData(result, { ownedGetters });
+      requireThat(isCurrent(), "ERR_CONTEXT_SOURCE_PROJECTION");
+      return detached;
+    },
     contextEntries: selectedContextHeaders(state).map(header => ({ id: header.id, type: header.type, role: header.role, position: header.position })),
     readEntry: id => {
       requireThat(isCurrent(), "ERR_CONTEXT_SOURCE_PROJECTION");

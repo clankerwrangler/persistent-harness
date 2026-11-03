@@ -458,5 +458,8 @@
   "ColdHistoryAnchor.cfg": "pass",
   "ColdHistoryAnchorBadBookmark.cfg": "violation",
   "ColdHistoryAnchorBadOffBranch.cfg": "violation",
-  "ColdHistoryAnchorBadPartial.cfg": "violation"
+  "ColdHistoryAnchorBadPartial.cfg": "violation",
+  "ProviderErrorMetadata.close.cfg": "pass",
+  "ProviderErrorMetadata.close.Unscoped.cfg": "violation",
+  "ActorCompactionSnapshots.BadAccessor.cfg": "violation"
 }

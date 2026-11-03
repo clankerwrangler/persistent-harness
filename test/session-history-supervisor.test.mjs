@@ -371,9 +371,14 @@ test("settlement maintenance coalesces without blocking snapshot queries or waki
 
 
 test("busy append coverage defers automatic refresh, but strict refresh and final settlement remain current", async (t) => {
-  let refreshes = 0;
+  let refreshes = 0, observeFinal = false, finalPublished = false;
   class CountedIndex extends SessionHistoryIndex {
-    async refresh(...args) { refreshes++; return super.refresh(...args); }
+    async refresh(sources, options) {
+      refreshes++;
+      const result = await super.refresh(sources, options);
+      if (observeFinal && options?.automatic && sources.length === 1 && sources[0].sessionId === "caller-a") finalPublished = true;
+      return result;
+    }
   }
   const { supervisor, clients: [a, b] } = await ownedHistoryFixture(t, null,
     { sessionHistoryIndexFactory: options => new CountedIndex(options) });
@@ -404,10 +409,13 @@ test("busy append coverage defers automatic refresh, but strict refresh and fina
     message: { role: "user", content: "finalneedle" } });
   await writeFile(file, frames.map(JSON.stringify).join("\n") + "\n");
   const beforeSettle = refreshes;
+  observeFinal = true;
   await a.request("update_activity", { streaming: false });
   for (let i = 0; i < 100; i++) {
-    const result = await b.request("session_history", { ...query, refresh: false, query: "finalneedle" });
-    if (!result.freshness.maintenancePendingSources) {
+    if (finalPublished) {
+      const result = await b.request("session_history", { ...query, refresh: false, query: "finalneedle" });
+      assert.equal(result.freshness.maintenancePendingSources, 0);
+      assert.equal(result.freshness.pendingSources, 0);
       assert.equal(result.results[0].entryId, "last");
       assert.equal(refreshes, beforeSettle + 1); return;
     }

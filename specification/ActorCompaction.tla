@@ -1,9 +1,9 @@
 -------------------------- MODULE ActorCompaction --------------------------
 \* Sources:
-\*   src/actor-compaction.mjs sha256:2d57968fd70a4dba91cbf1ae088290be984bfe3cf679d5f378a08210de32c09b
+\*   src/actor-compaction.mjs sha256:ff707741faf3ea45cb363f9866ed4cbb0309c7a76556d14ea125cae7a7963c28
 \*   src/actor-coordinator.mjs sha256:d33d75f88913edccec70c1cc2df0391a3e909d958f96acfd890c3b774935ae62
-\*   src/extension.mjs sha256:d88ad23b82d510474453f81e83bac07811806e08fbfb7a89c85468834b6f0eb2
-\*   src/canonical-context.mjs sha256:c764a6a5cc36f09f3f9d428c85face2c4363ddb99de8ad6059085e54953858b1
+\*   src/extension.mjs sha256:9483faf8a4e9bdfb2e242fa9b3a20437f2816553b4fba0d180189a6265b06caa
+\*   src/canonical-context.mjs sha256:76adbe84c8ec0e16fb8e74b4c13d62287243c1749e4adbbd97777a84cdcf1192
 
 EXTENDS Naturals, FiniteSets
 \* Historical sameLeaf abstracts validity of the complete snapshot fence:

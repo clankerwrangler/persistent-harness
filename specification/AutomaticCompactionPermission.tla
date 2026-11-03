@@ -2,7 +2,7 @@
 \* Sources:
 \*   src/automatic-compaction-permission.mjs sha256:295549ffaaf636b722b3061bb2ad8d5be8de73f28606807ffb7f36657f3385af
 \*   src/actor-coordinator.mjs sha256:d33d75f88913edccec70c1cc2df0391a3e909d958f96acfd890c3b774935ae62
-\*   src/actor-compaction.mjs sha256:043eb1861c7490795a5b2fd582848d14bb8e157d4361844d1e23c851f0a6e12e
+\*   src/actor-compaction.mjs sha256:ff707741faf3ea45cb363f9866ed4cbb0309c7a76556d14ea125cae7a7963c28
 \*   src/sdk-worker.mjs sha256:ad3637bdce0be9028c01b99eb3b0c619d76473b0def01bae88de50127622ea0a
 
 EXTENDS Naturals

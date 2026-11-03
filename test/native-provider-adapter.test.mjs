@@ -302,6 +302,7 @@ test("before-send failure is not UNKNOWN; retired old callbacks cannot admit lat
   const b = await adapter(t, { WebSocket: class { constructor() { throw new Error("connect_denied"); } } });
   const before = await b.stream(model, context, { transport: "websocket" }).result();
   assert.equal(before.nativeTransport.sent, false); assert.equal(before.nativeTransport.outcome, "not_sent");
+  assert.equal(before.nativeTransport.dispatchedBodyBytes, 0); assert.equal(before.nativeTransport.websocketClose, undefined);
   assert.equal(before.nativeTransport.possibleUsage, false); assert.equal(before.nativeTransport.retired, true);
 });
 
@@ -462,7 +463,7 @@ function memorySocket(onSend) {
       super(); sockets.push(this);
       queueMicrotask(() => { this.readyState = 1; this.dispatchEvent(new Event("open")); });
     }
-    send(text) { const request = JSON.parse(text); requests.push(request); onSend(this, requests.length, request); }
+    send(text) { const request = JSON.parse(text); requests.push(request); onSend(this, requests.length, request, text); }
     emit(raw) { this.dispatchEvent(new MessageEvent("message", { data: JSON.stringify(raw) })); }
     close() { this.readyState = 3; }
   }
@@ -1208,4 +1209,169 @@ test("WebSocket template ownership: no second JSON copy and admitted caller deta
     assert.equal(wire.requests[2].extra.nested.value, "changed template");
     assert.equal(templateCopies, 0);
   } finally { JSON.stringify = stringify; }
+});
+
+function closeFrame(socket, details = {}) {
+  socket.readyState = 3;
+  socket.dispatchEvent(Object.assign(new Event("close"), details));
+}
+
+const multibyteContext = { ...context, messages: [{ role: "user", content: "漢字 é 😀", timestamp: 1 }] };
+
+test("WebSocket failure close diagnostics allow only bounded codes, booleans, and generic reasons", async (t) => {
+  const cases = [
+    [{ code: 1009, reason: "Message too big", wasClean: false }, { code: 1009, codeState: "valid", reason: "message_too_big", reasonState: "known", wasClean: false }],
+    [{ code: 1002, reason: "protocol_error" }, { code: 1002, codeState: "valid", reason: "protocol_error", reasonState: "known" }],
+    [{ code: 1008, reason: "Policy violation" }, { code: 1008, codeState: "valid", reason: "policy_violation", reasonState: "known" }],
+    [{ code: 1011, reason: "Internal server error" }, { code: 1011, codeState: "valid", reason: "server_error", reasonState: "known" }],
+    [{ code: 1012, reason: "service restart" }, { code: 1012, codeState: "valid", reason: "service_restart", reasonState: "known" }],
+    [{ code: 1013, reason: "Try again later" }, { code: 1013, codeState: "valid", reason: "try_again_later", reasonState: "known" }],
+    [{ code: 1000, reason: "", wasClean: true }, { code: 1000, codeState: "valid", reason: "absent", reasonState: "absent", wasClean: true }],
+    [{ code: 4999, reason: "PRIVATE_CLOSE_TEXT", wasClean: "PRIVATE_CLEAN" }, { code: 4999, codeState: "valid", reason: "redacted", reasonState: "unknown" }],
+    [{ code: "1009", reason: { private: "PRIVATE_CLOSE_OBJECT" } }, { code: null, codeState: "invalid", reason: "redacted", reasonState: "invalid" }],
+    [{ code: 5000, reason: "message too big PRIVATE_SUFFIX" }, { code: null, codeState: "invalid", reason: "redacted", reasonState: "unknown" }],
+    [{ code: 999, reason: "protocol error".repeat(1000) }, { code: null, codeState: "invalid", reason: "redacted", reasonState: "unknown" }],
+    [{ code: 1009.5, reason: 123 }, { code: null, codeState: "invalid", reason: "redacted", reasonState: "invalid" }],
+    [{ code: NaN, reason: null }, { code: null, codeState: "invalid", reason: "absent", reasonState: "absent" }],
+    [{}, { code: null, codeState: "absent", reason: "absent", reasonState: "absent" }],
+  ];
+  for (const [raw, expected] of cases) {
+    let sent;
+    const wire = memorySocket((socket, _number, _request, text) => { sent = text; closeFrame(socket, raw); });
+    const a = await adapter(t, { WebSocket: wire.WebSocket });
+    const { events, message } = await collect(a.stream(model, multibyteContext, { transport: "auto", sessionId: "close-diagnostics" }));
+    assert.equal(message.errorMessage, "websocket_closed"); assert.equal(message.nativeTransport.outcome, "unknown");
+    assert.equal(message.nativeTransport.possibleUsage, true); assert.equal(wire.requests.length, 1);
+    assert.deepEqual(message.nativeTransport.websocketClose, expected);
+    assert.deepEqual(message.nativeTransport.attempts[0].websocketClose, expected);
+    assert.equal(message.nativeTransport.dispatchedBodyBytes, Buffer.byteLength(sent));
+    assert.ok(Buffer.byteLength(sent) > sent.length); assert.ok(Object.isFrozen(message.nativeTransport.websocketClose));
+    assert.equal(events.some(event => a.nativeCompletion(event)), false);
+    assert.equal(JSON.stringify(message).includes("PRIVATE_"), false);
+  }
+});
+
+test("failed cached WebSocket counts the selected delta string, not the full transcript", async (t) => {
+  const sent = [];
+  const wire = memorySocket((socket, number, _request, text) => {
+    sent.push(text);
+    if (number === 1) socket.emit(complete("byte-baseline"));
+    else closeFrame(socket, { code: 1009, reason: "payload too large" });
+  });
+  const a = await adapter(t, { WebSocket: wire.WebSocket });
+  const options = { transport: "websocket-cached", sessionId: "bytes", onPayload(body) { body.extra = "追加😀"; } };
+  const first = await a.stream(model, multibyteContext, options).result();
+  const next = { ...context, messages: [...multibyteContext.messages, first, { role: "user", content: "次😀", timestamp: 2 }] };
+  let wireSerializations = 0;
+  const stringify = JSON.stringify;
+  JSON.stringify = function (value, ...args) {
+    if (value?.type === "response.create" && value.model === model.id) wireSerializations++;
+    return stringify(value, ...args);
+  };
+  let failed;
+  try { failed = await a.stream(model, next, options).result(); } finally { JSON.stringify = stringify; }
+  assert.equal(first.stopReason, "stop"); assert.equal(failed.errorMessage, "websocket_closed");
+  assert.equal(wireSerializations, 1, "the selected request is serialized once");
+  assert.equal(wire.requests[1].previous_response_id, "byte-baseline"); assert.equal(wire.requests[1].input.length, 1);
+  assert.equal(first.nativeTransport.dispatchedBodyBytes, Buffer.byteLength(sent[0]));
+  assert.equal(failed.nativeTransport.dispatchedBodyBytes, Buffer.byteLength(sent[1]));
+  assert.ok(Buffer.byteLength(sent[1]) > sent[1].length);
+});
+
+test("retry attempts keep distinct delta/full bytes and close diagnostics", async (t) => {
+  const sent = [];
+  const wire = memorySocket((socket, number, _request, text) => {
+    sent.push(text);
+    if (number === 1) socket.emit(complete("retry-baseline"));
+    else if (number === 2) {
+      socket.emit({ type: "error", code: "previous_response_not_found" });
+      closeFrame(socket, { code: 1008, reason: "policy violation" });
+    } else closeFrame(socket, { code: 1011, reason: "server error" });
+  });
+  const a = await adapter(t, { WebSocket: wire.WebSocket });
+  const options = { transport: "auto", sessionId: "retry-bytes" };
+  const first = await a.stream(model, multibyteContext, options).result();
+  const next = { ...context, messages: [...multibyteContext.messages, first, { role: "user", content: "再試行😀", timestamp: 2 }] };
+  const failed = await a.stream(model, next, options).result();
+  const [rejected, unknown] = failed.nativeTransport.attempts;
+  assert.equal(failed.errorMessage, "websocket_closed"); assert.equal(wire.requests.length, 3);
+  assert.equal(rejected.outcome, "rejected"); assert.equal(rejected.possibleUsage, false);
+  assert.equal(unknown.outcome, "unknown"); assert.equal(unknown.possibleUsage, true);
+  assert.notEqual(rejected.attemptId, unknown.attemptId);
+  assert.equal(wire.requests[1].previous_response_id, "retry-baseline"); assert.equal(wire.requests[2].previous_response_id, undefined);
+  assert.equal(rejected.dispatchedBodyBytes, Buffer.byteLength(sent[1])); assert.equal(unknown.dispatchedBodyBytes, Buffer.byteLength(sent[2]));
+  assert.equal(rejected.websocketClose.code, 1008); assert.equal(unknown.websocketClose.code, 1011);
+  assert.equal(failed.nativeTransport.websocketClose.code, 1011); assert.equal(failed.nativeProviderError, undefined);
+});
+
+for (const mode of ["websocket", "auto"]) test(`pre-open close keeps zero WS bytes and its own diagnostics in ${mode}`, async (t) => {
+  let sends = 0, fetched;
+  class PreOpenSocket extends EventTarget {
+    readyState = 0;
+    constructor() { super(); queueMicrotask(() => closeFrame(this, { code: 1009, reason: "message too big" })); }
+    send() { sends++; }
+    close() { this.readyState = 3; }
+  }
+  const a = await adapter(t, { WebSocket: PreOpenSocket, fetch: async (_url, init) => { fetched = init.body; return new Response(null, { status: 503 }); } });
+  const failed = await a.stream(model, multibyteContext, { transport: mode }).result();
+  const before = failed.nativeTransport.attempts[0];
+  assert.equal(sends, 0); assert.equal(before.sent, false); assert.equal(before.dispatchedBodyBytes, 0);
+  assert.equal(before.outcome, "not_sent"); assert.equal(before.possibleUsage, false); assert.equal(before.fenced, true);
+  assert.equal(before.websocketClose.code, 1009);
+  if (mode === "websocket") {
+    assert.equal(failed.errorMessage, "websocket_closed"); assert.equal(fetched, undefined);
+  } else {
+    assert.equal(failed.errorMessage, "provider_http_503"); assert.equal(failed.nativeTransport.attempts.length, 2);
+    assert.equal(failed.nativeTransport.dispatchedBodyBytes, Buffer.byteLength(fetched));
+    assert.equal(failed.nativeTransport.websocketClose, undefined);
+  }
+});
+
+test("SSE failure bytes observe the exact UTF-8 fetch string without another serialization", async (t) => {
+  let sent, serializations = 0;
+  const a = await adapter(t, { fetch: async (_url, init) => { sent = init.body; throw new Error("PRIVATE_FETCH_FAILURE"); } });
+  const stringify = JSON.stringify;
+  JSON.stringify = function (value, ...args) {
+    if (value?.model === model.id && value.stream === true && Array.isArray(value.input)) serializations++;
+    return stringify(value, ...args);
+  };
+  let failed;
+  try {
+    failed = await a.stream(model, multibyteContext, { transport: "sse", onPayload(body) { body.extra = "送信😀"; } }).result();
+  } finally { JSON.stringify = stringify; }
+  assert.equal(failed.errorMessage, "provider_request_failed"); assert.equal(failed.nativeTransport.outcome, "unknown");
+  assert.equal(serializations, 2, "one admission clone and one dispatched serialization");
+  assert.equal(failed.nativeTransport.dispatchedBodyBytes, Buffer.byteLength(sent));
+  assert.equal(failed.nativeTransport.attempts[0].dispatchedBodyBytes, Buffer.byteLength(sent));
+  assert.ok(Buffer.byteLength(sent) > sent.length); assert.equal(failed.nativeTransport.websocketClose, undefined);
+  assert.equal(JSON.stringify(failed).includes("PRIVATE_FETCH_FAILURE"), false);
+});
+
+test("idle and disposed prior close callbacks cannot mutate or contaminate later attempts", async (t) => {
+  let prior;
+  const wire = memorySocket((socket, number) => {
+    if (number === 1) socket.emit(complete("idle-close-baseline"));
+    else {
+      prior.closeCallback(Object.assign(new Event("close"), { code: 1008, reason: "policy violation" }));
+      if (number === 2) closeFrame(socket, { code: 1011, reason: "server error" });
+      else socket.emit(complete("after-close"));
+    }
+  });
+  const add = wire.WebSocket.prototype.addEventListener;
+  wire.WebSocket.prototype.addEventListener = function (name, listener, ...args) {
+    if (name === "close" && !this.closeCallback) this.closeCallback = listener;
+    return add.call(this, name, listener, ...args);
+  };
+  const a = await adapter(t, { WebSocket: wire.WebSocket });
+  const options = { transport: "websocket-cached", sessionId: "idle-close" };
+  const first = await a.stream(model, context, options).result(); prior = wire.sockets[0];
+  const frozenFirst = JSON.stringify(first.nativeTransport);
+  closeFrame(prior, { code: 1009, reason: "message too big" });
+  assert.equal(JSON.stringify(first.nativeTransport), frozenFirst);
+  const failed = await a.stream(model, context, options).result();
+  assert.equal(wire.sockets.length, 2); assert.equal(failed.nativeTransport.websocketClose.code, 1011);
+  const frozenFailed = JSON.stringify(failed.nativeTransport);
+  const final = await a.stream(model, context, options).result();
+  assert.equal(final.stopReason, "stop"); assert.equal(final.nativeTransport.websocketClose, undefined);
+  assert.equal(JSON.stringify(failed.nativeTransport), frozenFailed); assert.equal(JSON.stringify(first.nativeTransport), frozenFirst);
 });

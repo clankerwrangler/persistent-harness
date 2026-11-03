@@ -1,6 +1,6 @@
 ------------------------ MODULE CanonicalContext ------------------------
 \* Sources:
-\*   src/canonical-context.mjs sha256:9651ca11b90eaa03fff19272c98e8da42ccb3e3c7f7b1eaac56d1be740552db5
+\*   src/canonical-context.mjs sha256:76adbe84c8ec0e16fb8e74b4c13d62287243c1749e4adbbd97777a84cdcf1192
 \*   src/actor-coordinator.mjs sha256:d33d75f88913edccec70c1cc2df0391a3e909d958f96acfd890c3b774935ae62
 
 EXTENDS Naturals, Sequences, FiniteSets, TLC

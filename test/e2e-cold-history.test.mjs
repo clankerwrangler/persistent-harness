@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import http from "node:http";
-import { mkdir, mkdtemp, readdir, rm, stat } from "node:fs/promises";
+import { lstat, mkdir, mkdtemp, readFile, readdir, rm, symlink, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -26,14 +26,47 @@ function respond(response, id, { code, answer }) {
   response.writeHead(200, { "content-type": "text/event-stream" });
   response.end(events.map(event => `data: ${JSON.stringify(event)}\n\n`).join(""));
 }
-async function mirrorPath() {
-  for (const name of await readdir(os.tmpdir())) {
-    if (!name.startsWith("pi-live-context-")) continue;
-    const file = path.join(os.tmpdir(), name, "LIVE_CONTEXT.md");
-    if (await stat(file).then(() => true, () => false)) return file;
-  }
-  throw new Error("no live context mirror");
+async function mirrorPath(sessionId, parentDirectory = os.tmpdir()) {
+  assert.match(sessionId, /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/);
+  const prefix = `pi-live-context-${sessionId}-`;
+  const names = (await readdir(parentDirectory)).filter(name => name.startsWith(prefix));
+  assert.equal(names.length, 1, "expected exactly one mirror for the created test session");
+  const directory = path.join(parentDirectory, names[0]);
+  assert((await lstat(directory)).isDirectory(), "the test session mirror must be a real directory");
+  const file = path.join(directory, "LIVE_CONTEXT.md");
+  assert((await lstat(file)).isFile(), "the test session mirror must be a regular file");
+  return file;
 }
+
+test("cold-history mirror lookup rejects other sessions, ambiguity and symlinks", async t => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "cold-mirror-lookup-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const sessionId = crypto.randomUUID();
+  const decoy = path.join(root, `pi-live-context-${crypto.randomUUID()}-decoy1`);
+  const decoyFile = path.join(decoy, "LIVE_CONTEXT.md");
+  await mkdir(decoy);
+  await writeFile(decoyFile, "another room must remain untouched");
+  await assert.rejects(mirrorPath(sessionId, root), /exactly one mirror/);
+
+  const directory = path.join(root, `pi-live-context-${sessionId}-owned1`);
+  const file = path.join(directory, "LIVE_CONTEXT.md");
+  await mkdir(directory);
+  await assert.rejects(mirrorPath(sessionId, root), { code: "ENOENT" });
+  await writeFile(file, "the created test session");
+  assert.equal(await mirrorPath(sessionId, root), file);
+  const duplicate = path.join(root, `pi-live-context-${sessionId}-owned2`);
+  await mkdir(duplicate);
+  await assert.rejects(mirrorPath(sessionId, root), /exactly one mirror/);
+  await rm(duplicate, { recursive: true });
+
+  await rm(file);
+  await symlink(decoyFile, file);
+  await assert.rejects(mirrorPath(sessionId, root), /regular file/);
+  await rm(directory, { recursive: true });
+  await symlink(decoy, directory);
+  await assert.rejects(mirrorPath(sessionId, root), /real directory/);
+  assert.equal(await readFile(decoyFile, "utf8"), "another room must remain untouched");
+});
 async function connect(socketPath) {
   const client = new HarnessClient({ requestTimeoutMs: 120_000, socketPath, heartbeatMs: 0, requestTimeoutMs: 120_000 });
   assert(await client.start({ registrationType: "register_client", clientInstanceId: crypto.randomUUID() }));
@@ -74,7 +107,7 @@ test("a native session keeps its context through an edit, new messages and a res
     bodies.push(body);
     const last = body.input.at(-1), index = bodies.length;
     if (last.role === "user" && JSON.stringify(last.content).includes("EDIT_NOW")) {
-      const file = await mirrorPath();
+      const file = await mirrorPath(sessionId);
       respond(response, `R${index}`, { code: `from pathlib import Path\np = Path(${JSON.stringify(file)})\np.write_text(p.read_text().replace("reply 1", "EDITED_MARKER first"))\nprint("ok")` });
     } else respond(response, `R${index}`, { answer: `reply ${index}` });
   });
