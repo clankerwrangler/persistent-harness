@@ -61,6 +61,14 @@ function publicLaunch(value, preference) {
   };
 }
 
+function turnFailureBoundary(turnFailure) {
+  return turnFailure.dispatchBoundary === "before_provider_dispatch"
+    ? "This turn stopped before provider dispatch. Local input or extension effects may already be committed."
+    : turnFailure.dispatchBoundary === "tool_effects_possible"
+      ? "Tool execution was admitted or started in this turn; external effects may already have occurred. Completion is unknown."
+      : "Provider dispatch was attempted in this turn; completion and external effects are unknown.";
+}
+
 function mapSession(row, preference) {
   if (!row) return undefined;
   return {
@@ -946,17 +954,27 @@ export class HarnessStore {
       ? "heap_exhausted" : "actor_exit";
     let body = `Harness lifecycle report (supervisor-generated, not ${noun}-authored): ${subject} ${identity}, generation ${generation}, exited unexpectedly. Failure class: ${failureClass}. Completion is unknown. Inspect retained ${noun} state and saved artifacts before deciding recovery. No ${noun} restart or work replay was requested.`;
     if (turnFailure) {
-      const boundary = turnFailure.dispatchBoundary === "before_provider_dispatch"
-        ? "This turn stopped before provider dispatch. Local input or extension effects may already be committed."
-        : turnFailure.dispatchBoundary === "tool_effects_possible"
-          ? "Tool execution was admitted or started in this turn; external effects may already have occurred. Completion is unknown."
-          : "Provider dispatch was attempted in this turn; completion and external effects are unknown.";
-      body = `Harness lifecycle report (supervisor-generated, not ${noun}-authored): ${subject} ${identity}, turn ${turnFailure.turnId}, stopped abnormally. Failure class: ${turnFailure.failureClass}. ${boundary} Inspect retained ${noun} state and saved artifacts before deciding recovery. No ${noun} restart or work replay was requested.`;
+      body = `Harness lifecycle report (supervisor-generated, not ${noun}-authored): ${subject} ${identity}, turn ${turnFailure.turnId}, stopped abnormally. Failure class: ${turnFailure.failureClass}. ${turnFailureBoundary(turnFailure)} Inspect retained ${noun} state and saved artifacts before deciding recovery. No ${noun} restart or work replay was requested.`;
     }
     this.#db.prepare(`INSERT OR IGNORE INTO messages
       (id, sender_id, target_id, relationship, delivery_mode, body, state, attempt_count, accepted_at, queued_at, child_exit_generation)
       VALUES (?, ?, ?, ?, 'auto', ?, 'queued', 0, ?, ?, ?)`)
       .run(id, sessionId, target.id, relationship, body, now, now, generation);
+  }
+
+  // Nobody observes Lead's own failed turn. The supervisor queues this later, through
+  // the same lifecycle delivery that wakes a passivated target.
+  queueLeadFailureNudge(sessionId, generation, turnFailure, failedAt, now = Date.now()) {
+    const report = normalizeTurnFailure(turnFailure);
+    const session = this.#sessionRow(sessionId);
+    if (session?.kind !== "root" || session.lifecycle === "deleted" || this.isSessionDeleting(sessionId)
+      || !Number.isSafeInteger(generation) || generation < 1) return false;
+    const id = `lead-nudge:${createHash("sha256").update(sessionId).update("\0").update(report.turnId).digest("hex")}`;
+    const body = `Harness lifecycle report (supervisor-generated, not session-authored): your own turn ${report.turnId} stopped abnormally at ${new Date(failedAt).toISOString()}, and you have not run since. Failure class: ${report.failureClass}. ${turnFailureBoundary(report)} Nothing was retried. Other sessions may have stopped at the same time, and their reports may have reached you inside the failed turn. Check every root session and your own work, then resume as normal. Do not replay interrupted work. No restart was requested.`;
+    return this.#db.prepare(`INSERT OR IGNORE INTO messages
+      (id, sender_id, target_id, relationship, delivery_mode, body, state, attempt_count, accepted_at, queued_at, child_exit_generation)
+      VALUES (?, ?, ?, 'sibling', 'auto', ?, 'queued', 0, ?, ?, ?)`)
+      .run(id, sessionId, sessionId, body, now, now, generation).changes === 1;
   }
 
   listPendingChildExitMessages(after = "") {

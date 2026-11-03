@@ -1,7 +1,7 @@
 ---------------------- MODULE BackgroundCompletions ----------------------
 \* Sources:
 \*   src/background-notifier.mjs sha256:5a196d023ebf583d7ff892c3d2ea6e648cacb21f61dff1fb5a9e103c216cc4d7
-\*   src/supervisor.mjs sha256:f98ce08909ebba0dbc34e8121dac397e068d8fe32d0c21c5eb4017a434b628bb
+\*   src/supervisor.mjs sha256:6a280363fa53c74cdd1bc064cee6610425a23db5e5fa8aa64ec67f002bf6ec5f
 \*   src/extension.mjs sha256:9483faf8a4e9bdfb2e242fa9b3a20437f2816553b4fba0d180189a6265b06caa
 
 EXTENDS Naturals, FiniteSets, Sequences

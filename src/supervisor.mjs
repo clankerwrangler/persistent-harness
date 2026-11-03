@@ -54,6 +54,7 @@ import { DEFAULT_PROMPT_PREFLIGHT_TIMEOUT_MS, PiSessionActor } from "./session-a
 import { normalizeSourceWatermark } from "./source-watermark.mjs";
 import { VisibleTranscriptReader } from "./visible-transcript-reader.mjs";
 import { HarnessStore } from "./store.mjs";
+import { LeadFailureNudge } from "./lead-failure-nudge.mjs";
 import { PythonRuntimeManager, runtimeVersions } from "./python-runtime.mjs";
 import { discoverSkills, discoverSkillsFromDirectory, materializeSkills, skillCatalogForSkills } from "./skills.mjs";
 import { defaultRootName, resolveRootTitle, firstCompletedTitleTurn } from "./root-title.mjs";
@@ -502,6 +503,7 @@ export class HarnessSupervisor {
     titleGenerator = createRootTitleGenerator(),
     notificationIdleMs = NOTIFICATION_IDLE_MS,
     notificationTickMs = 1_000,
+    leadNudge = new LeadFailureNudge(),
   }) {
     Object.assign(this, { socketPath, databasePath, pidPath, maxFrameBytes, messageRateCapacity, messageRateRefillPerSecond,
       pendingMessageLimit, maxMessageDeliveryAttempts, maxDepth, maxResidentActors, maxConcurrentStarts, actorInactivityMs,
@@ -510,6 +512,7 @@ export class HarnessSupervisor {
       cronTickIntervalMs, cronMaxParallel, cronDefaultTimezone, cronStoreFactory, cronSchedulerFactory, inboxPort, inboxHost, leadSessionPath,
       backgroundJobsDirectory, scratchDirectory,
       backgroundCompletionIntervalMs, titleGenerator, notificationIdleMs, notificationTickMs });
+    this.#leadNudge = leadNudge;
     this.actorExtensionPath = path.resolve(actorExtensionPath);
     this.actorExtensionPaths = [...new Set(actorExtensionPaths.map((item) => path.resolve(item)))].filter((item) => item !== this.actorExtensionPath);
     this.skillsPath = path.resolve(skillsPath);
@@ -616,6 +619,7 @@ export class HarnessSupervisor {
       this.#backgroundCompletionMonitor.start();
       this.#notificationTimer = setInterval(() => {
         try {
+          this.#nudgeLeadIfDue();
           this.#retryChildExitMessages();
           this.#notifications.expire(); this.#recordCronNotifications();
           for (const id of this.#notifications.openFamilies()) this.#observeNotifications(id);
@@ -872,6 +876,7 @@ export class HarnessSupervisor {
     if (type === "set_session_name") { const session = this.store.setSessionName(state.sessionId, params.name); this.#broadcastNavigator("name_changed"); return { session }; }
     if (type === "record_actor_turn_failure") {
       this.store.recordActorTurnFailure(state.sessionId, state.generation, params);
+      if (state.sessionId === this.#leadSessionId()) this.#leadNudge.failed(state.sessionId, params, Date.now());
       this.#retryChildExitMessages();
       return { recorded: true };
     }
@@ -2524,6 +2529,7 @@ export class HarnessSupervisor {
     } else if (frame?.type === "agent_settled") {
       record.progressSummary = undefined;
       record.progressTurnId = null;
+      if (sessionId === this.#leadSessionId()) this.#leadNudge.settled();
     }
     const retained = this.#boundedActorEvent(frame, record); let visibleRetained = retained;
     if (retained) {
@@ -2848,6 +2854,17 @@ export class HarnessSupervisor {
   #leadSessionPath = null;
   #leadSessionId() {
     try { return JSON.parse(readFileSync(this.#leadSessionPath, "utf8")).sessionId ?? null; } catch { return null; }
+  }
+  #leadNudge = null;
+  #nudgeLeadIfDue(now = Date.now()) {
+    const due = this.#leadNudge.due(now);
+    if (!due) return;
+    const lead = due.leadId === this.#leadSessionId() ? this.store.getSession(due.leadId) : null;
+    if (!lead) { this.#leadNudge.dropped(); return; }
+    // A running Lead settles that run first: success cancels the nudge, failure keeps it.
+    if (lead.activity === "working") return;
+    this.store.queueLeadFailureNudge(due.leadId, lead.actorGeneration, due.report, due.failedAt, now);
+    this.#leadNudge.sent();
   }
   #childExitCursor = "";
   #retryChildExitMessages() {

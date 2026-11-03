@@ -3,7 +3,7 @@
 \*   src/actor-coordinator.mjs sha256:d33d75f88913edccec70c1cc2df0391a3e909d958f96acfd890c3b774935ae62
 \*   src/child-turn-failure.mjs sha256:3e70906dd488214003d4693ea887b959357b5fb2b7ee18074e6b90f5fc381fc9
 \*   src/extension.mjs sha256:9483faf8a4e9bdfb2e242fa9b3a20437f2816553b4fba0d180189a6265b06caa
-\*   src/store.mjs sha256:321247cfd4fcdff36e33af0670e59a501ab67e19328b29387b64a78dc37553a2
+\*   src/store.mjs sha256:1110712317ac0656fc3083ca649b16dac9324cec7df07724372ac2946acc712e
 
 EXTENDS Naturals, FiniteSets
 CONSTANT DurableJournal, AccountAdmitted, PreserveFirstCause, BindOperation, BindResultState

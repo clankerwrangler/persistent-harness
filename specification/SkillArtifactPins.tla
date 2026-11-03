@@ -3,7 +3,7 @@
 \*   src/skill-artifacts.mjs sha256:70a007f561469ebc23c95e78f63d383a480c24fe0b980aae25c67c63f3cfcbd6
 \*   src/skills.mjs sha256:551248176ce363178846a1aa0df86d7ce7630c1194a4875f30c2af395ac68348
 \*   src/session-paths.mjs sha256:cc2bc7e18580b786c95cb587815de73a6e260b9fb70f5362ebe549b6a76505f5
-\*   src/supervisor.mjs sha256:f98ce08909ebba0dbc34e8121dac397e068d8fe32d0c21c5eb4017a434b628bb
+\*   src/supervisor.mjs sha256:6a280363fa53c74cdd1bc064cee6610425a23db5e5fa8aa64ec67f002bf6ec5f
 \*   src/extension.mjs sha256:9483faf8a4e9bdfb2e242fa9b3a20437f2816553b4fba0d180189a6265b06caa
 EXTENDS Naturals, FiniteSets
 CONSTANTS Actors, ReadyUsesDesired, SnapshotUsesDesired

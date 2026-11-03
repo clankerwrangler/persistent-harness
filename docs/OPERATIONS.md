@@ -137,6 +137,8 @@ An unexpected child actor exit atomically records its lifecycle error and queues
 
 Reports contain a bounded child ID, generation or turn ID, and a fixed failure class. Resident-turn reports distinguish failure before provider dispatch, attempted provider dispatch, and possible admitted or started tool effects. They contain no display names, raw errors, prompts, or transcript content. These are supervisor-generated lifecycle reports, not messages authored by the failed child.
 
+A root's report goes to Lead, named in `lead.json`. Nobody observes Lead's own failed turn, so the supervisor nudges it instead: once the wait passes while it is not running, it queues one lifecycle report to its that asks it to check every root and its own work and resume without replaying. A run that settles with no failure reported since its previous settle cancels the nudge; this relies on a connected run waiting for its report's receipt before it settles. The wait is 5 minutes, then 15, 30 and 60 while it keeps failing, and hourly after that; two hours without a failure starts over. It lives in supervisor memory, so a supervisor restart forgets it. `specification/LeadFailureNudge.tla` models the report and settle ordering.
+
 Outer coordinator failures can also append one local canonical
 `persistent-harness.turn-failure-diagnostic-v1` companion for the same turn. It
 records the first escaping failure's fixed origin/operation, allowlisted error

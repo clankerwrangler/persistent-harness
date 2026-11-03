@@ -17,6 +17,7 @@ import { actorInputCustomPayload, ACTOR_INPUT_COMMAND } from "../src/protocol.mj
 import { createRootTitleGenerator } from "../src/root-title-generator.mjs";
 import { PiSessionActor } from "../src/session-actor.mjs";
 import { HarnessSupervisor } from "./fixtures/isolated-supervisor.mjs";
+import { LeadFailureNudge } from "../src/lead-failure-nudge.mjs";
 import { discoverSkills, skillCatalogForSkills } from "../src/skills.mjs";
 import { sessionSidecarPaths } from "../src/session-paths.mjs";
 
@@ -2419,6 +2420,82 @@ test("a root's failed turn reaches Lead, named in lead.json, as a lifecycle repo
   assert.equal(report.senderId, "room"); assert.equal(report.senderName, "Harness lifecycle"); assert.equal(report.relationship, "sibling");
   assert.match(report.body, /root session room, turn room-turn, stopped abnormally/);
   assert.equal(room.deliveries.length, 0, "the failed root is not told about itself");
+});
+
+async function leadNudgeFixture(t, name, leadNudge) {
+  const root = await mkdtemp(path.join(os.tmpdir(), `harness-${name}-`));
+  const skillsPath = path.join(root, "skills"); await mkdir(skillsPath);
+  const actors = new Map();
+  await writeFile(path.join(root, "lead.json"), JSON.stringify({ sessionId: "lead" }));
+  const supervisor = new HarnessSupervisor({ socketPath: path.join(root, "run/sock"), databasePath: path.join(root, "store.sqlite"),
+    pidPath: path.join(root, "run/pid"), skillsPath, actorInactivityMs: 0, notificationTickMs: 20, runtimeProvisioner: async () => ({}),
+    leadSessionPath: path.join(root, "lead.json"), leadNudge,
+    actorFactory: options => { const actor = new EarlyRegisteringActor(options); actors.set(options.session.sessionId, actor); return actor; },
+    processIdentityFactory: async pid => ({ version: 1, pid, processGroup: pid, startTime: "fake", ownerToken: "fake" }),
+    processTerminator: async () => ({ terminated: true }) });
+  await supervisor.start(); t.after(async () => { await supervisor.stop(); await rm(root, { recursive: true, force: true }); });
+  for (const id of ["lead", "room"]) {
+    await writeFile(path.join(root, `${id}.jsonl`), JSON.stringify({ type: "session", version: 3, id, cwd: root, timestamp: new Date().toISOString() }) + "\n");
+    supervisor.store.createRoot({ sessionId: id, sessionFile: path.join(root, `${id}.jsonl`), cwd: root, name: id, actorToken: `${id}-token`, launch: {} });
+    supervisor.store.markActorLifecycle(id, 1, "passivated");
+  }
+  const client = new HarnessClient({ requestTimeoutMs: 120_000, socketPath: supervisor.socketPath, heartbeatMs: 0 });
+  await client.start({ registrationType: "register_client", clientInstanceId: name }); t.after(() => client.stop());
+  await client.request("revive_session", { sessionId: "lead" });
+  const lead = await eventually(() => actors.get("lead")); await eventually(() => lead.isRunning);
+  return { supervisor, actors, lead, client };
+}
+
+const leadTurnFailure = (turnId) => ({ version: 1, turnId, failureClass: "turn_failed", dispatchBoundary: "provider_dispatch_unknown" });
+
+test("Lead's own failed turn wakes it later with a check-everything lifecycle report", async (t) => {
+  const { supervisor, actors, lead } = await leadNudgeFixture(t, "lead-own-failure", new LeadFailureNudge({ delaysMs: [0] }));
+  await lead.control.request("record_actor_turn_failure", leadTurnFailure("lead-turn"));
+  const report = await eventually(() => lead.deliveries[0], 120_000);
+  assert.equal(report.senderId, "lead"); assert.equal(report.senderName, "Harness lifecycle"); assert.equal(report.relationship, "sibling");
+  assert.match(report.body, /your own turn lead-turn stopped abnormally/);
+  assert.match(report.body, /Check every root session and your own work, then resume as normal\. Do not replay interrupted work\./);
+  await lead.control.request("ack_message", { messageId: report.messageId });
+  assert.equal(supervisor.store.getMessage(report.messageId).state, "acknowledged");
+  assert.equal(actors.has("room"), false, "no other session is woken");
+});
+
+test("Lead's failed run keeps its nudge through its settle; a later clean run cancels it", async (t) => {
+  const nudge = new LeadFailureNudge({ delaysMs: [3_600_000] });
+  const { lead } = await leadNudgeFixture(t, "lead-nudge-cancel", nudge);
+  lead.emit("event", { type: "agent_start" });
+  await lead.control.request("record_actor_turn_failure", leadTurnFailure("first"));
+  lead.emit("event", { type: "agent_settled" });
+  await eventually(() => nudge.failedSinceSettled === false);
+  assert.equal(nudge.pending?.report.turnId, "first");
+  lead.emit("event", { type: "agent_start" }); lead.emit("event", { type: "agent_settled" });
+  await eventually(() => nudge.pending === null);
+  assert.equal(lead.deliveries.length, 0);
+});
+
+test("a nudge that falls due while Lead is working waits for that run to settle", async (t) => {
+  const nudge = new LeadFailureNudge({ delaysMs: [0] });
+  const { supervisor, lead } = await leadNudgeFixture(t, "lead-nudge-working", nudge);
+  lead.emit("event", { type: "agent_start" });
+  await eventually(() => supervisor.store.getSession("lead").activity === "working");
+  await lead.control.request("record_actor_turn_failure", leadTurnFailure("while-working"));
+  await new Promise(resolve => setTimeout(resolve, 200));
+  assert.equal(lead.deliveries.length, 0, "no nudge while it runs");
+  assert.equal(nudge.pending?.report.turnId, "while-working");
+  lead.emit("event", { type: "agent_settled" });
+  const report = await eventually(() => lead.deliveries[0], 120_000);
+  assert.match(report.body, /your own turn while-working stopped abnormally/);
+});
+
+test("a root's failure does not arm Lead's own nudge", async (t) => {
+  const nudge = new LeadFailureNudge({ delaysMs: [3_600_000] });
+  const { lead, actors, client } = await leadNudgeFixture(t, "lead-nudge-room", nudge);
+  await client.request("revive_session", { sessionId: "room" });
+  const room = await eventually(() => actors.get("room")); await eventually(() => room.isRunning);
+  await room.control.request("record_actor_turn_failure", leadTurnFailure("room-turn"));
+  const report = await eventually(() => lead.deliveries[0], 120_000);
+  assert.equal(report.senderId, "room");
+  assert.equal(nudge.pending, null);
 });
 
 test("only Lead, named in lead.json, may start a new root session", async (t) => {

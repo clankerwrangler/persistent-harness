@@ -461,5 +461,11 @@
   "ColdHistoryAnchorBadPartial.cfg": "violation",
   "ProviderErrorMetadata.close.cfg": "pass",
   "ProviderErrorMetadata.close.Unscoped.cfg": "violation",
-  "ActorCompactionSnapshots.BadAccessor.cfg": "violation"
+  "ActorCompactionSnapshots.BadAccessor.cfg": "violation",
+  "LeadFailureNudge.cfg": "pass",
+  "LeadFailureNudge.BadCancelEverySettle.cfg": "violation",
+  "RegistrationWait.cfg": "pass",
+  "RegistrationWait.BadNoEntryCheck.cfg": "violation",
+  "UiRequestExpiry.cfg": "pass",
+  "UiRequestExpiry.BadNoDeadlineCheck.cfg": "violation"
 }

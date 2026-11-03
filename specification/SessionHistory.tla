@@ -2,7 +2,7 @@
 \* Sources:
 \*   src/session-history-index.mjs sha256:95d926f31220a5f11456c77ae9578ac05fca4cc21d4aeb34ee85a64c0ac839ae
 \*   src/visible-transcript-reader.mjs sha256:244b202937ba51f1c9f06e272fe77ba34cd3316d43cbed956bf6ee98b7fc8061
-\*   src/supervisor.mjs sha256:f98ce08909ebba0dbc34e8121dac397e068d8fe32d0c21c5eb4017a434b628bb
+\*   src/supervisor.mjs sha256:6a280363fa53c74cdd1bc064cee6610425a23db5e5fa8aa64ec67f002bf6ec5f
 EXTENDS Naturals, FiniteSets
 CONSTANTS Callers, CheckPrefix, CheckStable, RespectAbort, Drain, MaxVersion
 VARIABLES source, prefix, pending, branch, cache, rows, phase, owner, selected,
