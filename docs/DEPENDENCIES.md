@@ -19,6 +19,13 @@ export PI_HARNESS_PI_COMMAND="$PI_PREFIX/node_modules/@earendil-works/pi-coding-
 export PI_HARNESS_PI_MODULE="$PI_PREFIX/node_modules/@earendil-works/pi-coding-agent"
 ```
 
+The compatible public source is the [Pi SDK fork](https://github.com/clankerwrangler/pi/tree/sdk-1.5.0),
+with its [patch map and source-build instructions](https://github.com/clankerwrangler/pi/blob/sdk-1.5.0/FORK.md).
+Its `sdk-1.5.0` branch includes the required public exports and optional source-history
+APIs described here. Build and pack one matching set of its local packages; the
+upstream npm packages do not contain these additions. Keep the source commit,
+artifact manifest, and consumer lockfile with your installed graph.
+
 Pi requires Node 22.19 or later; this harness requires Node 24 or later.
 
 Use one matching installed graph, not an SDK from another Pi installation.
