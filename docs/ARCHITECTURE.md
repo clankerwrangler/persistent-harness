@@ -534,8 +534,8 @@ sample during request preparation. Root changes affect the next request of every
 existing, new, retained, or revived descendant, including already resident actors.
 Already sampled requests remain immutable. Preference-read failure blocks that
 request rather than silently using a cached value. Native requests receive
-`options.serviceTier = "priority"`. Pi 0.99.1's
-stock `streamSimple` discards that option, so supported Fast stock requests use
+`options.serviceTier = "priority"`. Pi 1.5.0's public Responses
+`streamSimple` adapters still omit that option, so supported Fast stock requests use
 public simple-option/reasoning helpers and `ModelRuntime.stream`; ordinary requests
 keep `streamSimple`. Provider serialization and cost accounting both receive the
 chosen tier. No payload-only hook, provider alias, or Pi patch is involved.

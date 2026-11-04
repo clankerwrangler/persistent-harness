@@ -11,7 +11,30 @@ npm run test:native       # native async end-to-end
 npm run test:specs        # TLC model checks against specification/expected-results.json
 ```
 
-`bin/run-tests.mjs` gives every run a private temporary `HOME` and `PI_CODING_AGENT_DIR`, sets `PI_HARNESS_AUTO_INSTALL=0` and `UV_OFFLINE=1` so tests never download a runtime, and points `PI_HARNESS_SKILLS_PATH` at this checkout. It finds stock Pi 0.99.1 under `<agent dir>/runtimes/pi-0.99.1-*` and the managed Python under `<agent dir>/harness/kernel-runtime/environments/` unless `PI_HARNESS_PI_COMMAND`, `PI_HARNESS_PI_MODULE` and `PI_HARNESS_PYTHON` are set. When either is missing, the integration and native groups are skipped with the reason instead of failing. It also sets `PI_HARNESS_TEST_OFFICIAL_PI_MODULE` to `<agent dir>/runtimes/pi-0.99.1` when present, and, for the test files that read `PI_HARNESS_TEST_MANAGED_SEED`, builds that seed by copying `bin/`, `cache/` and `python/` (never `environments/`) from `<agent dir>/harness/kernel-runtime` into its temporary directory. It sets `PI_HARNESS_NATIVE_ASYNC_BUILD_ROOT` to the discovered Pi runtime, uses a 100 ms background-completion scan (`PI_HARNESS_BACKGROUND_COMPLETION_TICK_MS`), and runs three test files at a time (`PI_HARNESS_TEST_CONCURRENCY`; each file has its own process and temporary state).
+`bin/run-tests.mjs` gives every run a private temporary `HOME` and
+`PI_CODING_AGENT_DIR`, sets `PI_HARNESS_AUTO_INSTALL=0` and `UV_OFFLINE=1`, and
+points `PI_HARNESS_SKILLS_PATH` at this checkout unless overridden. It never
+downloads a runtime.
+
+- Set both `PI_HARNESS_PI_COMMAND` and `PI_HARNESS_PI_MODULE` to select Pi explicitly.
+  Otherwise, discovery checks `<agent dir>/runtimes/pi-1.5.0-*` in reverse name
+  order for `node_modules/pi-sdk-runtime/node_modules/@earendil-works/pi-coding-agent/dist/cli.js`
+  and `dist/index.js`. It selects that CLI and public root from one graph.
+- Set `PI_HARNESS_PYTHON` to select an interpreter; otherwise discovery checks
+  `<agent dir>/harness/kernel-runtime/environments/`. Missing Pi or Python skips
+  the integration/native files that need them, with a reason.
+- `PI_HARNESS_TEST_OFFICIAL_PI_MODULE` selects the separate official-bundle fixture.
+  If unset, discovery checks `<agent dir>/runtimes/pi-1.5.0/node_modules/@earendil-works/pi-coding-agent`
+  for `dist/bundle/index.js`.
+- For files that read `PI_HARNESS_TEST_MANAGED_SEED`, the runner copies `bin/`,
+  `cache/`, and `python/` (never `environments/`) from the managed runtime into
+  private temporary state.
+
+The runner sets `PI_HARNESS_NATIVE_ASYNC_BUILD_ROOT` to the discovered consumer
+prefix unless already configured. With explicit Pi selectors, set that root
+explicitly for native tests. It uses a 100 ms background-completion scan
+(`PI_HARNESS_BACKGROUND_COMPLETION_TICK_MS`) and runs three test files at a time
+(`PI_HARNESS_TEST_CONCURRENCY`); each file has its own process and temporary state.
 
 `bin/check-specs.mjs` runs TLC on every `specification/*.cfg` and compares each outcome (`pass`, `violation`, `error`) with `specification/expected-results.json`; negative controls are recorded as `violation`. Set `TLA2TOOLS` and `JAVA` when the tools are not at `/opt/tla/tla2tools-1.7.4.jar` and on `PATH`. After an intentional model change, rerun the affected configurations with `--record` and review the diff.
 
@@ -22,10 +45,15 @@ Fixtures with literal `harness.presentation.v1` directives require
 
 The managed-runtime test explicitly exercises actual managed reuse and dependency rebuild, not the interpreter override. The stock-worker provisioning fixture also clears the override locally to check the real consent path. An optional `PI_HARNESS_TEST_MANAGED_SEED` can contain only cached `bin/uv-0.12.3`, `python/cpython-3.12.12-linux-x86_64-gnu`, and package `cache/` prerequisites. Both fixtures copy only these prerequisites into their temporary runtime; neither copies completed environments. The kernel test denies Node fetch. Set `UV_OFFLINE=1` for both offline runs. Do not supply completed environments, sessions, credentials, or kernel state as the seed. Without cached prerequisites, managed provisioning needs its documented downloads.
 
-Native integration additionally requires `PI_HARNESS_NATIVE_ASYNC_BUILD_ROOT` to identify the same external Pi install prefix:
+The native fixture requires `PI_HARNESS_PI_MODULE` to name an SDK file, not a
+package directory. Starting with the [installation environment](DEPENDENCIES.md#external-pi),
+set `PI_HARNESS_PYTHON` to an existing compatible interpreter. From the harness
+checkout, select the public root SDK file and the same external install prefix:
 
 ```sh
+export PI_HARNESS_PI_MODULE="$PI_PREFIX/node_modules/@earendil-works/pi-coding-agent/dist/index.js"
 export PI_HARNESS_NATIVE_ASYNC_BUILD_ROOT="$PI_PREFIX"
+export PI_HARNESS_SKILLS_PATH="$PWD/skills"
 node --max-old-space-size=256 --test --test-concurrency=1 test/native/e2e-async.test.mjs
 ```
 
@@ -37,20 +65,22 @@ Without the CLI argument, the fixture leaves the worker cap unset.
 
 Set `PI_HARNESS_TEST_CLM_EXTENSION` to a separately maintained candidate CLM `index.ts` to include the direct-mirror integration: inference during a paused Python writer, canonical acceptance, and reopen. Without that optional checkout, this one cross-project test is skipped.
 
-For bounded-history SDK integration, set `PI_HARNESS_RETENTION_SDK_MODULE` to a
-source-test artifact or SDK entry exporting the corrected literal `SessionManager`.
-For the complete source-mode path, also set `PI_HARNESS_TEST_SOURCE_SDK=1` and
-`PI_HARNESS_TEST_SDK_PACKAGE_DIR` to that coding-agent package's asset directory;
-the artifact must export its matching `createAgentSession` and `ExtensionRunner`.
-Worker/native fixtures use those three corrected public owners while keeping the
-verified stock public providers/helpers. Installed files remain unchanged. With
-no override the fixtures exercise the selected public package directly. A complete
-source-built package is recognized through its source-hook capabilities; it does
-not need the source-owner override. Select its adjacent public `dist/index.js`
-and `dist/cli.js`, and set the native root to the actual consumer prefix (including
-any containing `node_modules` wrapper). Set `PI_HARNESS_TEST_OFFICIAL_PI_MODULE`
-to a separate official 0.99.1 public entry when testing that package: the dedicated
-bundle test still accepts only official bundled bytes and rejects a custom bundle.
+A source-built graph exposing the [bounded-history and source-mode APIs](DEPENDENCIES.md#external-pi)
+can exercise them directly through its public entries. Select its matching
+CLI and `dist/programmatic.js` (or `dist/index.js`), and set the native root to
+the actual consumer prefix containing its `node_modules`. A package-directory
+selection also works for the worker resolver, but not the native fixture's
+SDK-file preflight.
+
+For isolated source-owner development, `PI_HARNESS_RETENTION_SDK_MODULE` can select
+an artifact exporting the candidate literal `SessionManager`. Also set
+`PI_HARNESS_TEST_SOURCE_SDK=1` and `PI_HARNESS_TEST_SDK_PACKAGE_DIR` to the candidate
+coding-agent package root to exercise its matching `createAgentSession` and
+`ExtensionRunner`. These overrides substitute test owners; they do not install
+or activate a runtime. Without overrides, fixtures use the selected public package
+directly. Set `PI_HARNESS_TEST_OFFICIAL_PI_MODULE` to a separate official 1.5.0
+public entry for the dedicated bundle test: it accepts only the pinned official
+alternate bundle and rejects a custom bundle.
 Direct fixture writes must refresh a borrowed public session source before taking
 a no-effects snapshot, just as the coordinator refreshes after a canonical commit.
 

@@ -153,7 +153,7 @@ The existing durable family-message path wakes a passivated parent and retries t
 
 Upgrade and rollback require a compatible reader for canonical assistant metadata, input receipts, and compaction details. Old implementations that do not understand the harness's versioned signature or projection metadata are not an automatically safe rollback after new histories have been written. Keep the tested source, dependency pins, and recovery-compatible state together.
 
-Pi 0.99.1 reads and continues retained 0.85.1 sessions without rewriting their prior entries. The reverse is not generally safe: 0.85.1 ignores new `context_edit` entries and does not reconstruct 0.99.1 compaction system checkpoints. Before the successor writes these forms, source/runtime rollback can retain the unchanged state. After those writes, preserve current state and use the accepted 0.99.1 reader or a forward repair; do not downgrade or rewind transcripts.
+The earlier Pi 0.99.1 upgrade read and continued retained 0.85.1 sessions without rewriting their prior entries. The reverse is not generally safe: 0.85.1 ignores `context_edit` entries and does not reconstruct 0.99.1 compaction system checkpoints. Pi 1.5.0 retains these context-edit and checkpoint forms. After such writes, preserve current state and use the supported reader or a forward repair; do not downgrade or rewind transcripts.
 
 ## Model catalog freshness
 

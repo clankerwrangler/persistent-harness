@@ -1,16 +1,22 @@
 # Dependencies and installation
 
-## Unmodified Pi
+## External Pi
 
-Supported version: `@earendil-works/pi-coding-agent@0.99.1`, upstream repository `https://github.com/earendil-works/pi`, revision `d86654abb8862e201933517d6f1fce9f88dd117f`.
+The resolver requires version 1.5.0 of `@earendil-works/pi-coding-agent`,
+`@earendil-works/pi-ai`, and `@earendil-works/pi-agent-core`. The current harness
+also requires public SDK additions beyond the upstream `earendil-works/pi`
+`v1.5.0` tag, listed in this section. No Pi source, package, or patch is bundled
+with this repository.
 
-Install it outside the harness checkout. For example:
+Supply a compatible source-built graph outside the harness checkout, retaining its
+lockfile and source provenance. Installing the upstream npm package by version
+alone does not supply all required APIs. To select an existing compatible graph,
+set `PI_PREFIX` to its consumer directory, directly containing `node_modules`:
 
 ```sh
-export PI_PREFIX="$HOME/.local/share/persistent-harness/pi"
-npm install --prefix "$PI_PREFIX" --save-exact --ignore-scripts --no-audit --no-fund @earendil-works/pi-coding-agent@0.99.1
+export PI_PREFIX=/absolute/path/to/pi-consumer
 export PI_HARNESS_PI_COMMAND="$PI_PREFIX/node_modules/@earendil-works/pi-coding-agent/dist/bundle/cli.js"
-export PI_HARNESS_PI_MODULE="$PI_PREFIX/node_modules/@earendil-works/pi-coding-agent/dist/bundle/index.js"
+export PI_HARNESS_PI_MODULE="$PI_PREFIX/node_modules/@earendil-works/pi-coding-agent"
 ```
 
 Pi requires Node 22.19 or later; this harness requires Node 24 or later.
@@ -19,58 +25,72 @@ Use one matching installed graph, not an SDK from another Pi installation.
 `PI_HARNESS_PI_MODULE` accepts a package-directory path or a declared public SDK
 file path, including `file:` URLs. `PI_HARNESS_PI_COMMAND` accepts a command
 path or a name on `PATH`. Set both to matching artifacts when selecting an
-explicit SDK file.
+explicit SDK file. Pi 1.5.0 declares `dist/bundle/cli.js` as its `pi` executable
+and `dist/index.js` as its public root. Source-built graphs can also declare
+`dist/programmatic.js` as a public `./programmatic` entry; upstream `v1.5.0`
+does not declare that entry.
+
+A command-only or package-directory selection prefers the declared public
+`./programmatic` entry when present; otherwise it selects the public root. The
+programmatic entry provides session, tool, model, resource, and extension APIs
+without the root entry's CLI modes, interactive UI, or built-in extension factories.
+An explicit `dist/programmatic.js` selects that entry when declared; an explicit
+`dist/index.js` keeps the root. An advertised but invalid programmatic export fails
+instead of falling back to the root or a less-specific pattern. The bounded export
+resolver supports `node`, `import`, and `default` conditions, not the full Node export-map
+algorithm. Private files and package-escaping targets are rejected.
+
+The alternate `dist/bundle/index.js` SDK file is not a public export-map subpath.
+Unless it is the package's declared root, explicit selection must match the
+official-entry SHA-256 pinned in `src/external-pi.mjs`, including a `./programmatic`
+alias to that pathname. Source-built graphs can have different bundle bytes; use
+their declared public root or programmatic entry. The alternate-entry check is not
+a whole-install integrity guarantee.
 
 Dependency lookup includes packages directly under the selected outer
 `node_modules` directory as well as nested dependencies inside that graph.
-Resolved real paths cannot escape it. Declared dependencies, exact versions,
-public exports, and one shared `pi-ai` instance remain required.
+Resolved real paths cannot escape it. Declared dependency links, exact versions
+of the three checked packages, public exports, and one shared `pi-ai` instance
+remain required.
 
-The optional explicit bundled SDK is an upstream-shipped alternate root artifact, not an npm export-map subpath. It exposes the same public named SDK APIs in this version. The resolver pins its entry SHA-256 to `df1f4c36758e3d339d42c6caebb2fca1d9f415de658d56b7b1fa6a9a808f0aa5`. This entry check is not a whole-install integrity guarantee. `dist/index.js` is also supported; set both command and SDK to their adjacent `dist/cli.js` and `dist/index.js` paths for that graph. An explicitly selected declared root wins, including when that root resolves to
-the bundle pathname. Other selections at that pathname retain the official-byte
-check, including a `./programmatic` alias to it.
+`src/external-pi.mjs` owns graph resolution, SDK selection, imports, and required
+SDK API checks. The worker hosts the public `ExtensionRunner`, `SessionManager`,
+and `ModelRuntime` APIs. Request preparation also requires the coding agent's
+`estimateContextTokens` and `expandPromptTemplate` exports. Native Responses
+replay uses `renderIncrementalToolsNotice` and `renderToolRemovalNotice` from
+`pi-ai/api/openai-responses-shared`, alongside its parser and conversion helpers.
+These four named exports are required in the compatible source graph but absent
+from upstream `v1.5.0`. The loader uses the coding agent's estimator and public
+`pi-ai/api/simple-options` helpers. Session helpers use its SDK-only loader without
+resolving or importing unused auxiliary exports, retaining package, dependency,
+version, and shared-AI gates. Their first load promise caches success or rejection. Only the
+session helper defaults to `pi` on `PATH` when both explicit settings are absent;
+the worker resolver still requires an explicit selection.
 
-A command-only or package-directory selection prefers the declared public
-`./programmatic` entry when present; otherwise it selects the public root. An
-advertised but invalid programmatic export fails instead of falling back to the
-root or a less-specific pattern. The bounded export resolver supports `node`,
-`import`, and `default` conditions, not the full Node export-map algorithm. An
-explicit declared root file keeps that root; an explicit valid programmatic file
-selects that entry. Private files and package-escaping targets are rejected.
-
-`external-pi.mjs` owns graph resolution, SDK selection, imports, and required SDK
-API checks. Session helpers use its SDK-only loader without resolving or importing
-unused auxiliary exports, retaining package, dependency, version, and shared-AI
-gates. Their first load promise caches success or rejection. Only the session
-helper defaults to `pi` on `PATH` when both explicit settings are absent; the
-worker resolver still requires an explicit selection.
-
-Unmodified Pi remains supported through the stateless projection path. The worker
-hosts the public `ExtensionRunner`, `SessionManager`, and `ModelRuntime` APIs.
-Pin 0.99.1 rather than assuming later SDK versions preserve these seams.
-
+The stateless projection path supports managers without bounded-history APIs.
 Bounded persistent-history retention additionally requires the SDK's supported
-`SessionManagerOptions.entryRetention`, ordered `getEntriesRange`, and independent
+`SessionManagerOptions.entryRetention`, ordered `getEntriesRange()`, and independent
 `getRevision()` `{revision, generation}` stamps. Avoiding automatic raw-context
 materialization also requires `buildSessionSource()`, source-mode session/Agent
 state, source-aware `ExtensionRunner` context/end dispatch, and source-aware SDK
 status estimation. These extend Pi's existing public owners; they are not a
-replacement manager or an installed-runtime patch. Stock 0.99.1 remains compatible
-but does not provide these payload bounds.
+replacement manager or an installed-runtime patch. The harness selects these
+paths by public capabilities, not by the package version alone. Source-mode
+compaction also requires the public `prepareCompactionFromSource()` helper.
 
 Suffix-only automatic history maintenance additionally uses the optional
 `SessionManager.getSourceWatermark()` / `subscribeSourceWatermark()` capability
 and the existing bounded-retention source hash. Its coalesced non-secret owner
 cursor is metadata, not archive completeness evidence; observer failure cannot
-turn a committed append into a failed write. Older SDKs, cold/unknown sources and
-strict reconciliation use canonical verification. No new setting, editing
-restriction or replacement owner is introduced; see [Session-history retrieval](ARCHITECTURE.md#session-history-retrieval).
+turn a committed append into a failed write. Graphs without that capability,
+cold/unknown sources, and strict reconciliation use canonical verification.
+See [Session-history retrieval](ARCHITECTURE.md#session-history-retrieval).
 
-The harness selects the source path only when the required supported surfaces
-exist. Extensions must opt into source handlers to avoid their own eager array
-boundary; default hooks and explicit full-value APIs remain complete. Packaging,
-installation and activation of a matching corrected SDK are separate from source
-verification. See [Canonical history](ARCHITECTURE.md#canonical-history) and the
+Extensions must opt into source handlers to avoid their own eager array boundary;
+default hooks and explicit full-value APIs remain complete. Source verification,
+packaging, installation, and activation of a matching SDK are separate steps.
+Existing processes keep their selected graph until replaced. See
+[Canonical history](ARCHITECTURE.md#canonical-history) and the
 [source integration fixtures](VALIDATION.md).
 
 ## Python and skills
@@ -97,7 +117,14 @@ export PI_HARNESS_PYTHON=/absolute/path/to/python
 node bin/provision-skills.mjs
 ```
 
-The bundled catalog provides `agent-message`, `rlm`, `kernel`, `operations`, `cron`, `session-history`, `files`, `shell`, and `background`. No host inventory, SSH wrappers, mail, vault, persona, or standing policy is installed. Use `PI_HARNESS_SKILLS_PATH` for a different complete catalog and provision its declared dependencies before admitting work.
+The bundled catalog provides `agent-message`, `background`, `clm`, `cron`, `files`,
+`inbox`, `kernel`, `operations`, `rlm`, `session-history`, and `shell`. The ten
+Python-backed skills declare empty dependency lists in their `pyproject.toml` files;
+`inbox` is guidance-only. The optional `clm` companion requires separately loaded,
+callable live-context extension tools; it does not activate that extension. No host
+inventory, SSH wrappers, mail, vault, persona, or standing policy is installed. Use
+`PI_HARNESS_SKILLS_PATH` for a different complete catalog and provision its declared
+dependencies before admitting work.
 
 ## Persistent configuration
 

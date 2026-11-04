@@ -2,17 +2,17 @@
 
 Persistent Harness adds durable, detachable sessions and persistent Python execution to Pi. A local supervisor owns session actors, input queues, retained child agents, and kernel recovery. Closing a terminal detaches the client; it does not stop the actor.
 
-This repository contains the harness additions and nine generic capability skills. It does not contain the base Pi distribution.
+This repository contains the harness additions and eleven capability skills. It does not contain the base Pi distribution.
 
 ## Install
 
 Requirements:
 
 - Linux with `/proc`, Node.js 24 or newer, Bash, Perl, and standard Unix utilities.
-- Unmodified `@earendil-works/pi-coding-agent` **0.99.1**, including its matching SDK dependencies.
+- A compatible external Pi **1.5.0** package graph with the public SDK APIs listed in [Dependencies](docs/DEPENDENCIES.md#external-pi).
 - CPython 3.12.12, IPython 9.10.0, and dill 0.3.8, either provisioned by the harness or supplied explicitly.
 
-Follow [Dependencies and installation](docs/DEPENDENCIES.md) to install Pi and configure the Python runtime. Then, from this checkout:
+Follow [Dependencies and installation](docs/DEPENDENCIES.md) to select the Pi graph and configure the Python runtime. Then, from this checkout:
 
 ```sh
 npm ci --ignore-scripts --no-audit --no-fund
@@ -21,7 +21,7 @@ node bin/provision-skills.mjs --yes
 node bin/persistent-pi.mjs --create
 ```
 
-The provisioning command approves downloads of pinned uv, Python, IPython, and dill. Set `PI_HARNESS_PYTHON` to a compatible existing interpreter instead if provisioning is not wanted. The nine bundled skills have only standard-library Python dependencies.
+The provisioning command approves downloads of pinned uv, Python, IPython, and dill. Set `PI_HARNESS_PYTHON` to a compatible existing interpreter instead if provisioning is not wanted. The ten Python-backed skills declare no additional Python packages; `inbox` is guidance-only.
 
 Configure provider credentials through the external Pi installation, separately from this repository. Keep the checkout at its installed path: generated launchers and the harness extension wrapper reference it.
 
