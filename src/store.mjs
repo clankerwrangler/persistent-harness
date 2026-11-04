@@ -521,9 +521,8 @@ export class HarnessStore {
   }
 
   // The session and its descendants that still have, or may resume, a worker.
-  liveFamilyIds(sessionId) {
-    return this.#db.prepare(`WITH RECURSIVE fam(id) AS (SELECT ? UNION SELECT s.id FROM sessions s JOIN fam f ON s.parent_session_id = f.id)
-      SELECT s.id FROM sessions s WHERE s.id IN fam AND s.lifecycle IN ('starting', 'resident', 'passivated')`).all(sessionId).map(row => row.id);
+  liveSessionIds() {
+    return this.#db.prepare("SELECT id FROM sessions WHERE lifecycle IN ('starting', 'resident', 'passivated')").all().map(row => row.id);
   }
 
   #sessionLineage(sessionId) {

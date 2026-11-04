@@ -1,6 +1,6 @@
 ---------------------------- MODULE FamilyFastMode ----------------------------
 \* Sources:
-\*   src/store.mjs sha256:1110712317ac0656fc3083ca649b16dac9324cec7df07724372ac2946acc712e
+\*   src/store.mjs sha256:82e659225f74f2e93f3b87d4b8fe1d02a50aa8d75c6a90ee51f9b32860e349e6
 \*   src/fast-mode.mjs sha256:497e7699c395663ebff315b0244e14f06b43b46885823a8d0c42cccc63d71554
 \*   src/extension.mjs sha256:9483faf8a4e9bdfb2e242fa9b3a20437f2816553b4fba0d180189a6265b06caa
 \*   src/actor-coordinator.mjs sha256:d33d75f88913edccec70c1cc2df0391a3e909d958f96acfd890c3b774935ae62

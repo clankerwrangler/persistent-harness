@@ -6,7 +6,8 @@
 //   branch   that session's branch
 //   worktrees optional additional { worktree, branch } claims for multi-repository work
 //   branches optional additional branch names retained by that session
-// A worktree or branch no live session in the root's family claims is reported unassigned.
+// A worktree or branch no live session claims is reported unassigned. Any root's session can
+// claim one, since work for one root sometimes needs a checkout of another root's repository.
 import { execFile } from "node:child_process";
 import { readFileSync, realpathSync, statSync } from "node:fs";
 import path from "node:path";
@@ -69,7 +70,7 @@ export async function worktreeNotes({ repos, claims, git = gitTrees }) {
   return notes;
 }
 
-// liveSessionIds: the root and its descendants that are starting, resident or passivated.
+// liveSessionIds: every session that is starting, resident or passivated, in any root's family.
 export async function rootReminders({ rootId, registryPath, liveSessionIds, git }) {
   const registry = readRegistry(registryPath), entry = registry[rootId];
   if (!entry) return [];

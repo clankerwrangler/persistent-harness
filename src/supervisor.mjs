@@ -2848,7 +2848,7 @@ export class HarnessSupervisor {
     if (session?.kind !== "root" || session.depth !== 0) return [];
     try {
       return await rootReminders({ rootId: sessionId, registryPath: path.join(path.dirname(this.databasePath), "working-state.json"),
-        liveSessionIds: this.store.liveFamilyIds(sessionId) });
+        liveSessionIds: this.store.liveSessionIds() });
     } catch { return []; }
   }
   #leadSessionPath = null;

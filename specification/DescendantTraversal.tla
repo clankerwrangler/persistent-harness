@@ -1,6 +1,6 @@
 -------------------------- MODULE DescendantTraversal --------------------------
 \* Sources:
-\*   src/store.mjs sha256:1110712317ac0656fc3083ca649b16dac9324cec7df07724372ac2946acc712e
+\*   src/store.mjs sha256:82e659225f74f2e93f3b87d4b8fe1d02a50aa8d75c6a90ee51f9b32860e349e6
 
 EXTENDS Naturals, FiniteSets
 CONSTANTS Nodes, Target, NoParent
