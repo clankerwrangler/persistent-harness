@@ -53,6 +53,7 @@ sdk-worker-wire.test.mjs
 sdk-worker.test.mjs
 session-history-skill.test.mjs
 skill-artifacts.test.mjs
+skill-proxy-snapshot.test.mjs
 snapshot-durability.test.mjs
 snapshot-failure.test.mjs
 supervisor-actor.test.mjs

@@ -4,7 +4,7 @@
 \*   src/python-runtime-errors.mjs sha256:98e700190c3f8498d3d6e11d04a1b52904313a59b10f9b04556091fe9482b4d2
 \*   src/kernel.mjs sha256:feb1bec8dc4e3d47d0f11956acacea17cdfac0d91fa853c785f0f050754d06e2
 \*   python-runtime/kernel.py sha256:d4aa99006f90d531b546686f6208dc48f77609f4faa00dabb91e7a81f80bc361
-\*   python-runtime/_persistent_harness.py sha256:f9ebcac6faa03c86d2f6a0c8f54a5b41eaa269d53ad27ae95fa82decc57791b7
+\*   python-runtime/_persistent_harness.py sha256:c9bfdef5351102e88de2a6806b355ff3d6f4638516a7165d3bd779682042f9fb
 
 EXTENDS Naturals, FiniteSets, TLC
 CONSTANT Fault

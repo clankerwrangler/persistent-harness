@@ -80,6 +80,16 @@ class SkillResult(dict):
         return bundle
 
 
+_skill_proxies: dict[str, "SkillProxy"] = {}
+
+
+def _live_skill_proxy(alias: str) -> "SkillProxy":
+    try:
+        return _skill_proxies[alias]
+    except KeyError:
+        raise LookupError(f"skill {alias!r} is not loaded in this kernel") from None
+
+
 class SkillProxy:
     """One SKILL.md object with optional Python backing."""
 
@@ -97,11 +107,19 @@ class SkillProxy:
         return self._module is not None
 
     def __getattr__(self, name: str):
+        # Read state directly: an instance being unpickled or copied has no
+        # attributes yet, and self._module would re-enter __getattr__.
+        if "_module" not in self.__dict__:
+            raise AttributeError(name)
         if self._module is None:
             raise AttributeError(
                 f"Skill {self.id!r} is guidance-only. Use {self.alias}? to read its SKILL.md."
             )
         return getattr(self._module, name)
+
+    def __reduce__(self):
+        # Like a module, a saved skill is a reference to this kernel's live proxy.
+        return (_live_skill_proxy, (self.alias,))
 
     def __call__(self, *args, **kwargs):
         if self._module is None:
@@ -145,4 +163,5 @@ def bootstrap_skills(manifest: dict[str, Any], namespace: dict[str, Any], *, on_
         proxy = SkillProxy(skill, module)
         namespace[skill["alias"]] = proxy
         proxies[skill["alias"]] = proxy
+        _skill_proxies[skill["alias"]] = proxy
     return proxies
