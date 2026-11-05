@@ -1,7 +1,7 @@
 ---------------------- MODULE HistoryCandidateProjection ----------------------
 \* Sources:
-\*   src/store.mjs sha256:82e659225f74f2e93f3b87d4b8fe1d02a50aa8d75c6a90ee51f9b32860e349e6
-\*   src/supervisor.mjs sha256:280ac4bdfaca53e29b061ad9d9c74569546e3b8dc0406860b1727e26089df37f
+\*   src/store.mjs sha256:c4470bb91d53c651fadb8b44908acc385eee96192d97002aaa1394a02bdbbe19
+\*   src/supervisor.mjs sha256:af62c71c62cfa111f3915ce54c2fc2800516856e4fc798b3429c1c5794de555f
 
 EXTENDS Naturals
 CONSTANTS ResolveHistoryFast, ResolveDefaultFast, PreserveMetadata, PreserveErrors

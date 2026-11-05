@@ -1,7 +1,7 @@
 --------------------- MODULE ActorInputReconciliation ---------------------
 \* Sources:
-\*   src/extension.mjs sha256:9483faf8a4e9bdfb2e242fa9b3a20437f2816553b4fba0d180189a6265b06caa
-\*   src/supervisor.mjs sha256:280ac4bdfaca53e29b061ad9d9c74569546e3b8dc0406860b1727e26089df37f
+\*   src/extension.mjs sha256:3a89d6dfc805a979efe720e1a242f9e5c515a5f98cf3c043a0c3994ba7b41567
+\*   src/supervisor.mjs sha256:af62c71c62cfa111f3915ce54c2fc2800516856e4fc798b3429c1c5794de555f
 \*   src/visible-transcript-reader.mjs sha256:244b202937ba51f1c9f06e272fe77ba34cd3316d43cbed956bf6ee98b7fc8061
 
 EXTENDS Naturals, FiniteSets

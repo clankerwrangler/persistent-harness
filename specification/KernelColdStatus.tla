@@ -1,6 +1,6 @@
 ------------------------- MODULE KernelColdStatus -------------------------
 \* Sources:
-\*   src/host-handlers.mjs sha256:6abd3cc578f921707bcb619e1a6672570121a1426e97cefe2105c38475895d9d
+\*   src/host-handlers.mjs sha256:adc15b760150ca2e1883014523c1f922acaa8673a1cdeac487e98f2615ee06e6
 \*   src/kernel.mjs sha256:feb1bec8dc4e3d47d0f11956acacea17cdfac0d91fa853c785f0f050754d06e2
 
 EXTENDS Naturals

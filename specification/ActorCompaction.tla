@@ -2,7 +2,7 @@
 \* Sources:
 \*   src/actor-compaction.mjs sha256:ff707741faf3ea45cb363f9866ed4cbb0309c7a76556d14ea125cae7a7963c28
 \*   src/actor-coordinator.mjs sha256:d33d75f88913edccec70c1cc2df0391a3e909d958f96acfd890c3b774935ae62
-\*   src/extension.mjs sha256:9483faf8a4e9bdfb2e242fa9b3a20437f2816553b4fba0d180189a6265b06caa
+\*   src/extension.mjs sha256:3a89d6dfc805a979efe720e1a242f9e5c515a5f98cf3c043a0c3994ba7b41567
 \*   src/canonical-context.mjs sha256:76adbe84c8ec0e16fb8e74b4c13d62287243c1749e4adbbd97777a84cdcf1192
 
 EXTENDS Naturals, FiniteSets

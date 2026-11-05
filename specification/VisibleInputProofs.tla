@@ -2,7 +2,7 @@
 \* Sources:
 \*   src/visible-transcript-reader.mjs sha256:244b202937ba51f1c9f06e272fe77ba34cd3316d43cbed956bf6ee98b7fc8061
 \*   src/conversation-projection.mjs sha256:9ccd97f1657710f009ea425590b99a791e5c7ba4b1a9367e96d9da67787cabed
-\*   src/supervisor.mjs sha256:280ac4bdfaca53e29b061ad9d9c74569546e3b8dc0406860b1727e26089df37f
+\*   src/supervisor.mjs sha256:af62c71c62cfa111f3915ce54c2fc2800516856e4fc798b3429c1c5794de555f
 EXTENDS Naturals, FiniteSets
 CONSTANTS PhysicalAuthority, CompleteInventory, ScopedRendering, ReconcileNewPending, ReadCanonicalPagePayload
 VARIABLES phase, purpose, physical, inventory, receipt, parsed, selected,

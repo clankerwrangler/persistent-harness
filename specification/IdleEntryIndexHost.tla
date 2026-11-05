@@ -1,6 +1,6 @@
 -------------------- MODULE IdleEntryIndexHost --------------------
 \* Sources:
-\*   src/supervisor.mjs sha256:280ac4bdfaca53e29b061ad9d9c74569546e3b8dc0406860b1727e26089df37f
+\*   src/supervisor.mjs sha256:af62c71c62cfa111f3915ce54c2fc2800516856e4fc798b3429c1c5794de555f
 \*   src/sdk-worker.mjs sha256:ad3637bdce0be9028c01b99eb3b0c619d76473b0def01bae88de50127622ea0a
 
 EXTENDS Naturals, FiniteSets

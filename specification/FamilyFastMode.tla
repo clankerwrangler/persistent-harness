@@ -1,8 +1,8 @@
 ---------------------------- MODULE FamilyFastMode ----------------------------
 \* Sources:
-\*   src/store.mjs sha256:82e659225f74f2e93f3b87d4b8fe1d02a50aa8d75c6a90ee51f9b32860e349e6
+\*   src/store.mjs sha256:c4470bb91d53c651fadb8b44908acc385eee96192d97002aaa1394a02bdbbe19
 \*   src/fast-mode.mjs sha256:497e7699c395663ebff315b0244e14f06b43b46885823a8d0c42cccc63d71554
-\*   src/extension.mjs sha256:9483faf8a4e9bdfb2e242fa9b3a20437f2816553b4fba0d180189a6265b06caa
+\*   src/extension.mjs sha256:3a89d6dfc805a979efe720e1a242f9e5c515a5f98cf3c043a0c3994ba7b41567
 \*   src/actor-coordinator.mjs sha256:d33d75f88913edccec70c1cc2df0391a3e909d958f96acfd890c3b774935ae62
 
 EXTENDS Naturals, FiniteSets

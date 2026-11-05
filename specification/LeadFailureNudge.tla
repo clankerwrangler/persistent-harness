@@ -1,7 +1,7 @@
 ---- MODULE LeadFailureNudge ----
 \* Sources:
-\*   src/lead-failure-nudge.mjs sha256:6388f5ee560f84849db64fa358a41827037e8e4959069b2d20113ecc2364f659
-\*   src/supervisor.mjs sha256:280ac4bdfaca53e29b061ad9d9c74569546e3b8dc0406860b1727e26089df37f
+\*   src/lead-failure-nudge.mjs sha256:d8ebb01a572580c8e36376f9290ff49f1c27accd2de8c882d40c26eb4dccafba
+\*   src/supervisor.mjs sha256:af62c71c62cfa111f3915ce54c2fc2800516856e4fc798b3429c1c5794de555f
 \*   src/actor-coordinator.mjs sha256:d33d75f88913edccec70c1cc2df0391a3e909d958f96acfd890c3b774935ae62
 
 \* Nobody observes Lead's own failed run, so the supervisor nudges it later.
