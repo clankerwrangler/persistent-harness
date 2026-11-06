@@ -1,11 +1,11 @@
 -------------------- MODULE NotificationLifecycle --------------------
 \* Sources:
-\*   src/notification-store.mjs sha256:fb4fc3acf1f5a63d7216819f16802a140ffe4b69522502393408a2546f8734bc
+\*   src/notification-store.mjs sha256:8aca13ba1869baad21aa3b0f688060fa46920dfdf3e3adf956dcdc24dc2de542
 \*   src/supervisor.mjs sha256:af62c71c62cfa111f3915ce54c2fc2800516856e4fc798b3429c1c5794de555f
 EXTENDS Naturals, FiniteSets, Sequences
 CONSTANTS Actors, Root, MaxEpisodes
-VARIABLES episode, busy, pending, quiet, closed, needs, idleNotices, needNotices, background, owner, pendingUser, jobOwner, pendingOwner
-vars == <<episode, busy, pending, quiet, closed, needs, idleNotices, needNotices, background, owner, pendingUser, jobOwner, pendingOwner>>
+VARIABLES episode, busy, pending, quiet, closed, needs, idleNotices, needNotices, background, owner, pendingUser, jobOwner, pendingOwner, idleDuringBackground
+vars == <<episode, busy, pending, quiet, closed, needs, idleNotices, needNotices, background, owner, pendingUser, jobOwner, pendingOwner, idleDuringBackground>>
 VARIABLE observation, migration
 SnapshotInitial == [phase |-> "pick", n |-> 0, entry |-> "supplied", current |-> 0,
                     outer |-> [index |-> 0, version |-> 0], previous |-> [index |-> 0, version |-> 0],
@@ -14,7 +14,7 @@ SnapshotInitial == [phase |-> "pick", n |-> 0, entry |-> "supplied", current |->
 MigrationInitial == [phase |-> "closed", column |-> FALSE, initialized |-> FALSE,
   stagedColumn |-> FALSE, stagedInitialized |-> FALSE,
   restarts |-> 0, historicalClosure |-> FALSE]
-Init == /\ migration = MigrationInitial /\ observation = SnapshotInitial /\ episode = 0 /\ busy = {} /\ pending = {} /\ quiet = 0
+Init == /\ migration = MigrationInitial /\ observation = SnapshotInitial /\ episode = 0 /\ busy = {} /\ pending = {} /\ quiet = 0 /\ idleDuringBackground = FALSE
         /\ closed = TRUE /\ needs = FALSE /\ idleNotices = {} /\ needNotices = {} /\ background = FALSE /\ owner = "user" /\ pendingUser = FALSE /\ jobOwner = "none" /\ pendingOwner = "none"
 \* Actors includes root, child, and grandchild. Retained idle/inactive actors
 \* are absent from busy. Live inference, tools, and starting handoffs are busy.
@@ -27,47 +27,56 @@ Start(a, source) ==
     /\ owner' = (IF closed THEN IF pendingUser THEN "user" ELSE IF pendingOwner # "none" THEN pendingOwner ELSE IF source = "cron" THEN "cron" ELSE owner ELSE owner)
     /\ pendingUser' = IF closed THEN FALSE ELSE pendingUser
     /\ pendingOwner' = IF closed THEN "none" ELSE pendingOwner
-    /\ UNCHANGED <<pending, idleNotices, needNotices, background, jobOwner>>
+    /\ UNCHANGED <<pending, idleNotices, needNotices, background, idleDuringBackground, jobOwner>>
 Settle(a) == /\ a \in busy /\ busy' = busy \ {a} /\ quiet' = 0
-             /\ UNCHANGED <<episode, pending, closed, needs, idleNotices, needNotices, background, owner, pendingUser, jobOwner, pendingOwner>>
+             /\ UNCHANGED <<episode, pending, closed, needs, idleNotices, needNotices, background, idleDuringBackground, owner, pendingUser, jobOwner, pendingOwner>>
 Queue(a) == /\ a \in Actors /\ pending' = pending \cup {a}
-            /\ UNCHANGED <<episode, busy, quiet, closed, needs, idleNotices, needNotices, background, owner, pendingUser, jobOwner, pendingOwner>>
+            /\ UNCHANGED <<episode, busy, quiet, closed, needs, idleNotices, needNotices, background, idleDuringBackground, owner, pendingUser, jobOwner, pendingOwner>>
 \* Queue reconciliation is not a permanent empty-queue success prerequisite.
 Drain(a) == /\ a \in pending /\ pending' = pending \ {a}
-            /\ UNCHANGED <<episode, busy, quiet, closed, needs, idleNotices, needNotices, background, owner, pendingUser, jobOwner, pendingOwner>>
-Tick == /\ ~closed /\ busy = {} /\ quiet < 2 /\ quiet' = quiet + 1
-        /\ UNCHANGED <<episode, busy, pending, closed, needs, idleNotices, needNotices, background, owner, pendingUser, jobOwner, pendingOwner>>
+            /\ UNCHANGED <<episode, busy, quiet, closed, needs, idleNotices, needNotices, background, idleDuringBackground, owner, pendingUser, jobOwner, pendingOwner>>
+\* A running background job is still the family's work: the quiet wait counts only without one.
+\* respectBackground = FALSE is the broken control that ignores running jobs, as the old code did.
+Tick(respectBackground) == /\ ~closed /\ busy = {} /\ (respectBackground => ~background) /\ quiet < 2 /\ quiet' = quiet + 1
+        /\ UNCHANGED <<episode, busy, pending, closed, needs, idleNotices, needNotices, background, idleDuringBackground, owner, pendingUser, jobOwner, pendingOwner>>
 NeedsYou(a) == /\ a = Root /\ ~closed /\ ~needs /\ episode \notin needNotices
                /\ needs' = TRUE /\ needNotices' = needNotices \cup {episode}
-               /\ UNCHANGED <<episode, busy, pending, quiet, closed, idleNotices, background, owner, pendingUser, jobOwner, pendingOwner>>
+               /\ UNCHANGED <<episode, busy, pending, quiet, closed, idleNotices, background, idleDuringBackground, owner, pendingUser, jobOwner, pendingOwner>>
 Resolve == /\ needs /\ needs' = FALSE
-           /\ UNCHANGED <<episode, busy, pending, quiet, closed, idleNotices, needNotices, background, owner, pendingUser, jobOwner, pendingOwner>>
-Finalize == /\ ~closed /\ busy = {} /\ quiet = 2 /\ closed' = TRUE
+           /\ UNCHANGED <<episode, busy, pending, quiet, closed, idleNotices, needNotices, background, idleDuringBackground, owner, pendingUser, jobOwner, pendingOwner>>
+Finalize(respectBackground) ==
+            /\ ~closed /\ busy = {} /\ quiet = 2 /\ (respectBackground => ~background) /\ closed' = TRUE
+            /\ idleDuringBackground' = (idleDuringBackground \/ (background /\ ~needs /\ owner = "user"))
             /\ idleNotices' = IF needs \/ owner # "user" THEN idleNotices ELSE idleNotices \cup {episode}
             /\ UNCHANGED <<episode, busy, pending, quiet, needs, needNotices, background, owner, pendingUser, jobOwner, pendingOwner>>
-Background == /\ background' = ~background
-              /\ UNCHANGED <<episode, busy, pending, quiet, closed, needs, idleNotices, needNotices, owner, pendingUser, jobOwner, pendingOwner>>
+\* A job starting in an open episode restarts the quiet wait; a closed episode is left alone.
+Background(respectBackground) == /\ background' = ~background /\ quiet' = IF respectBackground /\ background' /\ ~closed THEN 0 ELSE quiet
+              /\ UNCHANGED <<episode, busy, pending, closed, needs, idleNotices, needNotices, owner, pendingUser, jobOwner, pendingOwner, idleDuringBackground>>
 \* Reconnect/restart does not synthesize settlement or clear durable episode IDs.
 Reconnect == UNCHANGED vars
 UserAdmission == /\ owner' = (IF closed THEN owner ELSE "user") /\ pendingUser' = closed
-                 /\ UNCHANGED <<episode, busy, pending, quiet, closed, needs, idleNotices, needNotices, background, jobOwner, pendingOwner>>
+                 /\ UNCHANGED <<episode, busy, pending, quiet, closed, needs, idleNotices, needNotices, background, idleDuringBackground, jobOwner, pendingOwner>>
 LaunchJob == /\ ~closed /\ jobOwner = "none" /\ jobOwner' \in {owner, "unknown"}
-             /\ UNCHANGED <<episode, busy, pending, quiet, closed, needs, idleNotices, needNotices, background, owner, pendingUser, pendingOwner>>
+             /\ UNCHANGED <<episode, busy, pending, quiet, closed, needs, idleNotices, needNotices, background, idleDuringBackground, owner, pendingUser, pendingOwner>>
 CompleteJob == /\ jobOwner # "none"
                /\ owner' = IF ~closed /\ jobOwner = "user" THEN "user" ELSE owner
                /\ pendingOwner' = IF closed THEN jobOwner ELSE pendingOwner
                /\ pendingUser' = pendingUser
                /\ jobOwner' = "none"
-               /\ UNCHANGED <<episode, busy, pending, quiet, closed, needs, idleNotices, needNotices, background>>
-Next == (\E a \in Actors: (\E source \in {"user", "cron", "background"}: Start(a, source)) \/ Settle(a) \/ Queue(a) \/ Drain(a) \/ NeedsYou(a))
-        \/ Tick \/ Resolve \/ Finalize \/ Background \/ Reconnect \/ UserAdmission \/ LaunchJob \/ CompleteJob
+               /\ UNCHANGED <<episode, busy, pending, quiet, closed, needs, idleNotices, needNotices, background, idleDuringBackground>>
+NextWith(respectBackground) == (\E a \in Actors: (\E source \in {"user", "cron", "background"}: Start(a, source)) \/ Settle(a) \/ Queue(a) \/ Drain(a) \/ NeedsYou(a))
+        \/ Tick(respectBackground) \/ Resolve \/ Finalize(respectBackground) \/ Background(respectBackground) \/ Reconnect \/ UserAdmission \/ LaunchJob \/ CompleteJob
+Next == NextWith(TRUE)
+NextIgnoringBackground == NextWith(FALSE)
 TypeOK == /\ pendingOwner \in {"none", "user", "cron", "unknown"} /\ jobOwner \in {"none", "user", "cron", "unknown"} /\ pendingUser \in BOOLEAN /\ owner \in {"user", "cron", "unknown"} /\ episode \in 0..MaxEpisodes /\ busy \subseteq Actors /\ pending \subseteq Actors
-          /\ quiet \in 0..2 /\ closed \in BOOLEAN /\ needs \in BOOLEAN /\ background \in BOOLEAN
+          /\ quiet \in 0..2 /\ closed \in BOOLEAN /\ needs \in BOOLEAN /\ background \in BOOLEAN /\ idleDuringBackground \in BOOLEAN
           /\ idleNotices \subseteq 1..episode /\ needNotices \subseteq 1..episode
 NoPrematureIdle == episode \in idleNotices => closed /\ busy = {} /\ quiet = 2
 NoRelatedDoublePing == closed /\ needs => episode \notin idleNotices
 CronIntentNotBypassed == owner # "user" => episode \notin idleNotices
+NoIdleWhileBackground == ~idleDuringBackground
 Spec == Init /\ [][Next /\ UNCHANGED <<observation, migration>>]_<<vars, observation, migration>>
+SpecIgnoringBackground == Init /\ [][NextIgnoringBackground /\ UNCHANGED <<observation, migration>>]_<<vars, observation, migration>>
 
 \* One uninterrupted supervisor observation owns its newly read projection.
 \* Cases abstract SQL rows/options; only the external control mutates between reads.

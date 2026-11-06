@@ -171,6 +171,10 @@ export class NotificationStore {
       if (family.starting) {
         this.#db.prepare("UPDATE notification_families SET quiet_since=NULL WHERE root_id=?").run(family.rootId); return null;
       }
+      // A running background job is still the family's work, so the quiet wait starts when it ends.
+      if (backgroundCount > 0) {
+        this.#db.prepare("UPDATE notification_families SET quiet_since=NULL WHERE root_id=?").run(family.rootId); return null;
+      }
       if (episode.quiet_since === null) {
         this.#db.prepare("UPDATE notification_families SET quiet_since=? WHERE root_id=?").run(now, family.rootId); return null;
       }
@@ -182,8 +186,8 @@ export class NotificationStore {
       if (episode.owner !== "user" || needs) return null;
       return this.#create({ key: `idle:${episode.episode_id}`, rootId: family.rootId, sessionId: family.rootId,
         episodeId: episode.episode_id, kind: "idle", title: clean(family.title, 120) || "Activity stopped",
-        body: `The conversation and its agents are now idle.${backgroundCount ? ` ${backgroundCount} background job${backgroundCount === 1 ? " is" : "s are"} still running.` : ""}`,
-        expiresAt: now + IDLE_NOTIFICATION_TTL_MS, source: { type: "family_idle", episodeId: episode.episode_id, backgroundCount } }, now);
+        body: "The conversation and its agents are now idle.",
+        expiresAt: now + IDLE_NOTIFICATION_TTL_MS, source: { type: "family_idle", episodeId: episode.episode_id } }, now);
     });
   }
   openFamilies() { return this.#db.prepare("SELECT root_id FROM notification_families WHERE episode_id IS NOT NULL AND closed_at IS NULL").all().map(r => r.root_id); }

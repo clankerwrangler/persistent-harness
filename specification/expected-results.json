@@ -263,6 +263,7 @@
   "NotificationDelivery.conditional.cfg": "pass",
   "NotificationDelivery.result.cfg": "pass",
   "NotificationDelivery.silent.cfg": "pass",
+  "NotificationLifecycle.BackgroundIgnored.cfg": "violation",
   "NotificationLifecycle.Migration.cfg": "pass",
   "NotificationLifecycle.MigrationNonAtomic.cfg": "violation",
   "NotificationLifecycle.Snapshot.cfg": "pass",

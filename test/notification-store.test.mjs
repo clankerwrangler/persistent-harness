@@ -108,11 +108,13 @@ for (const updatedRowsBeforeFailure of [0, 1]) test(`close migration rolls back 
   assert.deepEqual(db.prepare("SELECT close_claimed_at FROM notification_deliveries").all().map(r => r.close_claimed_at), [0, 0]);
 });
 
-test("family episode survives store restart and detached jobs do not extend idle", async t => {
+test("family episode survives store restart and running background jobs keep it open", async t => {
   const { file, store } = await fixture(t);
   store.observe("root", { liveActors: ["root"], now: 1000 }); store.observe("root", { now: 1100 });
   const restarted = new NotificationStore(file, { idleMs: 100 }); t.after(() => restarted.close());
-  const item = restarted.observe("root", { backgroundCount: 2, now: 1200 }); assert.equal(item.kind, "idle"); assert.match(item.body, /2 background jobs are still running/);
+  assert.equal(restarted.observe("root", { backgroundCount: 2, now: 1200 }), null, "a running background job keeps the episode open");
+  assert.equal(restarted.observe("root", { now: 1250 }), null, "the quiet wait starts when background jobs end");
+  const item = restarted.observe("root", { now: 1350 }); assert.equal(item.kind, "idle"); assert.doesNotMatch(item.body, /background/);
   assert.equal(store.observe("root", { now: 1500 }), null); assert.equal(store.list({}, 1500).notifications.length, 1);
   const writer = new HarnessStore(file); t.after(() => writer.close());
   const readFamily = store.family.bind(store); let reads = 0;
@@ -136,12 +138,14 @@ test("family episode survives store restart and detached jobs do not extend idle
   reads = 0;
   assert.equal(store.observe("root", { now: 1900 }, undefined), null);
   assert.equal(reads, 1, "explicit undefined also reads current state");
-  const next = store.observe("root", { now: 2000, backgroundCount: 2 });
-  assert.equal(next.title, "Next title"); assert.match(next.body, /2 background jobs are still running/);
-  assert.equal(next.createdAt, 2000); assert.equal(next.expiresAt, 2000 + IDLE_NOTIFICATION_TTL_MS);
+  assert.equal(store.observe("root", { now: 2000, backgroundCount: 2 }), null, "a running background job keeps the episode open");
+  assert.equal(store.observe("root", { now: 2050 }), null);
+  const next = store.observe("root", { now: 2150 });
+  assert.equal(next.title, "Next title"); assert.equal(next.body, "The conversation and its agents are now idle.");
+  assert.equal(next.createdAt, 2150); assert.equal(next.expiresAt, 2150 + IDLE_NOTIFICATION_TTL_MS);
   const order = [], now = Date.now;
   store.family = id => { order.push("family"); return readFamily(id); };
-  Date.now = () => { order.push("now"); return 2100; };
+  Date.now = () => { order.push("now"); return 2200; };
   try { assert.equal(store.observe("root"), null); } finally { Date.now = now; }
   assert.deepEqual(order, ["now", "family"], "default time is sampled before default family resolution");
 });
