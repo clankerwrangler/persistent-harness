@@ -1,7 +1,7 @@
 ------------------------- MODULE ActorCompileCache -------------------------
 \* Sources:
 \*   src/actor-compile-cache.mjs sha256:f0308df107c22995268707e4f94b1456d3c3757379c0deb5b75b7bcee7920c94
-\*   src/supervisor.mjs sha256:af62c71c62cfa111f3915ce54c2fc2800516856e4fc798b3429c1c5794de555f
+\*   src/supervisor.mjs sha256:d36114a792306b8a4c89883a9ded1eda12230bd61ee37e210cbee26efc7e28b4
 \*   bin/harness-actor.mjs sha256:36a688d0b5f51906e78e982720687b8ba774c21fdedb2274aeb92c8532dc0263
 \*   src/external-pi.mjs sha256:38f8ffdff78010243eb4e5c8617ca6c0c003b03a7d46b6240b814d73d14fcbd3
 

@@ -335,7 +335,7 @@ const CURRENT_SCHEMA = `
 
 export class HarnessStore {
   #db;
-  // The root that hears about other roots' abnormal exits and turns (Lead), or null.
+  // The root that hears about other roots' abnormal exits and turns (Home), or null.
   rootFailureObserver = () => null;
   #deletingSessions = new Set();
   #usageSummary = null;
@@ -961,14 +961,14 @@ export class HarnessStore {
       .run(id, sessionId, target.id, relationship, body, now, now, generation);
   }
 
-  // Nobody observes Lead's own failed turn. The supervisor queues this later, through
+  // Nobody observes Home's own failed turn. The supervisor queues this later, through
   // the same lifecycle delivery that wakes a passivated target.
-  queueLeadFailureNudge(sessionId, generation, turnFailure, failedAt, now = Date.now()) {
+  queueHomeFailureNudge(sessionId, generation, turnFailure, failedAt, now = Date.now()) {
     const report = normalizeTurnFailure(turnFailure);
     const session = this.#sessionRow(sessionId);
     if (session?.kind !== "root" || session.lifecycle === "deleted" || this.isSessionDeleting(sessionId)
       || !Number.isSafeInteger(generation) || generation < 1) return false;
-    const id = `lead-nudge:${createHash("sha256").update(sessionId).update("\0").update(report.turnId).digest("hex")}`;
+    const id = `home-nudge:${createHash("sha256").update(sessionId).update("\0").update(report.turnId).digest("hex")}`;
     const body = `Harness lifecycle report (supervisor-generated, not session-authored): your own turn ${report.turnId} stopped abnormally at ${new Date(failedAt).toISOString()}, and you have not run since. Failure class: ${report.failureClass}. ${turnFailureBoundary(report)} Nothing was retried. Other sessions may have stopped at the same time, and their reports may have reached you inside the failed turn. Check every root session and your own work, then resume as normal. Do not replay interrupted work. No restart was requested.`;
     return this.#db.prepare(`INSERT OR IGNORE INTO messages
       (id, sender_id, target_id, relationship, delivery_mode, body, state, attempt_count, accepted_at, queued_at, child_exit_generation)

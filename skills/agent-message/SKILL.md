@@ -1,6 +1,6 @@
 ---
 name: agent-message
-description: Inspect the permitted family roster, send durable direct family messages, or (Lead only) create and resolve human attention requests.
+description: Inspect the permitted family roster, send durable direct family messages, or (Home only) create and resolve human attention requests.
 ---
 
 # Agent Message
@@ -13,24 +13,24 @@ Use `agent_message.send(target, body)` for direct delivery. A busy target receiv
 
 Messages never produce an automatic reply. Send only an intentional, useful result or request; do not echo acknowledgements or respond solely because another agent sent a message.
 
-## Starting a root session (Lead only)
+## Starting a root session (Home only)
 
 `agent_message.start_session(name, task, cwd)` opens a new root session named `name` in the absolute
-folder `cwd` and sends it `task` as a message from you, so it can reply to you. Only Lead may
+folder `cwd` and sends it `task` as a message from you, so it can reply to you. Only Home may
 call it; other sessions are refused.
 
-## Changing the default model (Lead only)
+## Changing the default model (Home only)
 
 When the user asks to change models, call `agent_message.set_default_model(model, apply=False)` to preview, then with `apply=True`. `model` is a short name such as `terra`, which picks the newest match from the default provider, or an exact id. It moves the default and every session following it, including sleeping and stopped ones, without waking them. Busy sessions move at the end of their turn. Deliberately picked models, and children inheriting them, stay. To switch back, run it again with the earlier model. Report the moved count and anything left in `pinned`, `pending`, or `otherModels`.
 
-## Human attention (Lead only)
+## Human attention (Home only)
 
-When the human must supply a decision, approval, or missing information, Lead can use
+When the human must supply a decision, approval, or missing information, Home can use
 `agent_message.request_attention(key, title, body, expires_in=86400)` alongside its normal
 conversation explanation. Use explicit, concise plain text (title ≤120 characters,
 body ≤1000) and a stable key (≤128 letters, digits, `.`, `_`, `:`, `-`). The expiry is
-1–604800 seconds. Only Lead may call it; other sessions are refused. Children send the need to their parent,
-and other rooms send it to Lead.
+1–604800 seconds. Only Home may call it; other sessions are refused. Children send the need to their parent,
+and other rooms send it to Home.
 
 Reuse the same key when retrying the same request. Creation is durable and idempotent:
 retries do not reopen resolved/expired requests or extend deadlines. A genuinely new

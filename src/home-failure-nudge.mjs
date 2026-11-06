@@ -1,26 +1,26 @@
-// Lead hears about every other root's failed turn; nobody hears about Lead's own.
+// Home hears about every other root's failed turn; nobody hears about Home's own.
 // After its turn fails, wake it once it has stayed quiet, waiting longer the
 // longer it keeps failing. The nudge only asks it to check; nothing is replayed.
-export const LEAD_NUDGE_DELAYS_MS = Object.freeze([5 * 60_000, 15 * 60_000, 30 * 60_000, 60 * 60_000]);
+export const HOME_NUDGE_DELAYS_MS = Object.freeze([5 * 60_000, 15 * 60_000, 30 * 60_000, 60 * 60_000]);
 // Failures closer together than this belong to one incident and keep backing off.
-export const LEAD_NUDGE_INCIDENT_GAP_MS = 2 * 60 * 60_000;
+export const HOME_NUDGE_INCIDENT_GAP_MS = 2 * 60 * 60_000;
 
-export class LeadFailureNudge {
-  constructor({ delaysMs = LEAD_NUDGE_DELAYS_MS, incidentGapMs = LEAD_NUDGE_INCIDENT_GAP_MS } = {}) {
+export class HomeFailureNudge {
+  constructor({ delaysMs = HOME_NUDGE_DELAYS_MS, incidentGapMs = HOME_NUDGE_INCIDENT_GAP_MS } = {}) {
     if (!Array.isArray(delaysMs) || delaysMs.length === 0 || delaysMs.some(delay => !Number.isSafeInteger(delay) || delay < 0)) {
-      throw new Error("Lead nudge delays must be non-negative integers");
+      throw new Error("Home nudge delays must be non-negative integers");
     }
     this.delaysMs = [...delaysMs]; this.incidentGapMs = incidentGapMs;
     this.pending = null; this.lastFailureAt = null; this.sentInIncident = 0; this.failedSinceSettled = false;
   }
 
   // A later failure while one is pending keeps the earlier due time.
-  failed(leadId, report, now) {
+  failed(homeId, report, now) {
     if (this.lastFailureAt === null || now - this.lastFailureAt > this.incidentGapMs) this.sentInIncident = 0;
     this.lastFailureAt = now; this.failedSinceSettled = true;
-    if (this.pending?.leadId === leadId) return;
+    if (this.pending?.homeId === homeId) return;
     const delay = this.delaysMs[Math.min(this.sentInIncident, this.delaysMs.length - 1)];
-    this.pending = { leadId, report, failedAt: now, dueAt: now + delay };
+    this.pending = { homeId, report, failedAt: now, dueAt: now + delay };
   }
 
   // A run reports its failure and waits for the receipt before it settles, so a

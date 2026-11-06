@@ -54,7 +54,7 @@ import { DEFAULT_PROMPT_PREFLIGHT_TIMEOUT_MS, PiSessionActor } from "./session-a
 import { normalizeSourceWatermark } from "./source-watermark.mjs";
 import { VisibleTranscriptReader } from "./visible-transcript-reader.mjs";
 import { HarnessStore } from "./store.mjs";
-import { LeadFailureNudge } from "./lead-failure-nudge.mjs";
+import { HomeFailureNudge } from "./home-failure-nudge.mjs";
 import { PythonRuntimeManager, runtimeVersions } from "./python-runtime.mjs";
 import { discoverSkills, discoverSkillsFromDirectory, materializeSkills, skillCatalogForSkills } from "./skills.mjs";
 import { defaultRootName, resolveRootTitle, firstCompletedTitleTurn } from "./root-title.mjs";
@@ -495,7 +495,7 @@ export class HarnessSupervisor {
     cronStoreFactory = (value) => new CronStore(value),
     cronSchedulerFactory = (options) => new CronScheduler(options),
     inboxPort = process.env.PI_HARNESS_INBOX_PORT ? Number(process.env.PI_HARNESS_INBOX_PORT) : null,
-    leadSessionPath = null,
+    homeSessionPath = null,
     inboxHost = process.env.PI_HARNESS_INBOX_HOST || "0.0.0.0",
     backgroundJobsDirectory = defaultBackgroundJobsDirectory(),
     scratchDirectory = process.env.PI_HARNESS_SCRATCH_ROOT || DEFAULT_SCRATCH_DIRECTORY,
@@ -503,16 +503,16 @@ export class HarnessSupervisor {
     titleGenerator = createRootTitleGenerator(),
     notificationIdleMs = NOTIFICATION_IDLE_MS,
     notificationTickMs = 1_000,
-    leadNudge = new LeadFailureNudge(),
+    homeNudge = new HomeFailureNudge(),
   }) {
     Object.assign(this, { socketPath, databasePath, pidPath, maxFrameBytes, messageRateCapacity, messageRateRefillPerSecond,
       pendingMessageLimit, maxMessageDeliveryAttempts, maxDepth, maxResidentActors, maxConcurrentStarts, actorInactivityMs,
       configuredChildModel, configuredChildThinkingLevel, piCommand, actorFactory, transcriptReader, processIdentityFactory, processTerminator,
       actorStartupTimeoutMs, actorPromptPreflightTimeoutMs, actorShutdownTimeoutMs, logger, maxLogBytes,
-      cronTickIntervalMs, cronMaxParallel, cronDefaultTimezone, cronStoreFactory, cronSchedulerFactory, inboxPort, inboxHost, leadSessionPath,
+      cronTickIntervalMs, cronMaxParallel, cronDefaultTimezone, cronStoreFactory, cronSchedulerFactory, inboxPort, inboxHost, homeSessionPath,
       backgroundJobsDirectory, scratchDirectory,
       backgroundCompletionIntervalMs, titleGenerator, notificationIdleMs, notificationTickMs });
-    this.#leadNudge = leadNudge;
+    this.#homeNudge = homeNudge;
     this.actorExtensionPath = path.resolve(actorExtensionPath);
     this.actorExtensionPaths = [...new Set(actorExtensionPaths.map((item) => path.resolve(item)))].filter((item) => item !== this.actorExtensionPath);
     this.skillsPath = path.resolve(skillsPath);
@@ -560,13 +560,13 @@ export class HarnessSupervisor {
     try { await preparePidPath(this.pidPath); await prepareSocketPath(this.socketPath); }
     catch (error) { await this.#releaseInstanceLock(); throw error; }
     this.#ownedSocketPath = ownedSocketPath(this.socketPath, this.#ownerToken); this.#store = new HarnessStore(this.databasePath);
-    // Lead (named in lead.json beside the database) hears when another root exits or a turn fails.
-    this.#leadSessionPath = this.leadSessionPath ?? path.join(path.dirname(this.databasePath), "lead.json");
-    this.#store.rootFailureObserver = () => this.#leadSessionId();
+    // Home (named in home.json beside the database) hears when another root exits or a turn fails.
+    this.#homeSessionPath = this.homeSessionPath ?? path.join(path.dirname(this.databasePath), "home.json");
+    this.#store.rootFailureObserver = () => this.#homeSessionId();
     try {
       this.#cronStore = this.cronStoreFactory(this.databasePath);
       this.#notifications = new NotificationStore(this.databasePath, { idleMs: this.notificationIdleMs });
-      this.#notifications.notifiesRoot = rootId => { const lead = this.#leadSessionId(); return !lead || rootId === lead; };
+      this.#notifications.notifiesRoot = rootId => { const home = this.#homeSessionId(); return !home || rootId === home; };
       this.#notifications.cancelDialogs();
       if (!this.sessionHistoryIndex) {
         try {
@@ -619,7 +619,7 @@ export class HarnessSupervisor {
       this.#backgroundCompletionMonitor.start();
       this.#notificationTimer = setInterval(() => {
         try {
-          this.#nudgeLeadIfDue();
+          this.#nudgeHomeIfDue();
           this.#retryChildExitMessages();
           this.#notifications.expire(); this.#recordCronNotifications();
           for (const id of this.#notifications.openFamilies()) this.#observeNotifications(id);
@@ -863,20 +863,20 @@ export class HarnessSupervisor {
 
   async #dispatchActor(state, type, params) {
     this.#requireActor(state);
-    // Lead is the one session that may open a new room; others suggest one to the user.
+    // Home is the one session that may open a new room; others suggest one to the user.
     if (type === "create_root") {
-      if (state.sessionId !== this.#leadSessionId()) throw requestFailure("create_root_forbidden", "only Lead can start a new root session");
+      if (state.sessionId !== this.#homeSessionId()) throw requestFailure("create_root_forbidden", "only Home can start a new root session");
       return this.#createRoot(params);
     }
     if (type === "set_default_inference") {
-      if (state.sessionId !== this.#leadSessionId()) throw requestFailure("default_inference_forbidden", "only Lead can change the default model");
+      if (state.sessionId !== this.#homeSessionId()) throw requestFailure("default_inference_forbidden", "only Home can change the default model");
       return this.#setDefaultInference(state, params);
     }
     if (["spawn_child", "send_message", "revive_child"].includes(type)) this.store.assertSessionAvailable(state.sessionId);
     if (type === "set_session_name") { const session = this.store.setSessionName(state.sessionId, params.name); this.#broadcastNavigator("name_changed"); return { session }; }
     if (type === "record_actor_turn_failure") {
       this.store.recordActorTurnFailure(state.sessionId, state.generation, params);
-      if (state.sessionId === this.#leadSessionId()) this.#leadNudge.failed(state.sessionId, params, Date.now());
+      if (state.sessionId === this.#homeSessionId()) this.#homeNudge.failed(state.sessionId, params, Date.now());
       this.#retryChildExitMessages();
       return { recorded: true };
     }
@@ -938,7 +938,7 @@ export class HarnessSupervisor {
         throw requestFailure("attention_forbidden", "human attention requests require the current root actor; children must route through their parent");
       }
       if (type === "request_attention" && !this.#notifications.notifiesRoot(state.sessionId)) {
-        throw requestFailure("attention_forbidden", "only Lead notifies the user; message Lead if the user is needed");
+        throw requestFailure("attention_forbidden", "only Home notifies the user; message Home if the user is needed");
       }
       return { notification: type === "request_attention" ? this.#notifications.request(state.sessionId, params, Date.now(), state.generation)
         : this.#notifications.resolveKey(state.sessionId, params.key) };
@@ -2529,7 +2529,7 @@ export class HarnessSupervisor {
     } else if (frame?.type === "agent_settled") {
       record.progressSummary = undefined;
       record.progressTurnId = null;
-      if (sessionId === this.#leadSessionId()) this.#leadNudge.settled();
+      if (sessionId === this.#homeSessionId()) this.#homeNudge.settled();
     }
     const retained = this.#boundedActorEvent(frame, record); let visibleRetained = retained;
     if (retained) {
@@ -2851,20 +2851,20 @@ export class HarnessSupervisor {
         liveSessionIds: this.store.liveSessionIds() });
     } catch { return []; }
   }
-  #leadSessionPath = null;
-  #leadSessionId() {
-    try { return JSON.parse(readFileSync(this.#leadSessionPath, "utf8")).sessionId ?? null; } catch { return null; }
+  #homeSessionPath = null;
+  #homeSessionId() {
+    try { return JSON.parse(readFileSync(this.#homeSessionPath, "utf8")).sessionId ?? null; } catch { return null; }
   }
-  #leadNudge = null;
-  #nudgeLeadIfDue(now = Date.now()) {
-    const due = this.#leadNudge.due(now);
+  #homeNudge = null;
+  #nudgeHomeIfDue(now = Date.now()) {
+    const due = this.#homeNudge.due(now);
     if (!due) return;
-    const lead = due.leadId === this.#leadSessionId() ? this.store.getSession(due.leadId) : null;
-    if (!lead) { this.#leadNudge.dropped(); return; }
-    // A running Lead settles that run first: success cancels the nudge, failure keeps it.
-    if (lead.activity === "working") return;
-    this.store.queueLeadFailureNudge(due.leadId, lead.actorGeneration, due.report, due.failedAt, now);
-    this.#leadNudge.sent();
+    const home = due.homeId === this.#homeSessionId() ? this.store.getSession(due.homeId) : null;
+    if (!home) { this.#homeNudge.dropped(); return; }
+    // A running Home settles that run first: success cancels the nudge, failure keeps it.
+    if (home.activity === "working") return;
+    this.store.queueHomeFailureNudge(due.homeId, home.actorGeneration, due.report, due.failedAt, now);
+    this.#homeNudge.sent();
   }
   #childExitCursor = "";
   #retryChildExitMessages() {

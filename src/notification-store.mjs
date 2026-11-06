@@ -191,7 +191,7 @@ export class NotificationStore {
     });
   }
   openFamilies() { return this.#db.prepare("SELECT root_id FROM notification_families WHERE episode_id IS NOT NULL AND closed_at IS NULL").all().map(r => r.root_id); }
-  // Set by the supervisor: only Lead's family notifies the user once Lead is configured.
+  // Set by the supervisor: only Home's family notifies the user once Home is configured.
   notifiesRoot = () => true;
   #create({ key, rootId, sessionId, episodeId = null, kind, title, body, expiresAt, source }, now) {
     if (!this.notifiesRoot(rootId)) return null;

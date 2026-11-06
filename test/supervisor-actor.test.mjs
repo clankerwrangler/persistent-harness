@@ -17,7 +17,7 @@ import { actorInputCustomPayload, ACTOR_INPUT_COMMAND } from "../src/protocol.mj
 import { createRootTitleGenerator } from "../src/root-title-generator.mjs";
 import { PiSessionActor } from "../src/session-actor.mjs";
 import { HarnessSupervisor } from "./fixtures/isolated-supervisor.mjs";
-import { LeadFailureNudge } from "../src/lead-failure-nudge.mjs";
+import { HomeFailureNudge } from "../src/home-failure-nudge.mjs";
 import { discoverSkills, skillCatalogForSkills } from "../src/skills.mjs";
 import { sessionSidecarPaths } from "../src/session-paths.mjs";
 
@@ -2393,138 +2393,138 @@ test("a revived actor that registers during startup receives messages a previous
   assert.equal(actor.deliveries.length, 1, "the restart redelivers once");
 });
 
-test("a root's failed turn reaches Lead, named in lead.json, as a lifecycle report", async (t) => {
-  const root = await mkdtemp(path.join(os.tmpdir(), "harness-root-failure-lead-"));
+test("a root's failed turn reaches Home, named in home.json, as a lifecycle report", async (t) => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "harness-root-failure-home-"));
   const skillsPath = path.join(root, "skills"); await mkdir(skillsPath);
   const actors = new Map();
-  await writeFile(path.join(root, "lead.json"), JSON.stringify({ sessionId: "lead" }));
+  await writeFile(path.join(root, "home.json"), JSON.stringify({ sessionId: "home" }));
   const supervisor = new HarnessSupervisor({ socketPath: path.join(root, "run/sock"), databasePath: path.join(root, "store.sqlite"),
     pidPath: path.join(root, "run/pid"), skillsPath, actorInactivityMs: 0, notificationTickMs: 20, runtimeProvisioner: async () => ({}),
-    leadSessionPath: path.join(root, "lead.json"),
+    homeSessionPath: path.join(root, "home.json"),
     actorFactory: options => { const actor = new EarlyRegisteringActor(options); actors.set(options.session.sessionId, actor); return actor; },
     processIdentityFactory: async pid => ({ version: 1, pid, processGroup: pid, startTime: "fake", ownerToken: "fake" }),
     processTerminator: async () => ({ terminated: true }) });
   await supervisor.start(); t.after(async () => { await supervisor.stop(); await rm(root, { recursive: true, force: true }); });
-  for (const id of ["lead", "room"]) {
+  for (const id of ["home", "room"]) {
     await writeFile(path.join(root, `${id}.jsonl`), JSON.stringify({ type: "session", version: 3, id, cwd: root, timestamp: new Date().toISOString() }) + "\n");
     supervisor.store.createRoot({ sessionId: id, sessionFile: path.join(root, `${id}.jsonl`), cwd: root, name: id, actorToken: `${id}-token`, launch: {} });
     supervisor.store.markActorLifecycle(id, 1, "passivated");
   }
   const client = new HarnessClient({ requestTimeoutMs: 120_000, socketPath: supervisor.socketPath, heartbeatMs: 0 });
-  await client.start({ registrationType: "register_client", clientInstanceId: "root-failure-lead" }); t.after(() => client.stop());
+  await client.start({ registrationType: "register_client", clientInstanceId: "root-failure-home" }); t.after(() => client.stop());
   await client.request("revive_session", { sessionId: "room" });
   const room = await eventually(() => actors.get("room")); await eventually(() => room.isRunning);
   await room.control.request("record_actor_turn_failure", { version: 1, turnId: "room-turn", failureClass: "request_preparation", dispatchBoundary: "provider_dispatch_unknown" });
-  const lead = await eventually(() => actors.get("lead"), 120_000);
-  const report = await eventually(() => lead.deliveries[0], 120_000);
+  const home = await eventually(() => actors.get("home"), 120_000);
+  const report = await eventually(() => home.deliveries[0], 120_000);
   assert.equal(report.senderId, "room"); assert.equal(report.senderName, "Harness lifecycle"); assert.equal(report.relationship, "sibling");
   assert.match(report.body, /root session room, turn room-turn, stopped abnormally/);
   assert.equal(room.deliveries.length, 0, "the failed root is not told about itself");
 });
 
-async function leadNudgeFixture(t, name, leadNudge) {
+async function homeNudgeFixture(t, name, homeNudge) {
   const root = await mkdtemp(path.join(os.tmpdir(), `harness-${name}-`));
   const skillsPath = path.join(root, "skills"); await mkdir(skillsPath);
   const actors = new Map();
-  await writeFile(path.join(root, "lead.json"), JSON.stringify({ sessionId: "lead" }));
+  await writeFile(path.join(root, "home.json"), JSON.stringify({ sessionId: "home" }));
   const supervisor = new HarnessSupervisor({ socketPath: path.join(root, "run/sock"), databasePath: path.join(root, "store.sqlite"),
     pidPath: path.join(root, "run/pid"), skillsPath, actorInactivityMs: 0, notificationTickMs: 20, runtimeProvisioner: async () => ({}),
-    leadSessionPath: path.join(root, "lead.json"), leadNudge,
+    homeSessionPath: path.join(root, "home.json"), homeNudge,
     actorFactory: options => { const actor = new EarlyRegisteringActor(options); actors.set(options.session.sessionId, actor); return actor; },
     processIdentityFactory: async pid => ({ version: 1, pid, processGroup: pid, startTime: "fake", ownerToken: "fake" }),
     processTerminator: async () => ({ terminated: true }) });
   await supervisor.start(); t.after(async () => { await supervisor.stop(); await rm(root, { recursive: true, force: true }); });
-  for (const id of ["lead", "room"]) {
+  for (const id of ["home", "room"]) {
     await writeFile(path.join(root, `${id}.jsonl`), JSON.stringify({ type: "session", version: 3, id, cwd: root, timestamp: new Date().toISOString() }) + "\n");
     supervisor.store.createRoot({ sessionId: id, sessionFile: path.join(root, `${id}.jsonl`), cwd: root, name: id, actorToken: `${id}-token`, launch: {} });
     supervisor.store.markActorLifecycle(id, 1, "passivated");
   }
   const client = new HarnessClient({ requestTimeoutMs: 120_000, socketPath: supervisor.socketPath, heartbeatMs: 0 });
   await client.start({ registrationType: "register_client", clientInstanceId: name }); t.after(() => client.stop());
-  await client.request("revive_session", { sessionId: "lead" });
-  const lead = await eventually(() => actors.get("lead")); await eventually(() => lead.isRunning);
-  return { supervisor, actors, lead, client };
+  await client.request("revive_session", { sessionId: "home" });
+  const home = await eventually(() => actors.get("home")); await eventually(() => home.isRunning);
+  return { supervisor, actors, home, client };
 }
 
-const leadTurnFailure = (turnId) => ({ version: 1, turnId, failureClass: "turn_failed", dispatchBoundary: "provider_dispatch_unknown" });
+const homeTurnFailure = (turnId) => ({ version: 1, turnId, failureClass: "turn_failed", dispatchBoundary: "provider_dispatch_unknown" });
 
-test("Lead's own failed turn wakes it later with a check-everything lifecycle report", async (t) => {
-  const { supervisor, actors, lead } = await leadNudgeFixture(t, "lead-own-failure", new LeadFailureNudge({ delaysMs: [0] }));
-  await lead.control.request("record_actor_turn_failure", leadTurnFailure("lead-turn"));
-  const report = await eventually(() => lead.deliveries[0], 120_000);
-  assert.equal(report.senderId, "lead"); assert.equal(report.senderName, "Harness lifecycle"); assert.equal(report.relationship, "sibling");
-  assert.match(report.body, /your own turn lead-turn stopped abnormally/);
+test("Home's own failed turn wakes it later with a check-everything lifecycle report", async (t) => {
+  const { supervisor, actors, home } = await homeNudgeFixture(t, "home-own-failure", new HomeFailureNudge({ delaysMs: [0] }));
+  await home.control.request("record_actor_turn_failure", homeTurnFailure("home-turn"));
+  const report = await eventually(() => home.deliveries[0], 120_000);
+  assert.equal(report.senderId, "home"); assert.equal(report.senderName, "Harness lifecycle"); assert.equal(report.relationship, "sibling");
+  assert.match(report.body, /your own turn home-turn stopped abnormally/);
   assert.match(report.body, /Check every root session and your own work, then resume as normal\. Do not replay interrupted work\./);
-  await lead.control.request("ack_message", { messageId: report.messageId });
+  await home.control.request("ack_message", { messageId: report.messageId });
   assert.equal(supervisor.store.getMessage(report.messageId).state, "acknowledged");
   assert.equal(actors.has("room"), false, "no other session is woken");
 });
 
-test("Lead's failed run keeps its nudge through its settle; a later clean run cancels it", async (t) => {
-  const nudge = new LeadFailureNudge({ delaysMs: [3_600_000] });
-  const { lead } = await leadNudgeFixture(t, "lead-nudge-cancel", nudge);
-  lead.emit("event", { type: "agent_start" });
-  await lead.control.request("record_actor_turn_failure", leadTurnFailure("first"));
-  lead.emit("event", { type: "agent_settled" });
+test("Home's failed run keeps its nudge through its settle; a later clean run cancels it", async (t) => {
+  const nudge = new HomeFailureNudge({ delaysMs: [3_600_000] });
+  const { home } = await homeNudgeFixture(t, "home-nudge-cancel", nudge);
+  home.emit("event", { type: "agent_start" });
+  await home.control.request("record_actor_turn_failure", homeTurnFailure("first"));
+  home.emit("event", { type: "agent_settled" });
   await eventually(() => nudge.failedSinceSettled === false);
   assert.equal(nudge.pending?.report.turnId, "first");
-  lead.emit("event", { type: "agent_start" }); lead.emit("event", { type: "agent_settled" });
+  home.emit("event", { type: "agent_start" }); home.emit("event", { type: "agent_settled" });
   await eventually(() => nudge.pending === null);
-  assert.equal(lead.deliveries.length, 0);
+  assert.equal(home.deliveries.length, 0);
 });
 
-test("a nudge that falls due while Lead is working waits for that run to settle", async (t) => {
-  const nudge = new LeadFailureNudge({ delaysMs: [0] });
-  const { supervisor, lead } = await leadNudgeFixture(t, "lead-nudge-working", nudge);
-  lead.emit("event", { type: "agent_start" });
-  await eventually(() => supervisor.store.getSession("lead").activity === "working");
-  await lead.control.request("record_actor_turn_failure", leadTurnFailure("while-working"));
+test("a nudge that falls due while Home is working waits for that run to settle", async (t) => {
+  const nudge = new HomeFailureNudge({ delaysMs: [0] });
+  const { supervisor, home } = await homeNudgeFixture(t, "home-nudge-working", nudge);
+  home.emit("event", { type: "agent_start" });
+  await eventually(() => supervisor.store.getSession("home").activity === "working");
+  await home.control.request("record_actor_turn_failure", homeTurnFailure("while-working"));
   await new Promise(resolve => setTimeout(resolve, 200));
-  assert.equal(lead.deliveries.length, 0, "no nudge while it runs");
+  assert.equal(home.deliveries.length, 0, "no nudge while it runs");
   assert.equal(nudge.pending?.report.turnId, "while-working");
-  lead.emit("event", { type: "agent_settled" });
-  const report = await eventually(() => lead.deliveries[0], 120_000);
+  home.emit("event", { type: "agent_settled" });
+  const report = await eventually(() => home.deliveries[0], 120_000);
   assert.match(report.body, /your own turn while-working stopped abnormally/);
 });
 
-test("a root's failure does not arm Lead's own nudge", async (t) => {
-  const nudge = new LeadFailureNudge({ delaysMs: [3_600_000] });
-  const { lead, actors, client } = await leadNudgeFixture(t, "lead-nudge-room", nudge);
+test("a root's failure does not arm Home's own nudge", async (t) => {
+  const nudge = new HomeFailureNudge({ delaysMs: [3_600_000] });
+  const { home, actors, client } = await homeNudgeFixture(t, "home-nudge-room", nudge);
   await client.request("revive_session", { sessionId: "room" });
   const room = await eventually(() => actors.get("room")); await eventually(() => room.isRunning);
-  await room.control.request("record_actor_turn_failure", leadTurnFailure("room-turn"));
-  const report = await eventually(() => lead.deliveries[0], 120_000);
+  await room.control.request("record_actor_turn_failure", homeTurnFailure("room-turn"));
+  const report = await eventually(() => home.deliveries[0], 120_000);
   assert.equal(report.senderId, "room");
   assert.equal(nudge.pending, null);
 });
 
-test("only Lead, named in lead.json, may start a new root session", async (t) => {
-  const root = await mkdtemp(path.join(os.tmpdir(), "harness-lead-create-root-"));
+test("only Home, named in home.json, may start a new root session", async (t) => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "harness-home-create-root-"));
   const skillsPath = path.join(root, "skills"); await mkdir(skillsPath);
   const actors = new Map();
-  await writeFile(path.join(root, "lead.json"), JSON.stringify({ sessionId: "lead" }));
+  await writeFile(path.join(root, "home.json"), JSON.stringify({ sessionId: "home" }));
   const supervisor = new HarnessSupervisor({ socketPath: path.join(root, "run/sock"), databasePath: path.join(root, "store.sqlite"),
     pidPath: path.join(root, "run/pid"), skillsPath, actorInactivityMs: 0, runtimeProvisioner: async () => ({}),
-    leadSessionPath: path.join(root, "lead.json"),
+    homeSessionPath: path.join(root, "home.json"),
     actorFactory: options => { const actor = new EarlyRegisteringActor(options); actors.set(options.session.sessionId, actor); return actor; },
     processIdentityFactory: async pid => ({ version: 1, pid, processGroup: pid, startTime: "fake", ownerToken: "fake" }),
     processTerminator: async () => ({ terminated: true }) });
   await supervisor.start(); t.after(async () => { await supervisor.stop(); await rm(root, { recursive: true, force: true }); });
-  for (const id of ["lead", "room"]) {
+  for (const id of ["home", "room"]) {
     await writeFile(path.join(root, `${id}.jsonl`), JSON.stringify({ type: "session", version: 3, id, cwd: root, timestamp: new Date().toISOString() }) + "\n");
     supervisor.store.createRoot({ sessionId: id, sessionFile: path.join(root, `${id}.jsonl`), cwd: root, name: id, actorToken: `${id}-token`, launch: {} });
     supervisor.store.markActorLifecycle(id, 1, "passivated");
   }
   const client = new HarnessClient({ requestTimeoutMs: 120_000, socketPath: supervisor.socketPath, heartbeatMs: 0 });
-  await client.start({ registrationType: "register_client", clientInstanceId: "lead-create-root" }); t.after(() => client.stop());
+  await client.start({ registrationType: "register_client", clientInstanceId: "home-create-root" }); t.after(() => client.stop());
   const request = { cwd: root, repositoryRoot: null, provider: null, model: null, thinkingLevel: null };
   await client.request("revive_session", { sessionId: "room" });
   const room = await eventually(() => actors.get("room")); await eventually(() => room.isRunning);
-  await assert.rejects(room.control.request("create_root", { ...request, name: "From a room" }), /only Lead can start a new root session/);
-  await client.request("revive_session", { sessionId: "lead" });
-  const lead = await eventually(() => actors.get("lead")); await eventually(() => lead.isRunning);
-  const { admission } = await lead.control.request("create_root", { ...request, name: "Started by Lead" });
+  await assert.rejects(room.control.request("create_root", { ...request, name: "From a room" }), /only Home can start a new root session/);
+  await client.request("revive_session", { sessionId: "home" });
+  const home = await eventually(() => actors.get("home")); await eventually(() => home.isRunning);
+  const { admission } = await home.control.request("create_root", { ...request, name: "Started by Home" });
   const created = supervisor.store.getSession(admission.sessionId);
-  assert.equal(created.kind, "root"); assert.equal(created.depth, 0); assert.equal(created.name, "Started by Lead");
+  assert.equal(created.kind, "root"); assert.equal(created.depth, 0); assert.equal(created.name, "Started by Home");
   assert.equal(supervisor.store.listSessions().filter(session => session.kind === "root").length, 3, "the refused request created nothing");
 });

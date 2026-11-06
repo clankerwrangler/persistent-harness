@@ -17,12 +17,12 @@ def send(target: str, body: str) -> SkillResult:
 
 
 def set_default_model(model: str, apply: bool = False) -> SkillResult:
-    """Lead only: preview, or apply, a new default model for it and every session following it."""
+    """Home only: preview, or apply, a new default model for it and every session following it."""
     return SkillResult(host_request("agent_message.set_default_model", {"model": model, "apply": apply}))
 
 
 def start_session(name: str, task: str, cwd: str) -> SkillResult:
-    """Lead only: open a new root session and send it its task as a message from Lead."""
+    """Home only: open a new root session and send it its task as a message from Home."""
     result = host_request("agent_message.start_session", {"name": name, "task": task, "cwd": cwd})
     return SkillResult(result, {"application/vnd.persistent-harness.message+json": result["message"]})
 

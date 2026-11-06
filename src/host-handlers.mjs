@@ -1128,7 +1128,7 @@ export function createHostHandlers({ cwd, scratch = null, getClient, getContext 
       const cwd = requireString(value.cwd, "cwd", { maxBytes: 4096 });
       if (!path.isAbsolute(cwd)) throw new Error("cwd must be an absolute path");
       const { admission } = await client.request("create_root", { cwd, repositoryRoot: null, name, provider: null, model: null, thinkingLevel: null });
-      // The task arrives as an ordinary sister message, so the room can reply to Lead.
+      // The task arrives as an ordinary sister message, so the room can reply to Home.
       const sent = await client.request("send_message", { target: admission.sessionId, body: task, deliveryMode: "auto" });
       await recordAgentMessage(sent.message);
       return { sessionId: admission.sessionId, shortId: admission.shortId, name: admission.name, message: sent.message };
