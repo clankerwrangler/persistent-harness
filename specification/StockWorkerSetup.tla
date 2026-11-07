@@ -1,6 +1,6 @@
 ------------------------- MODULE StockWorkerSetup -------------------------
 \* Sources:
-\*   test/e2e-stock-worker.test.mjs sha256:a2fdc742831a12e514fec75bf7bf688407c87c1319623d65be82ca96117ca0c2
+\*   test/e2e-stock-worker.test.mjs sha256:aaecc80d2d59ecadc8eecd955f2b0196ed61192826d52f2eb6ba68530739d66d
 EXTENDS Naturals
 VARIABLES phase, owned, aborted, active, lateStart
 vars == <<phase, owned, aborted, active, lateStart>>

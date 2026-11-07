@@ -68,6 +68,10 @@ function safeProviderError(raw, code) {
     errorShape: diagnosticShape(error), messageShape: diagnosticShape(message) });
 }
 const clone = (value) => JSON.parse(JSON.stringify(value));
+function cloneBody(value) {
+  const serialized = JSON.stringify(value);
+  return { body: JSON.parse(serialized), fullBodyBytes: Buffer.byteLength(serialized) };
+}
 const nonempty = (value) => typeof value === "string" && value.length > 0;
 class AdapterError extends Error { constructor(code) { super(code); this.code = code; } }
 function fail(code) { throw new AdapterError(code); }
@@ -371,10 +375,10 @@ export function createNativeProviderAdapter({ api, responsesApi, modelRuntime, t
     const signal = controller.signal;
     const requestId = randomUUID(), attempts = [];
     let attempt, attemptInbox, nativeProviderError, providerTools = false;
-    const beginAttempt = (transport) => {
+    const beginAttempt = (transport, fullBodyBytes) => {
       nativeProviderError = undefined;
       attempt = { attemptId: randomUUID(), attemptNumber: attempts.length + 1, transport,
-        sent: false, dispatchedBodyBytes: 0, created: false, observedCalls: [], providerTools, retired: false, fenced: false,
+        sent: false, dispatchedBodyBytes: 0, fullBodyBytes, created: false, observedCalls: [], providerTools, retired: false, fenced: false,
         possibleUsage: false, outcome: "not_sent" };
       attempts.push(attempt);
     };
@@ -416,7 +420,7 @@ export function createNativeProviderAdapter({ api, responsesApi, modelRuntime, t
         headers = wireHeaders(headers);
         const { body, grammar, definitions } = buildBody(api, responsesApi, effectiveModel, context, options);
         const changed = options.onPayload ? await wait(options.onPayload(body, effectiveModel), signal) : undefined;
-        const full = clone(changed === undefined ? body : changed);
+        const { body: full, fullBodyBytes } = cloneBody(changed === undefined ? body : changed);
         if (full.stream !== true || !Array.isArray(full.input)) fail("invalid_stream_payload");
         if (full.previous_response_id !== undefined) fail("use_previousResponseId_option_with_full_context");
         const opted = new Map();
@@ -588,10 +592,11 @@ export function createNativeProviderAdapter({ api, responsesApi, modelRuntime, t
           });
         };
         const sseRequest = async () => {
-          disconnect(); retire(); beginAttempt("sse");
+          disconnect(); retire(); beginAttempt("sse", fullBodyBytes);
           attempt.sent = true; attempt.possibleUsage = true; attempt.outcome = "unknown";
           const serialized = JSON.stringify(full);
           attempt.dispatchedBodyBytes = Buffer.byteLength(serialized);
+          attempt.dispatchedBodyMode = "full";
           const response = await wait((options.fetch ?? transportOptions.fetch ?? globalThis.fetch)(url, {
             method: "POST", headers, body: serialized, signal,
           }), signal);
@@ -608,7 +613,7 @@ export function createNativeProviderAdapter({ api, responsesApi, modelRuntime, t
           const identity = createHash("sha256").update(JSON.stringify([url, model.provider, model.id, options.sessionId, headers])).digest("hex");
           
           for (let retry = 0; retry < 2; retry++) {
-            beginAttempt("websocket");
+            beginAttempt("websocket", fullBodyBytes);
             if (!connection?.inbox.healthy() || connection.identity !== identity || Date.now() - connection.createdAt >= limits.maxSocketAgeMs || !options.sessionId || options.cacheRetention === "none") disconnect();
             clearTimeout(connection?.idleTimer);
             try {
@@ -640,6 +645,7 @@ export function createNativeProviderAdapter({ api, responsesApi, modelRuntime, t
               attempt.sent = true; attempt.possibleUsage = true; attempt.outcome = "unknown";
               const serialized = JSON.stringify({ ...request, type: "response.create" });
               attempt.dispatchedBodyBytes = Buffer.byteLength(serialized);
+              attempt.dispatchedBodyMode = request === full ? "full" : "delta";
               entry.inbox.socket.send(serialized);
               // Only observed() may terminate a response: an old terminal frame can
               // be delayed until this request without ending its new generation.

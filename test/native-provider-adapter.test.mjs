@@ -103,6 +103,8 @@ test("SSE loopback: raw complete call precedes terminal, headers/hooks, reasonin
   }
   const result = await stream.result();
   assert.equal(result.stopReason, "toolUse"); assert.equal(result.responseId, "resp_original"); assert.equal(onResponse, true);
+  assert.equal(result.nativeTransport.dispatchedBodyMode, "full");
+  assert.equal(result.nativeTransport.attempts[0].dispatchedBodyMode, "full");
   assert.equal(headers["x-choice"], "transformed"); assert.equal(headers["x-auth-fixture"], undefined);
   assert.equal(requestBody.max_output_tokens, 100); assert.equal(requestBody.reasoning.effort, "high"); assert.equal(requestBody.temperature, 0.2);
   assert.equal(requestBody.instructions, "fixture system");
@@ -303,7 +305,10 @@ test("before-send failure is not UNKNOWN; retired old callbacks cannot admit lat
   const before = await b.stream(model, context, { transport: "websocket" }).result();
   assert.equal(before.nativeTransport.sent, false); assert.equal(before.nativeTransport.outcome, "not_sent");
   assert.equal(before.nativeTransport.dispatchedBodyBytes, 0); assert.equal(before.nativeTransport.websocketClose, undefined);
+  assert.equal(Object.hasOwn(before.nativeTransport, "dispatchedBodyMode"), false);
+  assert.equal(Object.hasOwn(before.nativeTransport.attempts[0], "dispatchedBodyMode"), false);
   assert.equal(before.nativeTransport.possibleUsage, false); assert.equal(before.nativeTransport.retired, true);
+  assertFullBodyBytes(before, before.nativeTransport.fullBodyBytes);
 });
 
 test("SSE unknown reports provider-side tools; explicit provider failure retains usage without private errors", async (t) => {
@@ -395,6 +400,7 @@ test("public hook errors never become a private error-payload log", async (t) =>
   const a = await adapter(t);
   const result = await a.stream(model, context, { transport: "sse", onPayload() { throw new Error("privatepayloadwithoutspaces"); } }).result();
   assert.equal(result.errorMessage, "provider_request_failed");
+  assert.equal(result.nativeTransport, undefined, "payload-hook failure precedes any transport attempt");
 });
 
 test("explicit rejection retry reports each retired attempt with a distinct ID", { timeout: 180000 }, async (t) => {
@@ -496,6 +502,8 @@ for (const [name, stale] of Object.entries({
   const first = await collect(a.stream(model, context, options));
   const originalEvent = first.events.find((event) => a.nativeCompletion(event));
   assert.ok(originalEvent); assert.equal(first.message.nativeTransport.fenced, true);
+  const firstFullBytes = first.message.nativeTransport.fullBodyBytes;
+  assert.equal(first.message.nativeTransport.dispatchedBodyMode, "full");
   const next = { ...context, messages: [...context.messages, first.message, { role: "user", content: "second request", timestamp: 2 }] };
   const secondStream = a.stream(model, next, options), secondEvents = [];
   const collecting = (async () => { for await (const event of secondStream) secondEvents.push(event); })();
@@ -508,6 +516,12 @@ for (const [name, stale] of Object.entries({
   await collecting;
   const second = await secondStream.result();
   assert.equal(second.stopReason, "toolUse"); assert.equal(second.responseId, "r-second");
+  assert.equal(second.nativeTransport.dispatchedBodyMode, "delta");
+  assert.equal(second.nativeTransport.attempts[0].dispatchedBodyMode, "delta");
+  assert.equal(first.message.nativeTransport.dispatchedBodyMode, "full");
+  assertFullBodyBytes(second, second.nativeTransport.fullBodyBytes);
+  assert.ok(second.nativeTransport.fullBodyBytes > firstFullBytes);
+  assert.equal(first.message.nativeTransport.fullBodyBytes, firstFullBytes);
   const calls = secondEvents.filter((event) => event.type === "toolcall_end"); assert.equal(calls.length, 1);
   const proof = a.nativeCompletion(calls[0]); assert.equal(proof.responseId, "r-second"); assert.equal(proof.itemId, "i-second");
   assert.equal(proof.callId, "c-second"); assert.deepEqual(proof.call.arguments, { code: "second" });
@@ -1217,6 +1231,12 @@ function closeFrame(socket, details = {}) {
 }
 
 const multibyteContext = { ...context, messages: [{ role: "user", content: "漢字 é 😀", timestamp: 1 }] };
+function assertFullBodyBytes(message, expected) {
+  const { version, requestId, attempts, ...latest } = message.nativeTransport;
+  assert.equal(version, 1); assert.ok(requestId); assert.deepEqual(latest, attempts.at(-1));
+  assert.ok(Number.isSafeInteger(expected) && expected > 0);
+  for (const attempt of attempts) assert.equal(attempt.fullBodyBytes, expected);
+}
 
 test("WebSocket failure close diagnostics allow only bounded codes, booleans, and generic reasons", async (t) => {
   const cases = [
@@ -1245,6 +1265,8 @@ test("WebSocket failure close diagnostics allow only bounded codes, booleans, an
     assert.deepEqual(message.nativeTransport.websocketClose, expected);
     assert.deepEqual(message.nativeTransport.attempts[0].websocketClose, expected);
     assert.equal(message.nativeTransport.dispatchedBodyBytes, Buffer.byteLength(sent));
+    assert.equal(message.nativeTransport.dispatchedBodyMode, "full");
+    assert.equal(message.nativeTransport.attempts[0].dispatchedBodyMode, "full");
     assert.ok(Buffer.byteLength(sent) > sent.length); assert.ok(Object.isFrozen(message.nativeTransport.websocketClose));
     assert.equal(events.some(event => a.nativeCompletion(event)), false);
     assert.equal(JSON.stringify(message).includes("PRIVATE_"), false);
@@ -1274,7 +1296,10 @@ test("failed cached WebSocket counts the selected delta string, not the full tra
   assert.equal(wireSerializations, 1, "the selected request is serialized once");
   assert.equal(wire.requests[1].previous_response_id, "byte-baseline"); assert.equal(wire.requests[1].input.length, 1);
   assert.equal(first.nativeTransport.dispatchedBodyBytes, Buffer.byteLength(sent[0]));
+  assert.equal(first.nativeTransport.dispatchedBodyMode, "full");
   assert.equal(failed.nativeTransport.dispatchedBodyBytes, Buffer.byteLength(sent[1]));
+  assert.equal(failed.nativeTransport.dispatchedBodyMode, "delta");
+  assert.equal(failed.nativeTransport.attempts[0].dispatchedBodyMode, "delta");
   assert.ok(Buffer.byteLength(sent[1]) > sent[1].length);
 });
 
@@ -1300,6 +1325,10 @@ test("retry attempts keep distinct delta/full bytes and close diagnostics", asyn
   assert.notEqual(rejected.attemptId, unknown.attemptId);
   assert.equal(wire.requests[1].previous_response_id, "retry-baseline"); assert.equal(wire.requests[2].previous_response_id, undefined);
   assert.equal(rejected.dispatchedBodyBytes, Buffer.byteLength(sent[1])); assert.equal(unknown.dispatchedBodyBytes, Buffer.byteLength(sent[2]));
+  assert.equal(rejected.dispatchedBodyMode, "delta"); assert.equal(unknown.dispatchedBodyMode, "full");
+  assert.equal(failed.nativeTransport.dispatchedBodyMode, "full");
+  const { type, ...admitted } = wire.requests[2];
+  assert.equal(type, "response.create"); assertFullBodyBytes(failed, Buffer.byteLength(JSON.stringify(admitted)));
   assert.equal(rejected.websocketClose.code, 1008); assert.equal(unknown.websocketClose.code, 1011);
   assert.equal(failed.nativeTransport.websocketClose.code, 1011); assert.equal(failed.nativeProviderError, undefined);
 });
@@ -1316,13 +1345,18 @@ for (const mode of ["websocket", "auto"]) test(`pre-open close keeps zero WS byt
   const failed = await a.stream(model, multibyteContext, { transport: mode }).result();
   const before = failed.nativeTransport.attempts[0];
   assert.equal(sends, 0); assert.equal(before.sent, false); assert.equal(before.dispatchedBodyBytes, 0);
+  assert.equal(Object.hasOwn(before, "dispatchedBodyMode"), false);
   assert.equal(before.outcome, "not_sent"); assert.equal(before.possibleUsage, false); assert.equal(before.fenced, true);
   assert.equal(before.websocketClose.code, 1009);
+  assertFullBodyBytes(failed, before.fullBodyBytes);
   if (mode === "websocket") {
     assert.equal(failed.errorMessage, "websocket_closed"); assert.equal(fetched, undefined);
   } else {
     assert.equal(failed.errorMessage, "provider_http_503"); assert.equal(failed.nativeTransport.attempts.length, 2);
     assert.equal(failed.nativeTransport.dispatchedBodyBytes, Buffer.byteLength(fetched));
+    assertFullBodyBytes(failed, Buffer.byteLength(fetched));
+    assert.equal(failed.nativeTransport.dispatchedBodyMode, "full");
+    assert.equal(failed.nativeTransport.attempts[1].dispatchedBodyMode, "full");
     assert.equal(failed.nativeTransport.websocketClose, undefined);
   }
 });
@@ -1341,8 +1375,11 @@ test("SSE failure bytes observe the exact UTF-8 fetch string without another ser
   } finally { JSON.stringify = stringify; }
   assert.equal(failed.errorMessage, "provider_request_failed"); assert.equal(failed.nativeTransport.outcome, "unknown");
   assert.equal(serializations, 2, "one admission clone and one dispatched serialization");
+  assertFullBodyBytes(failed, Buffer.byteLength(sent));
   assert.equal(failed.nativeTransport.dispatchedBodyBytes, Buffer.byteLength(sent));
   assert.equal(failed.nativeTransport.attempts[0].dispatchedBodyBytes, Buffer.byteLength(sent));
+  assert.equal(failed.nativeTransport.dispatchedBodyMode, "full");
+  assert.equal(failed.nativeTransport.attempts[0].dispatchedBodyMode, "full");
   assert.ok(Buffer.byteLength(sent) > sent.length); assert.equal(failed.nativeTransport.websocketClose, undefined);
   assert.equal(JSON.stringify(failed).includes("PRIVATE_FETCH_FAILURE"), false);
 });
@@ -1374,4 +1411,180 @@ test("idle and disposed prior close callbacks cannot mutate or contaminate later
   const final = await a.stream(model, context, options).result();
   assert.equal(final.stopReason, "stop"); assert.equal(final.nativeTransport.websocketClose, undefined);
   assert.equal(JSON.stringify(failed.nativeTransport), frozenFailed); assert.equal(JSON.stringify(first.nativeTransport), frozenFirst);
+});
+
+
+test("dispatch mode follows the selected body for cached, forced and replayed image history", async (t) => {
+  const sent = [];
+  const wire = memorySocket((socket, number, _request, text) => {
+    sent.push(text); socket.emit(complete(`mode-${number}`));
+  });
+  const a = await adapter(t, { WebSocket: wire.WebSocket });
+  const options = { transport: "websocket-cached", sessionId: "selected-mode" };
+  const image = { type: "image", mimeType: "image/png", data: "PRIVATE_IMAGE_DATA" };
+  const original = { ...context, messages: [{ role: "user", content: [{ type: "text", text: "PRIVATE_PROMPT" }, image], timestamp: 1 }] };
+  let next = original;
+  for (const [index, settings, expected] of [
+    [0, {}, "full"], [1, {}, "delta"], [2, { transport: "websocket" }, "full"],
+    [3, { previousResponseId: "not-the-cached-response" }, "full"],
+    [4, { onPayload(body) { body.temperature = 0.25; } }, "full"],
+  ]) {
+    const result = await a.stream(model, next, { ...options, ...settings }).result();
+    assert.equal(result.stopReason, "stop"); assert.equal(result.nativeTransport.version, 1);
+    const report = result.nativeTransport;
+    assert.equal(report.dispatchedBodyMode, expected); assert.equal(report.attempts[0].dispatchedBodyMode, expected);
+    assert.equal(report.dispatchedBodyBytes, Buffer.byteLength(sent[index]));
+    assert.equal(report.attempts[0].dispatchedBodyBytes, Buffer.byteLength(sent[index]));
+    assert.ok(Object.isFrozen(report)); assert.ok(Object.isFrozen(report.attempts[0]));
+    assert.equal(JSON.stringify(report).includes("PRIVATE_"), false);
+    const request = wire.requests[index];
+    assert.equal(Object.hasOwn(request, "dispatchedBodyMode"), false, "diagnostics stay off the wire");
+    assert.equal(request.previous_response_id, expected === "delta" ? "mode-1" : undefined);
+    if (expected === "full") assert.deepEqual(request.input[0].content, [
+      { type: "input_text", text: "PRIVATE_PROMPT" },
+      { type: "input_image", image_url: "data:image/png;base64,PRIVATE_IMAGE_DATA", detail: "auto" },
+    ]);
+    else assert.equal(request.input.length, 1, "delta retains only the actual new user item");
+    next = { ...next, messages: [...next.messages, result, { role: "user", content: `next-${index}`, timestamp: index + 2 }] };
+  }
+  assert.equal(wire.sockets.length, 1, "mode measurement does not change warm connection ownership");
+  assert.deepEqual(original.messages[0].content[1], image);
+});
+
+test("cached rejection followed by pre-open failure keeps delta, absent, and full SSE modes separate", async (t) => {
+  const sent = [];
+  const wire = memorySocket((socket, number, _request, text) => {
+    sent.push(text);
+    socket.emit(number === 1 ? complete("fallback-baseline") : { type: "error", code: "previous_response_not_found" });
+  });
+  let connections = 0, fetched;
+  class ReconnectFailure extends EventTarget {
+    readyState = 0;
+    constructor() {
+      super();
+      if (++connections === 1) return new wire.WebSocket();
+      queueMicrotask(() => closeFrame(this, { code: 1011, reason: "server error" }));
+    }
+    send() { assert.fail("a pre-open failure cannot dispatch"); }
+    close() { this.readyState = 3; }
+  }
+  const a = await adapter(t, { WebSocket: ReconnectFailure, fetch: async (_url, init) => {
+    fetched = init.body; return response([complete("fallback-sse")]);
+  } });
+  const options = { transport: "auto", sessionId: "retry-fallback" };
+  const first = await a.stream(model, multibyteContext, options).result();
+  const next = { ...context, messages: [...multibyteContext.messages, first, { role: "user", content: "再試行😀", timestamp: 2 }] };
+  const result = await a.stream(model, next, options).result();
+  assert.equal(result.stopReason, "stop"); assert.equal(sent.length, 2); assert.equal(connections, 2);
+  const [delta, before, sse] = result.nativeTransport.attempts;
+  assert.equal(delta.outcome, "rejected"); assert.equal(delta.dispatchedBodyMode, "delta");
+  assert.equal(delta.dispatchedBodyBytes, Buffer.byteLength(sent[1]));
+  assert.equal(before.sent, false); assert.equal(before.dispatchedBodyBytes, 0);
+  assert.equal(Object.hasOwn(before, "dispatchedBodyMode"), false); assert.equal(before.websocketClose.code, 1011);
+  assert.equal(sse.transport, "sse"); assert.equal(sse.dispatchedBodyMode, "full");
+  assert.equal(sse.dispatchedBodyBytes, Buffer.byteLength(fetched));
+  assert.equal(result.nativeTransport.dispatchedBodyMode, "full");
+  assert.equal(new Set([delta.attemptId, before.attemptId, sse.attemptId]).size, 3);
+  assert.equal(JSON.parse(fetched).previous_response_id, undefined); assert.equal(JSON.parse(fetched).input.length, 2);
+  assertFullBodyBytes(result, Buffer.byteLength(fetched));
+});
+
+
+test("full admitted-body bytes grow behind tiny cached deltas without another serialization", async (t) => {
+  const sent = [], admittedBytes = [];
+  let payload, admissions = 0, dispatches = 0;
+  const wire = memorySocket((socket, number, request, text) => {
+    sent.push(text); assert.equal(Object.hasOwn(request, "fullBodyBytes"), false);
+    socket.emit(complete(`full-size-${number}`));
+  });
+  const a = await adapter(t, { WebSocket: wire.WebSocket });
+  const options = { transport: "websocket-cached", sessionId: "full-size", onPayload(body) {
+    payload = { ...body, extra: "PRIVATE_HOOK_漢😀" }; return payload;
+  } };
+  const image = { type: "image", mimeType: "image/png", data: "QUJD".repeat(32768) };
+  const original = { ...context, messages: [{ role: "user", content: [{ type: "text", text: "PRIVATE_PROMPT" }, image], timestamp: 1 }] };
+  const unchanged = copied(original), reports = [];
+  let next = original;
+  const stringify = JSON.stringify;
+  JSON.stringify = function (value, ...args) {
+    const text = stringify(value, ...args);
+    if (value === payload) { admissions++; admittedBytes.push(Buffer.byteLength(text)); }
+    if (value?.type === "response.create" && value.model === model.id) dispatches++;
+    return text;
+  };
+  try {
+    for (let index = 0; index < 5; index++) {
+      const result = await a.stream(model, next, options).result();
+      assert.equal(result.stopReason, "stop");
+      assertFullBodyBytes(result, admittedBytes[index]);
+      assert.equal(result.nativeTransport.dispatchedBodyBytes, Buffer.byteLength(sent[index]));
+      assert.equal(result.nativeTransport.dispatchedBodyMode, index ? "delta" : "full");
+      assert.ok(Object.isFrozen(result.nativeTransport)); assert.ok(Object.isFrozen(result.nativeTransport.attempts[0]));
+      assert.equal(JSON.stringify(result.nativeTransport).includes("PRIVATE_"), false);
+      if (index) {
+        assert.ok(result.nativeTransport.fullBodyBytes > reports[index - 1].fullBodyBytes);
+        assert.ok(result.nativeTransport.fullBodyBytes > 128 * 1024);
+        assert.ok(result.nativeTransport.dispatchedBodyBytes < 1024);
+        assert.equal(wire.requests[index].input.length, 1);
+      } else {
+        assert.ok(result.nativeTransport.dispatchedBodyBytes > result.nativeTransport.fullBodyBytes, "WS envelope is not admitted-body JSON");
+        assert.deepEqual(wire.requests[0].input[0].content[1], {
+          type: "input_image", image_url: `data:image/png;base64,${image.data}`, detail: "auto",
+        });
+      }
+      reports.push(result.nativeTransport);
+      const frozen = reports.map(report => stringify(report));
+      payload.extra = "mutated caller hook after admission";
+      next = { ...next, messages: [...next.messages, result, { role: "user", content: `追加-${index}-😀`, timestamp: index + 2 }] };
+      assert.deepEqual(reports.map(report => stringify(report)), frozen);
+    }
+    assert.equal(admissions, 5); assert.equal(dispatches, 5, "one admission serialization and one selected dispatch per request");
+    assert.equal(wire.sockets.length, 1); assert.deepEqual(original, unchanged);
+  } finally { JSON.stringify = stringify; }
+});
+
+for (const transport of ["sse", "websocket"]) test(`${transport}: full bytes use the post-hook admission serialization including JSON normalization`, async (t) => {
+  let payload, admitted, sent, admissions = 0, dispatches = 0, jsonHooks = 0;
+  const wire = memorySocket((socket, _number, _request, text) => { sent = text; socket.emit(complete("normalized-ws")); });
+  const a = await adapter(t, { WebSocket: wire.WebSocket, fetch: async (_url, init) => { sent = init.body; return response([complete("normalized-sse")]); } });
+  const stringify = JSON.stringify;
+  JSON.stringify = function (value, ...args) {
+    const text = stringify(value, ...args);
+    if (value === payload) { admissions++; admitted = text; }
+    if (value?.model === model.id && Array.isArray(value.input) && value !== payload) dispatches++;
+    return text;
+  };
+  let result;
+  try {
+    result = await a.stream(model, multibyteContext, { transport, onPayload(body) {
+      payload = { ...body, type: "PRIVATE_HOOK_TYPE", extra: "PRIVATE_漢😀", omitted: undefined,
+        toJSON() { jsonHooks++; return { ...this, normalized: "正規化é😀" }; } };
+      return payload;
+    } }).result();
+  } finally { JSON.stringify = stringify; }
+  assert.equal(result.stopReason, "stop"); assert.equal(admissions, 1); assert.equal(dispatches, 1); assert.equal(jsonHooks, 1);
+  assertFullBodyBytes(result, Buffer.byteLength(admitted)); assert.ok(Buffer.byteLength(admitted) > admitted.length);
+  assert.equal(result.nativeTransport.dispatchedBodyBytes, Buffer.byteLength(sent));
+  const body = JSON.parse(sent); assert.equal(body.normalized, "正規化é😀"); assert.equal(body.omitted, undefined);
+  assert.equal(Object.hasOwn(body, "fullBodyBytes"), false); assert.equal(JSON.stringify(result.nativeTransport).includes("PRIVATE_"), false);
+  if (transport === "sse") assert.equal(sent, admitted);
+  else {
+    assert.equal(body.type, "response.create"); assert.equal(JSON.parse(admitted).type, "PRIVATE_HOOK_TYPE");
+    assert.notEqual(result.nativeTransport.dispatchedBodyBytes, result.nativeTransport.fullBodyBytes);
+  }
+});
+
+test("invalid post-hook admission never invents full bytes or a transport attempt", async (t) => {
+  let sends = 0;
+  const a = await adapter(t, { fetch: async () => { sends++; assert.fail("invalid admission cannot dispatch"); } });
+  for (const [onPayload, expected] of [
+    [body => ({ ...body, stream: false }), "invalid_stream_payload"],
+    [body => ({ ...body, input: null }), "invalid_stream_payload"],
+    [body => ({ ...body, previous_response_id: "PRIVATE_PREVIOUS" }), "use_previousResponseId_option_with_full_context"],
+    [body => { body.circular = body; return body; }, "provider_request_failed"],
+  ]) {
+    const result = await a.stream(model, context, { transport: "sse", onPayload }).result();
+    assert.equal(result.stopReason, "error"); assert.equal(result.errorMessage, expected); assert.equal(result.nativeTransport, undefined);
+  }
+  assert.equal(sends, 0);
 });

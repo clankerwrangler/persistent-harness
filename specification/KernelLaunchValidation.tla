@@ -2,7 +2,7 @@
 \* Sources:
 \*   src/python-runtime.mjs sha256:f13ca412dfc1da25618787844020af39a65f0bf03bfd5fc465dc3d4229dbc129
 \*   src/python-runtime-errors.mjs sha256:98e700190c3f8498d3d6e11d04a1b52904313a59b10f9b04556091fe9482b4d2
-\*   src/kernel.mjs sha256:feb1bec8dc4e3d47d0f11956acacea17cdfac0d91fa853c785f0f050754d06e2
+\*   src/kernel.mjs sha256:5ba94932e66bd2da93bf39bb4026b3279aadf0dda1f7f235da2c9af41cfcfb3a
 \*   python-runtime/kernel.py sha256:d4aa99006f90d531b546686f6208dc48f77609f4faa00dabb91e7a81f80bc361
 \*   python-runtime/_persistent_harness.py sha256:c9bfdef5351102e88de2a6806b355ff3d6f4638516a7165d3bd779682042f9fb
 

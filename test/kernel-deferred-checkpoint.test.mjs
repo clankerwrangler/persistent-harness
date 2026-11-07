@@ -8,7 +8,8 @@ import { PythonRuntimeManager } from "../src/python-runtime.mjs";
 
 const packageRoot = path.resolve(import.meta.dirname, "..");
 const checkpoint = { version: 1, sessionId: "deferred-fixture", toolCallId: "first", actorGeneration: 1 };
-const pause = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+const realTimeout = globalThis.setTimeout;
+const pause = (ms) => new Promise((resolve) => realTimeout(resolve, ms));
 
 async function waitForFile(file) {
   const deadline = Date.now() + 120_000;
@@ -182,6 +183,9 @@ test("real deferred checkpoints preserve in-place mutations and recover their or
 
 test("interrupted execution cannot leave a kill timer attached to its deferred checkpoint", { timeout: 180000 }, async (t) => {
   const { root, kernel, release } = await fixture(t, { interruptTimeoutMs: 50 });
+  // Advance the grace only after the real SIGINT/done handshake. CPU scheduling
+  // before the result is a different concern from stale checkpoint ownership.
+  t.mock.timers.enable({ apis: ["setTimeout"] });
   const checkpointDone = Promise.withResolvers();
   const controller = new AbortController();
   const execution = kernel.execute("interrupted", {
@@ -195,6 +199,7 @@ test("interrupted execution cannot leave a kill timer attached to its deferred c
   assert.equal(result.errorType, "KeyboardInterrupt");
   assert.equal(result.namespaceCheckpointState, "pending");
   await waitForFile(path.join(root, "snapshot-started"));
+  t.mock.timers.tick(150);
   await pause(150);
   assert.equal(kernel.isRunning, true, "the old execution timer must not kill checkpoint work");
   assert.equal(kernel.snapshotStats.dirty, true);
@@ -202,5 +207,132 @@ test("interrupted execution cannot leave a kill timer attached to its deferred c
   const outcome = await checkpointDone.promise;
   assert.equal(outcome.ok, true, JSON.stringify(outcome));
   assert.deepEqual(outcome.namespaceCheckpoint, result.namespaceCheckpointAttempt);
+  await kernel.close({ snapshot: false });
+});
+
+
+test("a received done frame ends interrupt ownership before the output-drain yield", { timeout: 180000 }, async (t) => {
+  const { root, kernel, release } = await fixture(t, { interruptTimeoutMs: 50 });
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const yielded = Promise.withResolvers();
+  const resume = Promise.withResolvers();
+  const realImmediate = globalThis.setImmediate;
+  t.after(() => resume.resolve());
+  t.mock.method(globalThis, "setImmediate", (callback, ...args) => realImmediate(() => {
+    // execute reaches this yield only after receiving the matching done frame.
+    yielded.resolve();
+    void resume.promise.then(() => callback(...args));
+  }));
+  const controller = new AbortController();
+  const checkpointDone = Promise.withResolvers();
+  const execution = kernel.execute("interrupted", {
+    namespaceCheckpoint: checkpoint, checkpointInBackground: true, signal: controller.signal,
+    onCheckpoint: checkpointDone.resolve,
+  });
+  await waitForFile(path.join(root, "execution-started"));
+  controller.abort();
+  await yielded.promise;
+  try {
+    t.mock.timers.tick(50);
+    await pause(150);
+    assert.equal(kernel.isRunning, true, "a completed execution no longer owns a force-kill deadline");
+    assert.equal(kernel.interrupt(), false, "a late interrupt cannot target output drain or checkpointing");
+  } finally { resume.resolve(); }
+  const result = await execution;
+  assert.equal(result.ok, false);
+  assert.equal(result.errorType, "KeyboardInterrupt");
+  assert.equal(result.namespaceCheckpointState, "pending");
+  await waitForFile(path.join(root, "snapshot-started"));
+  await pause(150);
+  assert.equal(kernel.isRunning, true);
+  assert.equal(kernel.snapshotStats.dirty, true);
+  await release();
+  const outcome = await checkpointDone.promise;
+  assert.equal(outcome.ok, true, JSON.stringify(outcome));
+  assert.deepEqual(outcome.namespaceCheckpoint, result.namespaceCheckpointAttempt);
+  await kernel.close({ snapshot: false });
+});
+
+
+test("caller abort during output drain cancels a synchronous checkpoint before admission", { timeout: 180000 }, async (t) => {
+  const { root, kernel, release } = await fixture(t);
+  const yielded = Promise.withResolvers();
+  const resume = Promise.withResolvers();
+  const realImmediate = globalThis.setImmediate;
+  t.after(() => resume.resolve());
+  t.mock.method(globalThis, "setImmediate", (callback, ...args) => realImmediate(() => {
+    yielded.resolve();
+    void resume.promise.then(() => callback(...args));
+  }));
+  const controller = new AbortController();
+  const execution = kernel.execute("first", { namespaceCheckpoint: checkpoint, signal: controller.signal });
+  await yielded.promise;
+  try { controller.abort(); }
+  finally { resume.resolve(); }
+  await release();
+  const result = await execution;
+  assert.equal(result.ok, false);
+  assert.equal(result.executionOk, true);
+  assert.equal(result.errorType, "NamespaceCheckpointError");
+  assert.equal(result.namespaceCheckpoint, undefined);
+  assert.equal(kernel.snapshotStats.dirty, true);
+  assert.equal(kernel.snapshotStats.snapshotGeneration, 0);
+  await assert.rejects(access(path.join(root, "snapshot-started")), /ENOENT/);
+  assert.equal((await kernel.execute("second")).ok, true);
+  await kernel.close({ snapshot: false });
+});
+
+
+test("a stale execution timer cannot replace or fire a synchronous checkpoint timer", { timeout: 180000 }, async (t) => {
+  const { root, kernel } = await fixture(t, { interruptTimeoutMs: 50 });
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const setTimer = globalThis.setTimeout;
+  const callbacks = [];
+  t.mock.method(globalThis, "setTimeout", (callback, ms, ...args) => {
+    if (ms === 50) callbacks.push(callback);
+    return setTimer(callback, ms, ...args);
+  });
+  const controller = new AbortController();
+  const execution = kernel.execute("interrupted", { namespaceCheckpoint: checkpoint, signal: controller.signal });
+  await waitForFile(path.join(root, "execution-started"));
+  assert.equal(kernel.interrupt(), true);
+  assert.equal(callbacks.length, 1);
+  await waitForFile(path.join(root, "snapshot-started"));
+  callbacks[0]();
+  await pause(150);
+  assert.equal(kernel.isRunning, true, "the old execution timer does not own this checkpoint");
+  controller.abort();
+  assert.equal(callbacks.length, 2, "synchronous checkpoint cancellation owns a fresh grace timer");
+  callbacks[0]();
+  t.mock.timers.tick(49);
+  assert.equal(kernel.isRunning, true);
+  t.mock.timers.tick(1);
+  const result = await execution;
+  assert.equal(result.ok, false);
+  assert.equal(result.errorType, "NamespaceCheckpointError");
+  assert.equal(result.namespaceCheckpoint, undefined);
+  assert.equal(kernel.snapshotStats.dirty, true);
+  assert.equal(kernel.isRunning, false, "the fresh checkpoint timer still enforces its full grace");
+});
+
+
+test("caller abort handled during execution still saves the synchronous interrupted checkpoint", { timeout: 180000 }, async (t) => {
+  const { root, kernel, release } = await fixture(t, { interruptTimeoutMs: 50 });
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const controller = new AbortController();
+  const execution = kernel.execute("interrupted", { namespaceCheckpoint: checkpoint, signal: controller.signal });
+  await waitForFile(path.join(root, "execution-started"));
+  controller.abort();
+  await waitForFile(path.join(root, "snapshot-started"));
+  t.mock.timers.tick(150);
+  await pause(150);
+  assert.equal(kernel.isRunning, true);
+  assert.equal(kernel.snapshotStats.dirty, true);
+  await release();
+  const result = await execution;
+  assert.equal(result.ok, false);
+  assert.equal(result.errorType, "KeyboardInterrupt");
+  assert.deepEqual(result.namespaceCheckpoint, result.namespaceCheckpointAttempt);
+  assert.equal(kernel.snapshotStats.dirty, false);
   await kernel.close({ snapshot: false });
 });

@@ -877,6 +877,22 @@ test("failed incomplete suffix is omitted in both effective modes, not canonical
   }
 });
 
+test("full-body telemetry preserves incomplete-suffix proof only with an identical final-attempt summary", () => {
+  for (const mode of ["native", "ordinary"]) {
+    const entries = failedSuffix(), failed = entries[2].message;
+    failed.nativeTransport.fullBodyBytes = 131072; syncAttempt(failed);
+    const before = structuredClone(entries);
+    const view = project(entries, mode);
+    assert.deepEqual(view.messages, [entries[0].message, entries[1].message, { ...failed, content: [] }]);
+    assert(view.diagnostics.some(item => item.code === "UNADMITTED_CALL_OMITTED"));
+    assert.deepEqual(entries, before);
+    failed.nativeTransport.attempts[0].fullBodyBytes++;
+    const mismatched = project(entries, mode);
+    assert.deepEqual(mismatched.messages, entries.map(entry => entry.message));
+    assert.equal(mismatched.diagnostics.some(item => item.code === "UNADMITTED_CALL_OMITTED"), false);
+  }
+});
+
 const noProof = {
   "missing report": m => { delete m.nativeTransport; },
   "unknown version": m => { m.nativeTransport.version = 2; },

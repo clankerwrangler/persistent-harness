@@ -56,6 +56,9 @@ test("files.grep bounds lines and aggregate matches and skips binary and oversiz
     Buffer.concat([Buffer.from("MATCH"), Buffer.alloc(hostLimits.maxGrepFileBytes, 0x78)]),
   );
 
+  // This case checks content bounds with the real worker, not cold-worker latency.
+  // The catastrophic-regex case independently enforces the real 2000 ms deadline.
+  t.mock.timers.enable({ apis: ["setTimeout"] });
   const result = await handlers["files.grep"](
     { path: ".", pattern: "MATCH", limit: 1000 },
     context(),

@@ -386,6 +386,12 @@ export class PythonKernel {
       }
       if (["done", "snapshot_done", "shutdown_done", "memory_diagnostics_done", "cold_memory_done", "protocol_error"].includes(frame.type)) {
         this.#pending.delete(frame.id);
+        if (frame.type === "done" && this.#active?.id === frame.id) {
+          // The execution no longer owns interruption during output draining.
+          this.#active.interruptPhase = undefined;
+          if (this.#interruptTimer) clearTimeout(this.#interruptTimer);
+          this.#interruptTimer = undefined;
+        }
         if ((frame.type === "snapshot_done" && frame.ok === false) || frame.type === "protocol_error") {
           pending.reject(new Error(frame.error ?? "kernel command failed"));
         } else {
@@ -484,9 +490,14 @@ export class PythonKernel {
       const checkpoint = namespaceCheckpoint ? { ...namespaceCheckpoint, executionId: id } : undefined;
       const collector = new OutputCollector({ maxBytes: this.maxOutputBytes, onUpdate });
       const abortController = new AbortController();
-      const abort = () => this.interrupt();
+      const active = { id, collector, abortController, toolContext, interruptPhase: "execution" };
+      let drainAborted = false;
+      const abort = () => {
+        if (this.#active === active && active.interruptPhase === undefined) drainAborted = true;
+        this.interrupt();
+      };
       signal?.addEventListener("abort", abort, { once: true });
-      this.#active = { id, collector, abortController, toolContext };
+      this.#active = active;
       const startedAt = Date.now();
       try {
         const pending = new Promise((resolve, reject) => {
@@ -519,8 +530,6 @@ export class PythonKernel {
             // The tool result ends the caller's cancellation scope. The existing
             // FIFO still owns durability, including after the Agent settles.
             signal?.removeEventListener("abort", abort);
-            if (this.#interruptTimer) clearTimeout(this.#interruptTimer);
-            this.#interruptTimer = undefined;
             abortController.abort();
             collector.close();
             deferred.resolve(structuredClone({ ...result,
@@ -529,6 +538,12 @@ export class PythonKernel {
           }
           const checkpointStartedAt = Date.now();
           try {
+            if (!deferred) {
+              if (drainAborted) throw new Error("namespace checkpoint cancelled before admission");
+              // A synchronous snapshot retains caller cancellation under a fresh
+              // phase; an abort already handled by execution does not cancel it.
+              active.interruptPhase = "checkpoint";
+            }
             const snapshot = await this.#takeSnapshot();
             if (Object.entries(checkpoint).some(([key, value]) => snapshot.namespaceCheckpoint?.[key] !== value)) {
               throw new Error("snapshot identity does not match the originating execution");
@@ -597,15 +612,21 @@ export class PythonKernel {
   }
 
   interrupt() {
-    if (!this.#active || !this.#process) return false;
-    this.#active.abortController.abort();
-    const signaled = this.#process.kill("SIGINT");
+    const active = this.#active;
+    const child = this.#process;
+    const phase = active?.interruptPhase;
+    if (!phase || !child) return false;
+    active.abortController.abort();
+    const signaled = child.kill("SIGINT");
     if (signaled && !this.#interruptTimer) {
-      this.#interruptTimer = setTimeout(() => {
+      const timer = setTimeout(() => {
+        if (this.#interruptTimer !== timer) return;
         this.#interruptTimer = undefined;
-        if (this.#active && this.#process?.exitCode === null) this.#process.kill("SIGKILL");
+        if (this.#active === active && this.#process === child
+          && active.interruptPhase === phase && child.exitCode === null) child.kill("SIGKILL");
       }, this.interruptTimeoutMs);
-      this.#interruptTimer.unref();
+      this.#interruptTimer = timer;
+      timer.unref();
     }
     return signaled;
   }

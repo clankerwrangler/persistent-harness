@@ -150,8 +150,6 @@ async function shutdownFixture(t, { hang = false } = {}) {
     const child = spawn(process.execPath, ["--eval", 'process.stdout.write("ready"); setInterval(() => {}, 1000)'], {
       stdio: ["ignore", "pipe", "ignore"],
     });
-    await once(child.stdout, "data");
-    await writeFile("child-pid", String(child.pid));
     process.on("SIGTERM", async () => {
       if (process.env.FIXTURE_HANG === "1") return;
       // Represent extension cleanup that needs its child to finish a save.
@@ -170,6 +168,9 @@ async function shutdownFixture(t, { hang = false } = {}) {
       process.stdout.write(JSON.stringify({ type: "response", id: request.id, success: true,
         data: request.type === "get_state" ? { sessionId: "shutdown", isStreaming: false } : {} }) + "\n");
     });
+    await once(child.stdout, "data");
+    await writeFile("child-pid", String(child.pid));
+    process.stdout.write(JSON.stringify({ type: "fixture_child_ready", pid: child.pid }) + "\n");
   `;
   const actor = new PiSessionActor({
     command: process.execPath, args: ["--input-type=module", "--eval", rpcFixture], cwd: root,
@@ -177,8 +178,14 @@ async function shutdownFixture(t, { hang = false } = {}) {
     requestTimeoutMs: 2000, shutdownTimeoutMs: hang ? 150 : 2000,
   });
   t.after(() => actor.close());
+  // RPC admission does not wait for nested-child preparation. Shutdown does.
+  const childReady = new Promise((resolve) => actor.on("event", (frame) => {
+    if (frame.type === "fixture_child_ready") resolve(frame.pid);
+  }));
   await actor.start();
-  return { root, actor, childPid: Number(await readFile(path.join(root, "child-pid"), "utf8")) };
+  const childPid = await childReady;
+  assert.equal(Number(await readFile(path.join(root, "child-pid"), "utf8")), childPid);
+  return { root, actor, childPid };
 }
 
 test("actor shutdown gives extension children time to finish before Pi exits", {
@@ -257,7 +264,7 @@ test("stderr keeps its bounded UTF-8 prefix through tails and terminal errors", 
     await t.test(name, async (t) => {
       const actor = new PiSessionActor({
         command: process.execPath, args: ["--input-type=module", "--eval", fixture], cwd: os.tmpdir(), env: process.env,
-        requestTimeoutMs: 2000, shutdownTimeoutMs: 100,
+        requestTimeoutMs: 2000, startupTimeoutMs: 120_000, shutdownTimeoutMs: 100,
       });
       t.after(() => actor.close());
       assert.equal(actor.stderr, "");

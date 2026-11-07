@@ -1,6 +1,6 @@
 ------------------------ MODULE NativeTemplateOwnership ------------------------
 \* Sources:
-\*   src/native-provider.mjs sha256:17c6b4b941e9e6eb362674665b6a2bb63d7002c9f4157879fc297ad4b91bf8a4
+\*   src/native-provider.mjs sha256:576469fb04ff3b98dc41e061270feb00596f0c437792ffa2aaede677ad3c1519
 EXTENDS Naturals, TLC
 CONSTANT Fault
 (* idleScope names the lexical owner captured by the connection expiry timer. *)

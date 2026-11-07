@@ -1,7 +1,7 @@
 ------------------------- MODULE ConcurrencyFixtures -------------------------
 \* Sources:
 \*   test/files-atomic-cas.test.mjs sha256:14cd107f9dad82a42cb7b655d74843a57dae98624a15074b82bbd36048b32f0e
-\*   test/host-handlers-hardening.test.mjs sha256:6fb215ee94f83fe9883bc7cd9e262d02e3467cd97bb8e571be3b7ced73ba8554
+\*   test/host-handlers-hardening.test.mjs sha256:813374dcd42b8252b4f6da7dbe36091c4cc58aca5ef36a1b7f527f95a41b11f2
 \*   test/supervisor-transport.test.mjs sha256:8514910b8e3b371a8badd8bf69ffda8aebb0ed39271786808e1c0d253e8ca8cb
 \*   src/grep-worker.mjs sha256:1057c5db98f556974370579578d05ffff649b02d5ed6e7a826ca4283ec89d525
 

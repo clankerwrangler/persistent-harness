@@ -24,26 +24,44 @@ async function settled(client, id, text) {
 async function stockWorkerCase(t, { copyPrerequisites = cp, seed = process.env.PI_HARNESS_TEST_MANAGED_SEED } = {}) {
   let root, cwd, agentDir, server, supervisor, client, cronStore, admission;
   let pendingSetup = Promise.resolve();
+  const diagnosticStarted = performance.now();
+  const diagnosticPhases = new Set();
+  const diagnostic = phase => {
+    if (diagnosticPhases.has(phase)) return;
+    diagnosticPhases.add(phase);
+    t.diagnostic?.(`stock-worker phase=${phase} elapsedMs=${Math.round(performance.now() - diagnosticStarted)}`);
+  };
+  diagnostic("setup:start");
   const previous = { PI_CODING_AGENT_DIR: process.env.PI_CODING_AGENT_DIR, HARNESS_FAKE_BASE_URL: process.env.HARNESS_FAKE_BASE_URL, PI_HARNESS_PYTHON: process.env.PI_HARNESS_PYTHON };
   t.after(async () => {
+    diagnostic("cleanup:setup-drain:start");
     await pendingSetup.catch(() => {});
+    diagnostic("cleanup:stop:start");
     cronStore?.close(); await client?.stop(); await supervisor?.stop();
     server?.closeAllConnections();
     if (server?.listening) await new Promise(resolve => server.close(resolve));
     for (const [key, value] of Object.entries(previous)) if (value === undefined) delete process.env[key]; else process.env[key] = value;
+    diagnostic("cleanup:remove:start");
     if (root) await rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+    diagnostic("cleanup:done");
   });
   pendingSetup = (async () => {
     root = await mkdtemp(path.join(os.tmpdir(), "sw-")); cwd = path.join(root, "project"); agentDir = path.join(root, "agent");
     await mkdir(cwd); await mkdir(agentDir);
     // Exercise real provisioning/consent, using only cached prerequisites when running offline.
-    if (seed) await copyPrerequisites(seed, path.join(agentDir, "harness/kernel-runtime"), { recursive: true });
+    if (seed) {
+      diagnostic("seed-copy:start");
+      await copyPrerequisites(seed, path.join(agentDir, "harness/kernel-runtime"), { recursive: true });
+      diagnostic("seed-copy:done");
+    }
     t.signal.throwIfAborted();
+    diagnostic("setup:catalog:start");
     const catalog = await discoverSkillsFromDirectory(path.resolve("skills"));
     t.signal.throwIfAborted();
     return catalog;
   })();
   const catalog = await pendingSetup; assert.deepEqual(catalog.diagnostics, []);
+  diagnostic("setup:done");
   t.signal.throwIfAborted();
   const dependencies = [...new Set(catalog.skills.flatMap(skill => skill.python?.dependencies ?? []))].sort();
   const expectedRuntimeMessage = `Persistent Harness needs CPython ${PYTHON_VERSION} and:\n${[`ipython==${IPYTHON_VERSION}`, `dill==${DILL_VERSION}`, ...dependencies].join("\n")}`;
@@ -79,20 +97,27 @@ async function stockWorkerCase(t, { copyPrerequisites = cp, seed = process.env.P
     response.write(`data: ${JSON.stringify({ ...base, choices: [], usage: { prompt_tokens: 12, completion_tokens: 2, total_tokens: 14 } })}\n\n`);
     response.end("data: [DONE]\n\n");
   });
+  diagnostic("server:start");
   pendingSetup = new Promise(resolve => server.listen(0, "127.0.0.1", resolve));
   await pendingSetup; t.signal.throwIfAborted();
+  diagnostic("server:ready");
   process.env.HARNESS_FAKE_BASE_URL = `http://127.0.0.1:${server.address().port}/v1`;
   supervisor = new HarnessSupervisor({ socketPath: path.join(root, "s.sock"), databasePath: path.join(root, "harness.sqlite"), pidPath: path.join(root, "s.pid"),
     skillsPath: path.resolve("skills"), actorInactivityMs: 0, actorExtensionPaths: [path.resolve("test/fixtures/fake-provider.ts")] });
+  diagnostic("supervisor:start");
   pendingSetup = supervisor.start(); await pendingSetup; t.signal.throwIfAborted();
+  diagnostic("supervisor:ready");
   client = new HarnessClient({ requestTimeoutMs: 120_000, socketPath: path.join(root, "s.sock"), heartbeatMs: 0, requestTimeoutMs: 120_000 });
+  diagnostic("client:start");
   pendingSetup = client.start({ registrationType: "register_client", clientInstanceId: crypto.randomUUID() });
   await pendingSetup; t.signal.throwIfAborted();
+  diagnostic("client:ready");
   // This fixture alone consents to its expected disposable runtime installation.
   // Unexpected human requests fail the test; production approval remains untouched.
   client.on("event", frame => {
     const e = frame.data?.event;
     if (frame.event !== "actor_event" || e?.type !== "extension_ui_request" || !["confirm", "select", "input", "editor"].includes(e.method)) return;
+    diagnostic("consent:received");
     void (async () => {
       assert(admission && frame.data.sessionId === admission.sessionId);
       assert.equal(e.method, "confirm"); assert.equal(e.title, "Install managed Python runtime?");
@@ -111,22 +136,31 @@ async function stockWorkerCase(t, { copyPrerequisites = cp, seed = process.env.P
       // No conversation SSE clients exist; the first Python tool is still waiting.
       assert.equal(current.activity, "working");
       provisioningAnswered = true;
+      diagnostic("consent:reply:start");
       await client.request("respond_extension_ui", { sessionId: admission.sessionId, uiRequestId: e.id, confirmed: true });
+      diagnostic("provisioning:pending");
     })().catch(error => { provisioningError = error; });
   });
+  diagnostic("session:start");
   pendingSetup = client.request("create_root", { cwd, repositoryRoot: null, name: "stock-worker-smoke", provider: "harness-fake", model: "fake-model", thinkingLevel: null });
   ({ admission } = await pendingSetup); t.signal.throwIfAborted();
   cronStore = new CronStore(path.join(root, "harness.sqlite"));
   pendingSetup = client.request("subscribe_session", { selector: admission.sessionId });
   await pendingSetup; t.signal.throwIfAborted();
+  diagnostic("session:ready");
+  diagnostic("turn:initial:start");
   try { await settled(client, admission.sessionId, "SET_STATE"); } catch(error) { throw provisioningError ?? error; }
+  diagnostic("turn:initial:done");
   assert.equal(provisioningError, null); assert.equal(provisioningAnswered, true);
   assert((await stat(path.join(agentDir, "harness/kernel-runtime/environments"))).isDirectory());
+  diagnostic("provisioning:done");
   const attention = (await client.request("list_notifications")).notifications.find(n => n.source.key === "official-choice");
   assert(attention); assert.equal(attention.body, "Choose this exact target");
   assert.equal((await client.request("read_notification", { id: attention.id })).notification.state, "pending");
   const pid = supervisor.store.getSession(admission.sessionId).actorPid; assert(pid);
+  diagnostic("turn:read-state:start");
   await settled(client, admission.sessionId, "READ_STATE");
+  diagnostic("turn:read-state:done");
   assert.equal(supervisor.store.getSession(admission.sessionId).actorPid, pid);
   const { entries } = await client.request("get_actor_entries", { sessionId: admission.sessionId, since: null });
   const users = entries.filter(e => e.type === "message" && e.message.role === "user");
@@ -138,7 +172,10 @@ async function stockWorkerCase(t, { copyPrerequisites = cp, seed = process.env.P
   assert(messages.some(m => m.text === "STOCK_WORKER_DONE"));
   assert.doesNotMatch(JSON.stringify(messages), /toolResult|thinkingSignature/);
   assert.equal((await client.request("get_notification", { id: attention.id })).notification.state, "resolved");
+  diagnostic("turn:cron-run:start");
   await settled(client, admission.sessionId, "RUN_CRON");
+  diagnostic("turn:cron-run:done");
+  diagnostic("cron-feed:start");
   let delivered; const deadline = Date.now() + 120_000;
   while (Date.now() < deadline) {
     delivered = (await client.request("list_notifications")).notifications.find(n => n.kind === "cron");
@@ -150,6 +187,7 @@ async function stockWorkerCase(t, { copyPrerequisites = cp, seed = process.env.P
   assert.equal(run.status, "completed"); assert.equal(run.notificationDisposition, "deliver");
   assert.equal(cronStore.listRuns(run.jobId).length, 1);
   assert.equal(provisioningError, null);
+  diagnostic("cron-feed:done");
 }
 
 test("stock worker: real supervisor, external stock SDK, canonical input and persistent Python", { timeout: 360000 }, t => stockWorkerCase(t));
